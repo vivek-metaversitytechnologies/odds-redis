@@ -2,7 +2,7 @@ require("dotenv").config();
 const { createApp } = require("./app");
 const { checkSourceDbConnection, closeSourceDb } = require("./config/sourceDb");
 const { closeRedis } = require("./config/redis");
-const { startMarketSync, syncMarketSubscriptions } = require("./cron/marketSync");
+const { fetchActiveMarkets, startMarketSync, syncMarketSubscriptions } = require("./cron/marketSync");
 const websocket = require("./services/websocketService");
 const subscriptions = require("./services/marketSubscriptionService");
 const frontendSocket = require("./services/frontendSocketService");
@@ -19,6 +19,11 @@ async function startServer() {
   frontendSocket.attachFrontendSocket(server);
   logger.info("HTTP server started", { port: server.address().port });
   websocket.setResultHandler((marketIds) => subscriptions.unsubscribeResultMarkets(marketIds));
+  if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "true").toLowerCase() === "true") {
+    const markets = await fetchActiveMarkets();
+    const marketIds = markets.map((market) => market.marketid).filter(Boolean);
+    await subscriptions.reconcileProviderSubscriptions(marketIds);
+  }
   websocket.connectSocket();
   subscriptions.startSkippedRetries();
   const cronTask = startMarketSync();

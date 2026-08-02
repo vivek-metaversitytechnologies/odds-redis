@@ -117,6 +117,24 @@ async function unsubscribeEventMarkets(ids) {
   return { requested: marketIds, unsubscribed };
 }
 
+async function reconcileProviderSubscriptions(ids) {
+  const marketIds = [...new Set((ids || []).map(String).map((id) => id.trim()).filter(Boolean))];
+  if (!marketIds.length) return { requested: 0, unsubscribed: 0 };
+  const batchSize = Math.max(1, Number(process.env.MARKET_SUBSCRIPTION_BATCH_SIZE || 10));
+  let unsubscribed = 0;
+  for (let index = 0; index < marketIds.length; index += batchSize) {
+    const batch = marketIds.slice(index, index + batchSize);
+    await provider.unsubscribe(batch);
+    websocket.unsubscribeMarkets(batch);
+    batch.forEach((id) => skippedMarketIds.delete(id));
+    unsubscribed += batch.length;
+  }
+  logger.info("[MarketSubscription] startup reconciliation completed", {
+    requested: marketIds.length, unsubscribed,
+  });
+  return { requested: marketIds.length, unsubscribed };
+}
+
 function scheduleSkippedRetry() {
   if (retriesStopped || retryTimer || retryPromise || skippedMarketIds.size === 0) return;
   retryTimer = setTimeout(() => {
@@ -220,5 +238,5 @@ async function unsubscribeAll() {
 
 module.exports = { subscribeMarkets, unsubscribeAll, normalizeProviderAcknowledgement,
   getSkippedRetryStatus, startSkippedRetries, stopSkippedRetries, unsubscribeResultMarkets,
-  unsubscribeEventMarkets,
+  unsubscribeEventMarkets, reconcileProviderSubscriptions,
   isMarketSuppressed: (id) => completedMarketIds.has(String(id)) };
