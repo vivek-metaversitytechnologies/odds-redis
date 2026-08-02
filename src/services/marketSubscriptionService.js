@@ -75,7 +75,7 @@ async function flushResultUnsubscriptions() {
         await provider.unsubscribe(batch);
         websocket.unsubscribeMarkets(batch);
         batch.forEach((id) => pendingResultUnsubscriptions.delete(id));
-        logger.info("[MarketSubscription] result markets unsubscribed", { marketIds: batch });
+        logger.info("[MarketSubscription] markets unsubscribed", { marketIds: batch });
       } catch (error) {
         logger.warn("[MarketSubscription] result unsubscribe remains queued", {
           marketIds: batch, error: error.message,
@@ -97,6 +97,24 @@ async function unsubscribeResultMarkets(ids) {
     pendingResultUnsubscriptions.add(id);
   });
   return flushResultUnsubscriptions();
+}
+
+async function unsubscribeEventMarkets(ids) {
+  const marketIds = [...new Set((ids || []).map(String).map((id) => id.trim()).filter(Boolean))];
+  if (!marketIds.length) return { requested: [], unsubscribed: [] };
+  websocket.unsubscribeMarkets(marketIds);
+
+  const batchSize = Math.max(1, Number(process.env.MARKET_SUBSCRIPTION_BATCH_SIZE || 10));
+  const unsubscribed = [];
+  for (let index = 0; index < marketIds.length; index += batchSize) {
+    const batch = marketIds.slice(index, index + batchSize);
+    await provider.unsubscribe(batch);
+    unsubscribed.push(...batch);
+  }
+  logger.info("[MarketSubscription] event markets manually unsubscribed", {
+    count: unsubscribed.length, marketIds: unsubscribed,
+  });
+  return { requested: marketIds, unsubscribed };
 }
 
 function scheduleSkippedRetry() {
@@ -202,4 +220,5 @@ async function unsubscribeAll() {
 
 module.exports = { subscribeMarkets, unsubscribeAll, normalizeProviderAcknowledgement,
   getSkippedRetryStatus, startSkippedRetries, stopSkippedRetries, unsubscribeResultMarkets,
-  isMarketCompleted: (id) => completedMarketIds.has(String(id)) };
+  unsubscribeEventMarkets,
+  isMarketSuppressed: (id) => completedMarketIds.has(String(id)) };

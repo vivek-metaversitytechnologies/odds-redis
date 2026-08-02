@@ -34,7 +34,7 @@ async function syncMarketSubscriptions() {
     const discovered = [...new Set(markets.map((market) => market.marketid).filter(Boolean).map(String))];
     const socketSubscriptions = new Set(websocket.getSubscribedMarketIds());
     const pending = discovered.filter((id) => !socketSubscriptions.has(id)
-      && !subscriptions.isMarketCompleted(id));
+      && !subscriptions.isMarketSuppressed(id));
     const batchSize = Math.max(1, Number(process.env.MARKET_SUBSCRIPTION_BATCH_SIZE || 10));
     const accepted = []; const skipped = [];
     for (let index = 0; index < pending.length; index += batchSize) {

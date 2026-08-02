@@ -45,4 +45,32 @@ async function subscribeManual(req, res, next) {
   }
 }
 
-module.exports = { list, syncStatus, runSync, subscribeManual };
+async function unsubscribeEvent(req, res, next) {
+  try {
+    const eventId = String(req.params.eventId || "").trim();
+    if (!/^\d+$/.test(eventId) || Number(eventId) <= 0) {
+      const error = new Error("A positive numeric event ID is required"); error.statusCode = 400; throw error;
+    }
+    const [rows] = await getSourcePool().query(
+      "SELECT marketid FROM t_market WHERE eventid = ? AND marketid IS NOT NULL",
+      [eventId],
+    );
+    const marketIds = [...new Set(rows.map((row) => String(row.marketid).trim()).filter(Boolean))];
+    if (!marketIds.length) {
+      const error = new Error("No markets found for this event"); error.statusCode = 404; throw error;
+    }
+    recordMarketSyncActivity("event.unsubscribe.started", { eventId, markets: marketIds.length });
+    const result = await subscriptions.unsubscribeEventMarkets(marketIds);
+    recordMarketSyncActivity("event.unsubscribe.completed", {
+      eventId, markets: result.unsubscribed.length,
+    });
+    res.json({ status: "ok", data: { eventId, ...result } });
+  } catch (error) {
+    recordMarketSyncActivity("event.unsubscribe.failed", {
+      eventId: req.params.eventId, error: error.message,
+    });
+    next(error);
+  }
+}
+
+module.exports = { list, syncStatus, runSync, subscribeManual, unsubscribeEvent };

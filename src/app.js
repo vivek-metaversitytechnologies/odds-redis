@@ -17,7 +17,8 @@ function createApp() {
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
-        "upgrade-insecure-requests": process.env.NODE_ENV === "production" ? [] : null,
+        // TLS is terminated by Nginx. Forcing upgrades here breaks direct-port admin assets.
+        "upgrade-insecure-requests": null,
       },
     },
   }));

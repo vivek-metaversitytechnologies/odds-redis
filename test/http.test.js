@@ -20,3 +20,8 @@ test("legacy event write registration is not exposed", async () => {
   const response = await request(createApp()).post("/api/events/subscribe-all").send({ events: [] }).expect(404);
   assert.equal(response.body.message, "Route not found");
 });
+
+test("event unsubscribe requires a valid event ID", async () => {
+  const response = await request(createApp()).post("/api/source/events/not-an-id/unsubscribe").expect(400);
+  assert.equal(response.body.message, "A positive numeric event ID is required");
+});

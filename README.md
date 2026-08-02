@@ -56,6 +56,7 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - `GET /api/provider/markets/:marketId/runners`
 - `GET /api/events`
 - `GET /api/events/:id`
+- `POST /api/source/events/:eventId/unsubscribe` - pause and unsubscribe every market for an event
 
 Run tests with `npm test`.
 
@@ -63,3 +64,45 @@ For development with automatic restarts, run `npm run dev`.
 
 Frontends load their initial snapshot from the API, then join the Socket.IO room with
 `subscribe:event` and receive update-only `tick` messages.
+
+## Deployed server
+
+The backend currently runs on port `5673` at:
+
+```text
+http://143.110.249.169:5673
+```
+
+Use the health endpoint for deployment verification:
+
+```bash
+curl -s http://143.110.249.169:5673/health
+```
+
+Use the socket status endpoint to inspect provider activity:
+
+```bash
+curl -s http://143.110.249.169:5673/api/socket/status
+```
+
+A healthy response reports `sourceDatabase: "connected"`, Redis `connected: true`,
+provider WebSocket `connected: true`, and no increase in `failedTickCount`. The `/`
+route intentionally returns `404 Route not found`; this does not indicate a failed deployment.
+
+The public IP endpoint is for direct verification. Production frontend traffic should
+use an HTTPS domain through Nginx rather than public unencrypted port `5673`.
+
+## PM2
+
+Run exactly one backend instance because subscription and completed-market state is
+process-local:
+
+```bash
+npm install -g pm2@latest
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup
+```
+
+Run the command printed by `pm2 startup`, then use `pm2 status` and
+`pm2 logs odds-redis` to verify the process.
