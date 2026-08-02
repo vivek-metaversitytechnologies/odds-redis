@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Odds Admin · Markets</title>
+  <link rel="stylesheet" href="/admin/tailwind.css">
+</head>
+<body class="admin-shell">
+  <aside class="sidebar">
+    <a class="sidebar-brand" href="/admin/"><span>SE</span><div><strong>Odds Admin</strong><small>Operations</small></div></a>
+    <nav>
+      <a href="/admin/"><span>01</span>Overview</a>
+      <a href="/admin/competitions/"><span>02</span>Competitions</a>
+      <a href="/admin/events/"><span>03</span>Events</a>
+      <a class="active" href="/admin/markets/"><span>04</span>Markets</a>
+      <a href="/admin/subscriptions/"><span>05</span>Subscriptions</a>
+      <a href="/admin/results/"><span>06</span>Results</a>
+      <a href="/admin/redis/"><span>07</span>Redis</a>
+      <a href="/admin/logs/"><span>08</span>Logs</a>
+    </nav>
+  </aside>
+
+  <div class="admin-content">
+    <header class="admin-header">
+      <div><p>Provider discovery</p><h1>Markets</h1></div>
+      <div class="header-actions">
+        <label class="admin-key"><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"></label>
+        <button id="refresh" class="button primary">Refresh</button>
+      </div>
+    </header>
+
+    <main class="dashboard-main">
+      <section class="dashboard-alert" id="discoveryHealth">
+        <i class="state-dot"></i>
+        <div><strong id="discoveryTitle">Checking market discovery</strong><p id="discoveryDetail">Loading the latest state…</p></div>
+      </section>
+
+      <section class="dashboard-metrics overview-numbers">
+        <article><span>Regular markets</span><strong id="regularCount">—</strong><small>Stored in t_market</small></article>
+        <article><span>Session markets</span><strong id="fancyCount">—</strong><small>Stored in t_matchfancy</small></article>
+        <article><span>Active subscriptions</span><strong id="subscriptionCount">—</strong><small>Confirmed by provider</small></article>
+      </section>
+
+      <section class="dashboard-card mt-0">
+        <div class="card-head">
+          <div><p class="section-label">Market catalogue</p><h2 id="tableTitle">Regular markets</h2><span id="syncStatus">Loading discovery status…</span></div>
+          <button id="syncNow" class="button ghost">Run discovery</button>
+        </div>
+
+        <div class="catalogue-tabs" role="tablist" aria-label="Market type">
+          <button class="active" data-kind="regular" role="tab" aria-selected="true">Regular <span id="regularTabCount">0</span></button>
+          <button data-kind="fancy" role="tab" aria-selected="false">Session / Fancy <span id="fancyTabCount">0</span></button>
+        </div>
+
+        <div class="table-tools">
+          <input id="search" type="search" placeholder="Search market, event or ID">
+          <div class="filter-tabs">
+            <button class="active" data-sport="all">All</button>
+            <button data-sport="1">Football · 1</button>
+            <button data-sport="2">Tennis · 2</button>
+            <button data-sport="4">Cricket · 4</button>
+          </div>
+        </div>
+
+        <div class="dashboard-table-wrap bounded-table">
+          <table class="dashboard-table">
+            <thead id="tableHead"></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div id="summary" class="table-footer">Loading…</div>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script src="/admin/session.js" defer></script><script src="/admin/markets/app.js" defer></script>
+</body>
+</html>

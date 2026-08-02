@@ -1,6 +1,12 @@
 const redis = require("../config/redis");
 const dashboard = require("../services/dashboardService");
 
+function disableCaching(res) {
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.set("Pragma", "no-cache");
+  res.set("Expires", "0");
+}
+
 async function list(req, res, next) {
   try {
     const result = await redis.inspectTicks({ eventId: req.query.eventId, marketId: req.query.marketId,
@@ -19,6 +25,7 @@ async function market(req, res, next) {
 
 async function eventSnapshot(req, res, next) {
   try {
+    disableCaching(res);
     const eventId = String(req.params.eventId || "").trim();
     if (!/^\d+$/.test(eventId) || Number(eventId) <= 0) {
       return res.status(400).json({ status: "error", message: "A positive numeric event ID is required" });
@@ -30,6 +37,7 @@ async function eventSnapshot(req, res, next) {
 
 async function activeMatches(req, res, next) {
   try {
+    disableCaching(res);
     const sportId = Number(req.params.sportId);
     if (!Number.isInteger(sportId) || sportId <= 0) {
       return res.status(400).json({ status: false, message: "A positive numeric sport ID is required", data: [] });

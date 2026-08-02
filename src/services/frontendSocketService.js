@@ -2,6 +2,7 @@ const { Server } = require("socket.io");
 const redis = require("../config/redis");
 const providerSocket = require("./websocketService");
 const logger = require("../utils/logger");
+const { validSession } = require("../middleware/adminAuth");
 
 let io;
 
@@ -20,14 +21,15 @@ function allowedOrigins() {
   return configured.includes("*") ? true : configured;
 }
 
+function adminSocketAuthorized(socket) {
+  const required = process.env.INTERNAL_API_KEY;
+  return validSession(socket.request) || (required && socket.handshake.auth?.apiKey === required)
+    || (!required && !process.env.ADMIN_PANEL_PASSWORD);
+}
+
 function attachFrontendSocket(server) {
   io = new Server(server, { path: process.env.FRONTEND_SOCKET_PATH || "/socket.io",
     cors: { origin: allowedOrigins(), credentials: true } });
-  io.use((socket, next) => {
-    const required = process.env.INTERNAL_API_KEY;
-    if (!required || socket.handshake.auth?.apiKey === required) return next();
-    next(new Error("Unauthorized"));
-  });
   io.on("connection", (client) => {
     client.on("subscribe:event", async (eventId, acknowledge = () => {}) => {
       if (!validEventId(eventId)) return acknowledge({ status: "error", message: "Invalid event ID" });
@@ -46,6 +48,7 @@ function attachFrontendSocket(server) {
       if (validEventId(eventId)) void client.leave(`event:${eventId}`);
     });
     client.on("subscribe:admin:market", async (marketId, acknowledge = () => {}) => {
+      if (!adminSocketAuthorized(client)) return acknowledge({ status: "error", message: "Unauthorized" });
       const normalized = String(marketId || "").trim();
       if (!validMarketId(normalized)) return acknowledge({ status: "error", message: "Invalid market ID" });
       await client.join(`admin:market:${normalized}`);

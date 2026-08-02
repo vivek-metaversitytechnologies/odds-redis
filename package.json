@@ -6,9 +6,13 @@
   "type": "commonjs",
   "main": "src/server.js",
   "scripts": {
+    "build:admin-css": "tailwindcss -i ./public/admin/src/input.css -o ./public/admin/tailwind.css --minify",
+    "prestart": "npm run build:admin-css",
     "start": "node src/server.js",
+    "predev": "npm run build:admin-css",
     "dev": "nodemon src/server.js",
     "test": "node --test test/*.test.js",
+    "precheck": "npm run build:admin-css",
     "check": "node --check src/server.js && node --test test/*.test.js"
   },
   "engines": {
@@ -28,7 +32,10 @@
     "winston-daily-rotate-file": "^5.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "flowbite": "^4.0.2",
     "nodemon": "^3.1.14",
-    "supertest": "^7.2.2"
+    "supertest": "^7.2.2",
+    "tailwindcss": "^4.3.3"
   }
 }

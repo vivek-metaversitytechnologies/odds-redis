@@ -4,6 +4,7 @@ const Market = require("../models/Market");
 const subscriptions = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
+const cronConfig = require("../config/cron");
 
 const activeMarketIds = new Set();
 let running = false;
@@ -16,12 +17,26 @@ function record(type, details = {}) {
 }
 
 async function fetchActiveMarkets() {
-  const sportId = Number(process.env.MARKET_SPORT_ID || 4);
+  const sportIds = String(process.env.SPORT_IDS || "1,2,4").split(",")
+    .map((value) => Number(value.trim())).filter(Number.isFinite);
   const [rows] = await getSourcePool().query(
-    "SELECT * FROM t_market WHERE isactive = ? AND sportid = ? ORDER BY sportid ASC, id DESC",
-    [true, sportId],
+    `SELECT m.* FROM t_market m WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
+       AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+     ORDER BY sportid ASC, id DESC`,
+    [true, ...sportIds],
   );
-  return rows.map(Market.fromRow);
+  const [fancyRows] = await getSourcePool().query(
+    `SELECT f.*, f.fancyid AS marketid, f.name AS marketname,
+       COALESCE(f.sportid,e.sportid) AS sportid, e.eventname AS matchname,
+       e.open_date AS opendate, e.in_play AS inplay
+     FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
+     WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${sportIds.map(() => "?").join(",")})
+       AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
+       AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
+     ORDER BY sportid ASC, f.id DESC`,
+    [true, ...sportIds],
+  );
+  return [...rows, ...fancyRows].map(Market.fromRow);
 }
 
 async function syncMarketSubscriptions() {
@@ -76,7 +91,7 @@ function recordMarketSyncActivity(type, details) {
 }
 
 function startMarketSync() {
-  const expression = process.env.MARKET_SYNC_CRON || "*/5 * * * * *";
+  const { expression } = cronConfig.marketSubscription;
   const task = cron.schedule(expression, async () => {
     try {
       const result = await syncMarketSubscriptions();

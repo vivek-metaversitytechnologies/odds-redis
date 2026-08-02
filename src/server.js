@@ -3,11 +3,16 @@ const { createApp } = require("./app");
 const { checkSourceDbConnection, closeSourceDb } = require("./config/sourceDb");
 const { closeRedis } = require("./config/redis");
 const { fetchActiveMarkets, startMarketSync, syncMarketSubscriptions } = require("./cron/marketSync");
+const { startCompetitionSync, syncCompetitions } = require("./cron/competitionSync");
+const { startEventSync, syncEvents } = require("./cron/eventSync");
+const { startMarketDiscoverySync } = require("./cron/marketDiscoverySync");
+const { startResultSync, syncResults } = require("./cron/resultSync");
 const websocket = require("./services/websocketService");
 const subscriptions = require("./services/marketSubscriptionService");
 const frontendSocket = require("./services/frontendSocketService");
 const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
+const cronConfig = require("./config/cron");
 
 async function startServer() {
   await checkSourceDbConnection();
@@ -26,9 +31,24 @@ async function startServer() {
   }
   websocket.connectSocket();
   subscriptions.startSkippedRetries();
+  const competitionCronTask = startCompetitionSync();
+  const eventCronTask = startEventSync();
+  const marketDiscoveryCronTask = startMarketDiscoverySync();
+  const resultCronTask = startResultSync();
+  if (cronConfig.competition.runOnStart) {
+    syncCompetitions().then(() => {
+      if (cronConfig.event.runOnStart) return syncEvents();
+      return null;
+    }).catch(() => {});
+  } else if (cronConfig.event.runOnStart) {
+    syncEvents().catch(() => {});
+  }
   const cronTask = startMarketSync();
-  if (String(process.env.RUN_MARKET_SYNC_ON_START || "true").toLowerCase() === "true") {
+  if (cronConfig.marketSubscription.runOnStart) {
     syncMarketSubscriptions().catch((error) => logger.error("Initial market sync failed", { error: error.message }));
+  }
+  if (cronConfig.result.runOnStart) {
+    syncResults().catch((error) => logger.error("Initial result sync failed", { error: error.message }));
   }
 
   let shutdownPromise;
@@ -37,6 +57,10 @@ async function startServer() {
     shutdownPromise = (async () => {
       logger.info("Shutdown started", { signal });
       cronTask.stop();
+      competitionCronTask.stop();
+      eventCronTask.stop();
+      marketDiscoveryCronTask.stop();
+      resultCronTask.stop();
       await subscriptions.stopSkippedRetries();
       websocket.setResultHandler(null);
       await frontendSocket.closeFrontendSocket();

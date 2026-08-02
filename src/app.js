@@ -11,10 +11,12 @@ const logRoutes = require("./routes/logRoutes");
 const redisRoutes = require("./routes/redisRoutes");
 const redisController = require("./controllers/redisController");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
+const adminAuth = require("./middleware/adminAuth");
 
 function createApp() {
   const app = express();
   app.disable("x-powered-by");
+  app.disable("etag");
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
@@ -24,6 +26,24 @@ function createApp() {
     },
   }));
   app.use(express.json({ limit: "1mb" }));
+  app.post("/admin/auth/login", (req, res) => {
+    if (!process.env.ADMIN_PANEL_PASSWORD) {
+      return res.status(503).json({ status: "error", message: "ADMIN_PANEL_PASSWORD is not configured" });
+    }
+    if (!adminAuth.matchesPassword(req.body?.password)) {
+      return res.status(401).json({ status: "error", message: "Incorrect password" });
+    }
+    adminAuth.setSessionCookie(req, res);
+    return res.json({ status: "ok" });
+  });
+  app.post("/admin/auth/logout", (req, res) => {
+    adminAuth.clearSessionCookie(req, res); res.json({ status: "ok" });
+  });
+  app.get("/admin/auth/session", (req, res) => res.json({ status: "ok", authenticated: adminAuth.validSession(req) }));
+  app.use("/admin", (req, res, next) => {
+    if (req.path.startsWith("/login/") || req.path === "/tailwind.css") return next();
+    return adminAuth.requireAdminPage(req, res, next);
+  });
   app.use(express.static(path.join(__dirname, "../public")));
   app.use((req, res, next) => {
     const origins = String(process.env.FRONTEND_ORIGINS || "http://localhost:5173")
@@ -40,11 +60,8 @@ function createApp() {
     if (req.method === "OPTIONS") return res.sendStatus(204);
     next();
   });
-  app.use(["/api/events/subscriptions", "/api/provider", "/api/source", "/api/logs", "/api/redis"], (req, res, next) => {
-    const required = process.env.INTERNAL_API_KEY;
-    if (!required || req.get("x-internal-api-key") === required) return next();
-    res.status(401).json({ status: "error", message: "Unauthorized" });
-  });
+  app.use(["/api/events/subscriptions", "/api/provider", "/api/source", "/api/logs", "/api/redis"],
+    adminAuth.requireAdminApi);
   app.get("/health", async (req, res) => {
     try {
       await checkSourceDbConnection();

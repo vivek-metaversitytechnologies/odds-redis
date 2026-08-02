@@ -46,8 +46,18 @@ async function getRedisClient() {
 async function findMarket(mid) {
   if (marketCache.has(mid)) return marketCache.get(mid);
   const [rows] = await getSourcePool().query("SELECT * FROM t_market WHERE marketid = ? LIMIT 1", [mid]);
-  if (!rows.length) return null;
-  const market = Market.fromRow(rows[0]); marketCache.set(mid, market); return market;
+  if (rows.length) {
+    const market = Market.fromRow(rows[0]); marketCache.set(mid, market); return market;
+  }
+  const [fancies] = await getSourcePool().query(
+    `SELECT f.*, f.fancyid AS marketid, f.name AS marketname,
+       COALESCE(f.sportid,e.sportid) AS sportid, e.eventname AS matchname,
+       e.open_date AS opendate, e.in_play AS inplay
+     FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
+     WHERE f.fancyid=? LIMIT 1`, [mid],
+  );
+  if (!fancies.length) return null;
+  const market = Market.fromRow(fancies[0]); marketCache.set(mid, market); return market;
 }
 
 function status(value) {
@@ -62,6 +72,8 @@ function numberOr(value, fallback = null) {
 
 function booleanOr(value, fallback = null) {
   if (value == null) return fallback;
+  if (Buffer.isBuffer(value)) return value.length ? value[0] !== 0 : fallback;
+  if (Array.isArray(value?.data)) return value.data.length ? value.data[0] !== 0 : fallback;
   if (typeof value === "string") return !["0", "false", "no", "off"].includes(value.toLowerCase());
   return Boolean(value);
 }
@@ -105,7 +117,7 @@ function bookmakerPayload(item, market) {
     bs1: numberOr(runner?.bs ?? runner?.bs1, 0), l1: toss ? 95 : numberOr(runner?.l ?? runner?.l1),
     ls1: numberOr(runner?.ls ?? runner?.ls1, 0), gstatus: status(runner?.sb ?? runner?.gstatus),
     rem: runner?.rem ?? item.rem ?? null, display_message: market.displayMessage ?? null,
-    betlock: booleanOr(market.betlock, false), minBet: numberOr(market.minbet), maxBet: numberOr(market.maxbet),
+    betlock: numberOr(market.betDelay, 0), minBet: numberOr(market.minbet), maxBet: numberOr(market.maxbet),
     betDelay: numberOr(market.betDelay, 0), minBetRate: numberOr(market.minBetRate, 0),
     maxBetRate: numberOr(market.maxBetRate, 0), matchName, matchId: numberOr(market.eventid, market.eventid),
     isActive: booleanOr(market.isactive), isPause: booleanOr(market.isPause ?? market.fancypause, false),
@@ -142,9 +154,12 @@ function fancyPayload(item, market) {
   const runner = Array.isArray(item.r) ? item.r[0] || {} : {};
   return {
     mid: String(item.mid), sid: String(runner.rid ?? item.mid), nation: runner.na ?? item.na ?? market.marketname ?? null,
-    b1: numberOr(runner.b ?? runner.b1), l1: numberOr(runner.l ?? runner.l1),
-    bs1: numberOr(runner.bs ?? runner.bs1, 0), ls1: numberOr(runner.ls ?? runner.ls1, 0),
-    gstatus: status(runner.sb ?? item.sb), rem: runner.rem ?? item.rem ?? "", srno: String(item.srno ?? runner.srno ?? ""),
+    b1: numberOr(runner.b ?? runner.b1 ?? item.b ?? item.b1),
+    l1: numberOr(runner.l ?? runner.l1 ?? item.l ?? item.l1),
+    bs1: numberOr(runner.bs ?? runner.bs1 ?? item.br ?? item.bs ?? item.bs1, 0),
+    ls1: numberOr(runner.ls ?? runner.ls1 ?? item.lr ?? item.ls ?? item.ls1, 0),
+    gstatus: status(runner.sb ?? item.sb), rem: runner.rem ?? item.rem ?? item.res ?? "",
+    srno: String(item.srno ?? item.di ?? runner.srno ?? ""),
     gameover: booleanOr(item.go, false), s: booleanOr(item.s, true), maxBet: numberOr(market.maxbet),
     minBet: numberOr(market.minbet), betDelay: numberOr(market.betDelay, 0),
     matchId: numberOr(market.eventid, market.eventid), isActive: booleanOr(market.isactive),
@@ -160,7 +175,7 @@ function payloadGroup(item, market) {
   if (id.includes("OE") || name.includes("odd even")) return "OddEven";
   if (id.includes("F3")) return "Fancy3";
   if (id.includes("BB") || name.includes("ball by ball")) return "BallByBall";
-  if (id.includes("CASINO") || name.includes("casino")) return "CricketCasino";
+  if (id.includes("-CC") || id.includes("CASINO") || name.includes("casino")) return "CricketCasino";
   if (id.includes("F2") || id.includes("KD") || id.includes("MT")) return "Fancy2";
   return "Odds";
 }
@@ -173,6 +188,12 @@ function transformedTick(item, market) {
 }
 
 function entryMarketId(entry) { return String(entry.marketId ?? entry.mid ?? ""); }
+
+function shouldRemoveFromPayload(group, item) {
+  if (group === "Bookmaker") return booleanOr(item.go, false);
+  if (group === "Odds") return false;
+  return booleanOr(item.go, false) || !booleanOr(item.s, true);
+}
 
 async function loadRunnerNames(marketId) {
   const normalized = String(marketId);
@@ -231,9 +252,7 @@ async function writeTick(item) {
   const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === String(item.mid));
   if (group === "Odds") preserveRunnerNames(entries, previousEntries);
   payload[group] = payload[group].filter((entry) => entryMarketId(entry) !== String(item.mid));
-  const removeBookmaker = group === "Bookmaker"
-    && (item.go === true || String(item.go).toLowerCase() === "true" || Number(item.go) === 1);
-  if (!removeBookmaker) payload[group].push(...entries);
+  if (!shouldRemoveFromPayload(group, item)) payload[group].push(...entries);
   await redis.set(key, JSON.stringify(payload));
   eventPayloadCache.set(String(item.eid), payload);
   recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid); return payload;
@@ -311,6 +330,30 @@ async function getEventSnapshots(eventIds) {
   return snapshots;
 }
 
+async function removeMarket(eventId, marketId) {
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return false;
+  const eventKey = String(eventId); const normalizedMarketId = String(marketId);
+  const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`;
+  let payload = eventPayloadCache.get(eventKey);
+  if (!payload) {
+    const value = await redis.get(key);
+    if (!value) return false;
+    try { payload = JSON.parse(value); } catch { return false; }
+  }
+  let removed = false;
+  for (const group of PAYLOAD_GROUPS) {
+    if (!Array.isArray(payload[group])) payload[group] = [];
+    const filtered = payload[group].filter((entry) => entryMarketId(entry) !== normalizedMarketId);
+    if (filtered.length !== payload[group].length) removed = true;
+    payload[group] = filtered;
+  }
+  if (!removed) return false;
+  await redis.set(key, JSON.stringify(payload));
+  eventPayloadCache.set(eventKey, payload);
+  return true;
+}
+
 async function closeRedis() {
   if (!client?.isOpen) return; const current = client; client = undefined; await current.quit();
 }
@@ -319,6 +362,7 @@ function getRedisStatus() {
   return { configured: Boolean(redisUrl()), connected: Boolean(client?.isOpen), activityCount: tickActivity.size };
 }
 
-module.exports = { getRedisClient, writeTick, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
+module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
-  transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames };
+  transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
+  shouldRemoveFromPayload };

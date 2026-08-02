@@ -3,12 +3,16 @@ const test = require("node:test");
 const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
 const { bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, emptyEventPayload,
-  runnerPrices, preserveRunnerNames } = require("../src/config/redis");
+  runnerPrices, preserveRunnerNames, shouldRemoveFromPayload } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
 const { parseJsonObjects, containsMarketId } = require("../src/services/logReaderService");
 const { dashboardEntry } = require("../src/services/dashboardService");
+const { competitionRows } = require("../src/cron/competitionSync");
+const { eventRows } = require("../src/cron/eventSync");
+const { marketRows, oddsType } = require("../src/cron/marketDiscoverySync");
+const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
 
 test("database rows map to API event fields", () => {
   const event = Event.fromRow({ id: 1, eventid: 123, eventname: "A v B",
@@ -31,6 +35,49 @@ test("dashboard entries use first prices from the consolidated event snapshot", 
     team2Back: 2.1, team2Lay: 2.12, drawBack: 0, drawLay: 0, li: 7 });
 });
 
+test("competition sync keeps only supported sports", () => {
+  const rows = competitionRows({ data: [
+    { id: "10", name: "Football League", sportId: 1 },
+    { id: "20", name: "Tennis Tour", sportId: 2 },
+    { id: "30", name: "Cricket Cup", sportId: 4 },
+    { id: "40", name: "Unsupported", sportId: 7 },
+  ] });
+  assert.deepEqual(rows.map((row) => row.seriesId), [10, 20, 30]);
+});
+
+test("event sync keeps supported unfinished events", () => {
+  const rows = eventRows([{ data: [
+    { id: "10", name: "A v B", sportId: 1, leagueId: "5", startTime: "2026-08-02T12:00:00Z", gameOver: false },
+    { id: "20", name: "Finished", sportId: 2, leagueId: "6", startTime: "2026-08-02T13:00:00Z", gameOver: true },
+    { id: "30", name: "Unsupported", sportId: 7, leagueId: "7", startTime: "2026-08-02T14:00:00Z", gameOver: false },
+  ] }]);
+  assert.deepEqual(rows.map((row) => row.eventId), [10]);
+});
+
+test("market discovery maps active unfinished markets with Java betting defaults", () => {
+  const events = new Map([["10", { eventName: "A v B", openDate: new Date("2026-08-02T12:00:00Z"),
+    inPlay: false, seriesId: 5 }]]);
+  const rows = marketRows({ data: [
+    { id: "4.1-BM", eventId: "10", sportId: 4, name: "Bookmaker 0%Comm", type: "bookmaker", isActive: true },
+    { id: "1.2", eventId: "10", sportId: 4, name: "Match Odds", type: "match-odd", isActive: true },
+    { id: "1.3", eventId: "10", sportId: 4, name: "Closed", type: "match-odd", isActive: false },
+  ] }, events);
+  assert.deepEqual(rows.map((row) => [row.marketName, row.maxBet, row.betDelay]),
+    [["Bookmaker", 25000, 0], ["Match Odds", 1, 3]]);
+});
+
+test("session market suffixes map to Java fancy odds types", () => {
+  assert.equal(oddsType("4.1-F2"), "F2"); assert.equal(oddsType("4.1-OE"), "OE");
+  assert.equal(oddsType("4.1-F3"), "F3"); assert.equal(oddsType("4.1-BB"), "BB");
+});
+
+test("inactive sessions remain available for fancy-table deactivation", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const rows = marketRows({ data: [{ id: "4.1-F2", eventId: "10", sportId: 4,
+    name: "Over runs", type: "session", isActive: false, gameOver: false }] }, events);
+  assert.equal(rows.length, 1); assert.equal(rows[0].isActive, false);
+});
+
 test("market rows map betting configuration", () => {
   const market = Market.fromRow({ marketid: "1.2", betdelay: 3,
     minbetrate: "1.5", maxbetrate: "100", is_redis_updated: 0 });
@@ -50,6 +97,7 @@ test("bookmaker ticks are transformed for Redis", () => {
   assert.equal(output[0].gstatus, "SUSPENDED");
   assert.equal(output[1].gstatus, "Ball Running");
   assert.equal(output[0].matchId, 99);
+  assert.equal(output[0].betlock, 2);
 });
 
 test("toss bookmaker markets force odds to 95", () => {
@@ -98,13 +146,56 @@ test("compact socket odds fields become three-level price ladders", () => {
 test("fancy ticks and market suffixes map to frontend groups", () => {
   const output = fancyPayload({ mid: "4.1-F2", na: "Six over runs", go: true,
     r: [{ b: 42, l: 40, bs: 100, ls: 100 }] },
-  { eventid: 99, marketname: "Six over runs", minbet: 100, maxbet: 100000 });
+  { eventid: 99, marketname: "Six over runs", minbet: 100, maxbet: 100000,
+    isactive: Buffer.from([0]), isShow: Buffer.from([1]) });
   assert.equal(payloadGroup({ mid: "4.1-F2" }, {}), "Fancy2");
   assert.equal(payloadGroup({ mid: "4.1-OE" }, {}), "OddEven");
   assert.equal(output.gameover, true);
   assert.equal(output.nation, "Six over runs");
   assert.deepEqual(Object.keys(emptyEventPayload()),
     ["Odds", "Bookmaker", "Fancy2", "OddEven", "Fancy3", "CricketCasino", "BallByBall"]);
+});
+
+test("top-level provider fancy fields map to frontend prices and sizes", () => {
+  const output = fancyPayload({ mid: "4.1-F2", na: "Six over runs",
+    b: 75, l: 73, br: 100, lr: 120, res: "Ball Running", di: 6, s: true },
+  { eventid: 99, marketname: "Six over runs", minbet: 100, maxbet: 100000,
+    isactive: Buffer.from([0]), isShow: Buffer.from([1]) });
+  assert.equal(output.b1, 75);
+  assert.equal(output.l1, 73);
+  assert.equal(output.bs1, 100);
+  assert.equal(output.ls1, 120);
+  assert.equal(output.rem, "Ball Running");
+  assert.equal(output.srno, "6");
+  assert.equal(output.isActive, false);
+  assert.equal(output.isShow, true);
+  assert.equal(payloadGroup({ mid: "4.1-CC" }, {}), "CricketCasino");
+});
+
+test("unavailable fancy ticks are removed without treating them as result ticks", () => {
+  assert.equal(shouldRemoveFromPayload("Fancy2", { s: false, go: false }), true);
+  assert.equal(shouldRemoveFromPayload("Fancy2", { s: true, go: false }), false);
+  assert.equal(isResultTick({ mid: "4.1-F2", s: false, go: false }), false);
+});
+
+test("provider settlement rows retain winner and exceptional result semantics", () => {
+  assert.deepEqual(resultRows({ data: [
+    { marketId: "1.2", marketType: "match-odd", result: "123", isTie: false, isAbandoned: false },
+    { marketId: "4.1-F2", marketType: "session", result: "Abandoned", isAbandoned: true },
+  ] }), [
+    { marketId: "1.2", marketType: "match-odd", result: "123", isTie: false, isAbandoned: false },
+    { marketId: "4.1-F2", marketType: "session", result: "Abandoned", isTie: false, isAbandoned: true },
+  ]);
+});
+
+test("fancy settlement values follow the Java-compatible contract", () => {
+  assert.equal(fancyResultValue("4.1-F2", "87"), 87);
+  assert.equal(fancyResultValue("4.1-BB", "12"), 12);
+  assert.equal(fancyResultValue("4.1-CC", "4"), 4);
+  assert.equal(fancyResultValue("4.1-OE", "Back"), 1);
+  assert.equal(fancyResultValue("4.1-OE", "Lay"), 0);
+  assert.equal(fancyResultValue("4.1-F3", "back"), 1);
+  assert.equal(fancyResultValue("4.1-F2", "Abandoned"), null);
 });
 
 test("provider acknowledgement excludes skipped markets from subscription", () => {

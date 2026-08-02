@@ -1,0 +1,182 @@
+@import "tailwindcss";
+@plugin "flowbite/plugin";
+@source "../../../node_modules/flowbite";
+@source "../**/*.html";
+@source "../**/*.js";
+
+@theme {
+  --color-brand-50: #eef3ff;
+  --color-brand-100: #dce7ff;
+  --color-brand-500: #4f7cff;
+  --color-brand-600: #416bd8;
+  --color-brand-700: #3158b8;
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { @apply m-0 bg-gray-50 font-sans text-gray-900 antialiased; }
+  button { @apply cursor-pointer; }
+  button:disabled { @apply cursor-not-allowed opacity-50; }
+}
+
+@layer components {
+  .login-shell { @apply grid min-h-screen place-items-center bg-gray-950 p-5; }
+  .login-card { @apply grid w-full max-w-md gap-7 rounded-2xl border border-gray-200 bg-white p-8 shadow-2xl; }
+  .login-brand { @apply flex items-center gap-3; }
+  .login-brand > span { @apply grid size-11 place-items-center rounded-lg bg-brand-600 font-black text-white; }
+  .login-brand strong, .login-brand small { @apply block; }
+  .login-brand small { @apply text-xs text-gray-400; }
+  .login-card h1 { @apply my-1 text-3xl font-bold tracking-tight; }
+  .login-card > div > p:last-child { @apply m-0 text-sm text-gray-500; }
+  .login-card form { @apply grid gap-4; }
+  .login-card form label span { @apply mb-1 block text-xs font-semibold text-gray-600; }
+  .login-card form input { @apply w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2.5 outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100; }
+  .login-error { @apply m-0 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700; }
+  .admin-shell { --sidebar: 15rem; }
+  .sidebar { @apply fixed inset-y-0 left-0 z-40 flex w-60 flex-col bg-gray-900 px-4 py-6 text-gray-200; }
+  .sidebar-brand { @apply flex items-center gap-3 px-2 pb-6 text-white no-underline; }
+  .sidebar-brand > span { @apply grid size-10 place-items-center rounded-lg bg-brand-500 font-black; }
+  .sidebar-brand strong, .sidebar-brand small { @apply block; }
+  .sidebar-brand small { @apply text-xs text-gray-400; }
+  .sidebar nav { @apply grid gap-1; }
+  .sidebar nav a { @apply flex items-center gap-3 rounded-lg px-3 py-2.5 font-semibold text-gray-400 no-underline transition hover:bg-gray-800 hover:text-white; }
+  .sidebar nav a span { @apply font-mono text-[10px] text-gray-600; }
+  .sidebar nav a.active { @apply bg-gray-800 text-white; }
+  .sidebar nav a.active span { @apply text-brand-500; }
+  .sidebar-foot { @apply mt-auto flex items-center gap-2 border-t border-gray-700 px-2 pt-4 text-xs text-gray-400; }
+  .sidebar-foot i { @apply size-2 rounded-full bg-gray-500; }
+  .sidebar-foot i.online { @apply bg-emerald-400 ring-4 ring-emerald-950; }
+  .sidebar-foot i.offline { @apply bg-red-400; }
+  .admin-content { @apply min-h-screen; margin-left: var(--sidebar); }
+  .admin-header { @apply flex min-h-24 items-center justify-between border-b border-gray-200 bg-white px-8 py-5; }
+  .admin-header p, .admin-header h1 { @apply m-0; }
+  .admin-header p { @apply text-[11px] font-bold uppercase tracking-widest text-gray-400; }
+  .admin-header h1 { @apply mt-0.5 text-2xl font-bold tracking-tight; }
+  .header-actions { @apply flex items-end gap-2; }
+  .admin-key { @apply hidden; }
+  .admin-key span { @apply mb-1 block text-[10px] font-semibold uppercase text-gray-400; }
+  .admin-key input, .table-tools input { @apply rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100; }
+  .admin-key input { @apply w-36; }
+  .button { @apply inline-flex items-center justify-center rounded-lg px-4 py-2 text-sm font-semibold transition focus:outline-none focus:ring-4; }
+  .button.primary { @apply border border-brand-600 bg-brand-600 text-white hover:bg-brand-700 focus:ring-brand-100; }
+  .button.ghost { @apply border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus:ring-gray-100; }
+  .button.danger { @apply border border-red-600 bg-red-600 text-white hover:bg-red-700 focus:ring-red-100; }
+  .dashboard-main { @apply mx-auto w-[min(74rem,calc(100%-3rem))] py-6; }
+  .dashboard-alert { @apply flex items-start gap-3 rounded-lg border border-gray-200 bg-white p-4; }
+  .dashboard-alert .state-dot { @apply mt-1.5 size-2.5 shrink-0 rounded-full bg-gray-400; }
+  .dashboard-alert strong { @apply block text-sm font-semibold; }
+  .dashboard-alert p { @apply mt-0.5 text-xs text-gray-500; }
+  .dashboard-alert.healthy { @apply border-emerald-200 bg-emerald-50; }
+  .dashboard-alert.healthy .state-dot { @apply bg-emerald-500; }
+  .dashboard-alert.warning { @apply border-amber-200 bg-amber-50; }
+  .dashboard-alert.warning .state-dot { @apply bg-amber-500; }
+  .dashboard-alert.error { @apply border-red-200 bg-red-50; }
+  .dashboard-alert.error .state-dot { @apply bg-red-500; }
+  .dashboard-metrics { @apply my-4 grid grid-cols-5 gap-3; }
+  .dashboard-metrics.overview-numbers { @apply grid-cols-3; }
+  .dashboard-metrics article { @apply rounded-lg border border-gray-200 bg-white p-5 shadow-sm; }
+  .dashboard-metrics span { @apply block text-[10px] font-bold uppercase tracking-widest text-gray-400; }
+  .dashboard-metrics strong { @apply my-1 block text-2xl font-bold; }
+  .dashboard-metrics small { @apply block text-xs text-gray-400; }
+  .dashboard-card { @apply mt-4 rounded-xl border border-gray-200 bg-white p-6 shadow-sm; }
+  .card-head { @apply mb-5 flex items-start justify-between gap-5; }
+  .card-head h2, .card-head p { @apply m-0; }
+  .card-head h2 { @apply text-xl font-bold; }
+  .card-head > div > span { @apply text-xs text-gray-500; }
+  .section-label { @apply text-[10px] font-extrabold uppercase tracking-widest text-brand-600; }
+  .text-link { @apply text-sm font-semibold text-brand-600 no-underline hover:text-brand-700; }
+  .table-tools { @apply mb-3 flex items-center justify-between gap-3; }
+  .table-tools input { @apply min-w-64; }
+  .filter-tabs { @apply inline-flex rounded-lg bg-gray-100 p-1; }
+  .filter-tabs button { @apply rounded-md border-0 bg-transparent px-3 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-900; }
+  .filter-tabs button.active { @apply bg-white text-brand-700 shadow-sm; }
+  .catalogue-tabs { @apply mb-4 flex gap-6 border-b border-gray-200; }
+  .catalogue-tabs button { @apply -mb-px flex items-center gap-2 border-0 border-b-2 border-transparent bg-transparent px-1 pb-3 text-sm font-semibold text-gray-500; }
+  .catalogue-tabs button:hover { @apply text-gray-900; }
+  .catalogue-tabs button.active { @apply border-brand-600 text-brand-700; }
+  .catalogue-tabs button span { @apply rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-500; }
+  .catalogue-tabs button.active span { @apply bg-brand-50 text-brand-700; }
+  .operation-grid { @apply grid grid-cols-3 gap-4; }
+  .operation-grid label { @apply flex flex-col items-start gap-2 rounded-lg border border-gray-200 bg-gray-50 p-4; }
+  .operation-grid label > span { @apply text-xs font-bold text-gray-700; }
+  .operation-grid input, .operation-grid textarea { @apply w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100; }
+  .operation-grid textarea { @apply resize-y font-mono text-xs; }
+  .operation-grid p { @apply m-0 text-xs text-gray-500; }
+  .operation-grid .danger-operation { @apply border-red-200 bg-red-50; }
+  .compact-check { @apply flex items-center gap-2 text-xs text-gray-500; }
+  .inspect-button { @apply border-0 bg-transparent p-0 text-xs font-semibold text-brand-600 hover:text-brand-700; }
+  .detail-drawer header { @apply mb-4 flex items-start justify-between; }
+  .detail-drawer h2, .detail-drawer p { @apply m-0; }
+  .detail-drawer header div div { @apply mt-1 text-xs text-gray-500; }
+  .detail-drawer pre { @apply m-0 max-h-[34rem] overflow-auto rounded-lg bg-gray-950 p-5 font-mono text-xs leading-relaxed text-gray-200 whitespace-pre-wrap; }
+  .log-toolbar { @apply grid grid-cols-[auto_10rem_minmax(15rem,1fr)_auto] items-center gap-2; }
+  .log-toolbar select, .log-toolbar input, .raw-market-toolbar input { @apply w-full rounded-lg border border-gray-300 bg-gray-50 px-3 py-2 text-sm outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-100; }
+  .raw-market-toolbar { @apply grid grid-cols-[minmax(16rem,1fr)_auto] gap-2; }
+  .log-meta { @apply my-3 flex justify-between gap-4 text-[11px] text-gray-400; }
+  .log-entries { @apply mt-3 grid gap-2; }
+  .log-entry { @apply overflow-hidden rounded-lg border border-gray-200 bg-white; }
+  .log-entry.error { @apply border-l-4 border-l-red-500; }
+  .log-entry.warn { @apply border-l-4 border-l-amber-500; }
+  .raw-entry { @apply border-l-4 border-l-brand-600; }
+  .log-entry summary { @apply grid cursor-pointer list-none grid-cols-[5rem_5.5rem_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3; }
+  .log-time { @apply font-mono text-[11px] text-gray-400; }
+  .source-pill, .level-pill { @apply inline-flex w-fit rounded-full px-2 py-1 text-[9px] font-extrabold uppercase tracking-wider; }
+  .source-pill.provider { @apply bg-brand-50 text-brand-700; }
+  .source-pill.application { @apply bg-emerald-50 text-emerald-700; }
+  .level-pill.info { @apply bg-gray-100 text-gray-500; }
+  .level-pill.warn { @apply bg-amber-100 text-amber-700; }
+  .level-pill.error { @apply bg-red-100 text-red-700; }
+  .log-title { @apply min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm font-semibold text-gray-800; }
+  .log-detail { @apply m-0 max-h-[28rem] overflow-auto border-t border-gray-800 bg-gray-950 p-4 font-mono text-[11px] leading-relaxed text-gray-200 whitespace-pre-wrap; overflow-wrap: anywhere; }
+  .empty-logs, .empty-raw { @apply rounded-lg border border-dashed border-gray-300 p-10 text-center text-sm text-gray-400; }
+  .dashboard-table-wrap { @apply overflow-x-auto rounded-lg border border-gray-200; }
+  .dashboard-table-wrap.bounded-table { @apply max-h-[32rem] overflow-auto; }
+  .bounded-table .dashboard-table th { @apply sticky top-0 z-10; }
+  .dashboard-table { @apply w-full border-collapse text-left text-sm text-gray-600; }
+  .dashboard-table th { @apply bg-gray-50 px-4 py-3 text-[10px] font-bold uppercase tracking-wider text-gray-500; }
+  .dashboard-table td { @apply whitespace-nowrap border-t border-gray-100 px-4 py-3; }
+  .dashboard-table tbody tr { @apply hover:bg-gray-50; }
+  .dashboard-table code { @apply font-mono text-xs text-gray-600; }
+  .primary-cell strong { @apply font-semibold text-gray-900; }
+  .sport-badge { @apply inline-flex rounded-full bg-brand-50 px-2.5 py-1 text-[10px] font-bold text-brand-700; }
+  .status-badge { @apply inline-flex rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-bold text-emerald-700; }
+  .status-badge.inactive { @apply bg-gray-100 text-gray-500; }
+  .table-footer { @apply px-0.5 pt-2.5 text-xs text-gray-500; }
+  .row-actions { @apply flex items-center gap-3; }
+  .row-actions a { @apply font-semibold text-brand-600 no-underline hover:text-brand-700; }
+  .row-actions button { @apply border-0 bg-transparent p-0 font-semibold text-red-600 hover:text-red-700; }
+  .empty-row { @apply py-12! text-center! text-gray-400; }
+  .dashboard-updated { @apply mt-4 text-right text-xs text-gray-400; }
+  .toast { @apply pointer-events-none fixed right-6 bottom-6 z-50 max-w-sm translate-y-2 rounded-lg bg-gray-900 px-4 py-3 text-sm text-white opacity-0 shadow-lg transition; }
+  .toast.show { @apply translate-y-0 opacity-100; }
+}
+
+@media (max-width: 900px) {
+  .admin-shell { --sidebar: 4.5rem; }
+  .sidebar { @apply w-[4.5rem]; }
+  .sidebar-brand div, .sidebar nav a:not(.active) { font-size: 0; }
+  .sidebar nav a { @apply justify-center; }
+  .sidebar nav a span { @apply text-[10px]; }
+  .sidebar-foot span { @apply hidden; }
+  .dashboard-metrics { @apply grid-cols-2; }
+  .table-tools { @apply flex-col items-stretch; }
+  .table-tools input { @apply min-w-0; }
+  .operation-grid { @apply grid-cols-1; }
+  .log-toolbar { @apply grid-cols-2; }
+}
+
+@media (max-width: 620px) {
+  .admin-shell { --sidebar: 0px; }
+  .sidebar { @apply hidden; }
+  .admin-header { @apply px-4 py-4; }
+  .admin-key { @apply hidden; }
+  .dashboard-main { @apply w-[calc(100%-1.5rem)] py-4; }
+  .dashboard-card { @apply p-4; }
+  .filter-tabs { @apply overflow-x-auto; }
+  .card-head { @apply flex-col items-stretch; }
+  .log-toolbar, .raw-market-toolbar { @apply grid-cols-1; }
+  .log-entry summary { @apply grid-cols-[4.5rem_1fr]; }
+  .log-title { @apply col-span-full; }
+}

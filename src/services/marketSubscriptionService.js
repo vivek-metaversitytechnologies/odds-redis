@@ -234,6 +234,9 @@ async function stopSkippedRetries() {
 async function unsubscribeAll() {
   const ids = websocket.getSubscribedMarketIds();
   if (ids.length) await provider.unsubscribe(ids);
+  websocket.unsubscribeMarkets(ids);
+  ids.forEach((id) => skippedMarketIds.delete(id));
+  return { requested: ids.length, unsubscribed: ids };
 }
 
 module.exports = { subscribeMarkets, unsubscribeAll, normalizeProviderAcknowledgement,

@@ -1,0 +1,251 @@
+{
+  "info": {
+    "_postman_id": "90a4356d-92c9-4d15-a3ee-b584e131fce8",
+    "name": "Sports Provider",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "16204972"
+  },
+  "item": [
+    {
+      "name": "get sports",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{url}}/v1/sports",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "sports"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "get competitions",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{url}}/v1/competitions",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "competitions"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "get events",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{url}}/v1/events?si=4&today=1",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "events"
+          ],
+          "query": [
+            {
+              "key": "si",
+              "value": "4"
+            },
+            {
+              "key": "today",
+              "value": "1"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "get markets",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"eids\": [\r\n    27996014, 35024761,  35039429, 35039905,\r\n    35052892, 35056273,  35056559, 35058533,\r\n    35058603, 35058624,  35058656, 35058657,\r\n    35058658, 35058682,  35058687, 35058757,\r\n    35058827, 35059046,  35060738, 35060743,\r\n    35060748, 35060753,  35061577, 35061583,\r\n    35061678, 35061680,  35061750, 35061845,\r\n    35061922, 35061923,  35061939, 35061940,\r\n    35062065, 35062071,  35062076, 35062248,\r\n    35062252, 35062320,  35062327, 35062329,\r\n    35062342, 35062351,  35063198, 35063201,\r\n    35063211, 35063949, 127276988\r\n  ],\r\n    \"type\": [\r\n        \"session\",\r\n        \"bookmaker\",\r\n        \"tied-match\",\r\n        \"match-odd\"\r\n    ],\r\n    \"matchType\": \"Live\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{url}}/v1/markets",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "markets"
+          ],
+          "query": [
+            {
+              "key": "eid",
+              "value": "34804951",
+              "disabled": true
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "match runers",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{url}}/v1/markets/1.251451018/runners",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "markets",
+            "1.251451018",
+            "runners"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "subscribe market",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"data\" : [\"1.251405691\"]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{url}}/v1/subscribe",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "subscribe"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "unsubscribe market",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"data\" : [\"4.234969771258-F2\"]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{url}}/v1/unsubscribe",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "unsubscribe"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "get result",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"mids\": [\r\n        \"4.176007940756-F2\"\r\n    ]\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{url}}/v1/markets/results",
+          "host": [
+            "{{url}}"
+          ],
+          "path": [
+            "v1",
+            "markets",
+            "results"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "tenantA_key",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "url",
+      "value": "",
+      "disabled": true
+    }
+  ]
+}
