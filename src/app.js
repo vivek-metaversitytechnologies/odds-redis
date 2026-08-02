@@ -9,6 +9,7 @@ const providerRoutes = require("./routes/providerRoutes");
 const sourceMarketRoutes = require("./routes/sourceMarketRoutes");
 const logRoutes = require("./routes/logRoutes");
 const redisRoutes = require("./routes/redisRoutes");
+const redisController = require("./controllers/redisController");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 
 function createApp() {
@@ -59,6 +60,8 @@ function createApp() {
     } catch (error) { next(error); }
   });
   app.get("/api/socket/status", (req, res) => res.json({ status: "ok", data: websocket.getSocketStatus() }));
+  app.get("/betfair_api/fancy/:eventId", redisController.eventSnapshot);
+  app.get("/betfair_api/active_match/:sportId", redisController.activeMatches);
   app.use("/api/provider", providerRoutes);
   app.use("/api/source", sourceMarketRoutes);
   app.use("/api/logs", logRoutes);

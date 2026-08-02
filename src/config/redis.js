@@ -256,6 +256,20 @@ async function getEventSnapshot(eventId) {
   try { return JSON.parse(value); } catch { return emptyEventPayload(); }
 }
 
+async function getEventSnapshots(eventIds) {
+  const redis = await getRedisClient();
+  const ids = [...new Set((eventIds || []).map(String).filter(Boolean))];
+  const snapshots = new Map();
+  if (!redis?.isOpen || !ids.length) return snapshots;
+  const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+  const values = await redis.mGet(ids.map((eventId) => `${prefix}${eventId}`));
+  ids.forEach((eventId, index) => {
+    try { snapshots.set(eventId, values[index] ? JSON.parse(values[index]) : null); }
+    catch { snapshots.set(eventId, null); }
+  });
+  return snapshots;
+}
+
 async function closeRedis() {
   if (!client?.isOpen) return; const current = client; client = undefined; await current.quit();
 }
@@ -264,6 +278,6 @@ function getRedisStatus() {
   return { configured: Boolean(redisUrl()), connected: Boolean(client?.isOpen), activityCount: tickActivity.size };
 }
 
-module.exports = { getRedisClient, writeTick, getEventSnapshot, inspectTicks, getTickActivity,
+module.exports = { getRedisClient, writeTick, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
   transformedTick, emptyEventPayload };

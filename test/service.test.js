@@ -8,6 +8,7 @@ const { normalizeProviderAcknowledgement } = require("../src/services/marketSubs
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
 const { parseJsonObjects, containsMarketId } = require("../src/services/logReaderService");
+const { dashboardEntry } = require("../src/services/dashboardService");
 
 test("database rows map to API event fields", () => {
   const event = Event.fromRow({ id: 1, eventid: 123, eventname: "A v B",
@@ -17,6 +18,17 @@ test("database rows map to API event fields", () => {
   assert.equal(event.isActive, 1);
   assert.equal(event.betLock, 0);
   assert.equal(event.channelId, "cricket");
+});
+
+test("dashboard entries use first prices from the consolidated event snapshot", () => {
+  const entry = dashboardEntry({ eventid: 99, marketid: "1.2", marketname: "Match Odds",
+    matchname: "A v B", opendate: "2026-08-02 12:00:00", inplay: 1,
+    seriesid: 7, isBookmaker: 1, isGoal: 0 }, { Odds: [{ marketId: "1.2", inplay: true,
+    runners: [{ ex: { availableToBack: [{ price: 1.8 }], availableToLay: [{ price: 1.82 }] } },
+      { ex: { availableToBack: [{ price: 2.1 }], availableToLay: [{ price: 2.12 }] } }] }] });
+  assert.deepEqual(entry, { matchName: "A v B", openDate: "2026-08-02 12:00:00", inPlay: true,
+    matchId: 99, marketId: "1.2", bm: true, GM: false, team1Back: 1.8, team1Lay: 1.82,
+    team2Back: 2.1, team2Lay: 2.12, drawBack: 0, drawLay: 0, li: 7 });
 });
 
 test("market rows map betting configuration", () => {

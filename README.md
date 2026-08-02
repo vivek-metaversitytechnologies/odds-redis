@@ -56,7 +56,9 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - `GET /api/provider/markets/:marketId/runners`
 - `GET /api/events`
 - `GET /api/events/:id`
-- `POST /api/source/events/:eventId/unsubscribe` - pause and unsubscribe every market for an event
+- `POST /api/source/events/:eventId/unsubscribe` - temporarily unsubscribe every market for an event
+- `GET /betfair_api/fancy/:eventId` - public frontend-ready Redis snapshot (legacy-compatible shape)
+- `GET /betfair_api/active_match/:sportId` - public active-event dashboard list (legacy-compatible shape)
 
 Run tests with `npm test`.
 

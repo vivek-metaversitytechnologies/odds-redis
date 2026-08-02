@@ -25,3 +25,14 @@ test("event unsubscribe requires a valid event ID", async () => {
   const response = await request(createApp()).post("/api/source/events/not-an-id/unsubscribe").expect(400);
   assert.equal(response.body.message, "A positive numeric event ID is required");
 });
+
+test("frontend snapshot endpoint validates the event ID", async () => {
+  const response = await request(createApp()).get("/betfair_api/fancy/not-an-id").expect(400);
+  assert.equal(response.body.message, "A positive numeric event ID is required");
+});
+
+test("active-match endpoint validates the sport ID", async () => {
+  const response = await request(createApp()).get("/betfair_api/active_match/not-an-id").expect(400);
+  assert.equal(response.body.status, false);
+  assert.deepEqual(response.body.data, []);
+});
