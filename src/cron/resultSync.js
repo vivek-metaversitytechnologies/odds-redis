@@ -3,6 +3,7 @@ const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
 const redis = require("../config/redis");
 const subscriptions = require("../services/marketSubscriptionService");
+const frontendSocket = require("../services/frontendSocketService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 
@@ -157,7 +158,7 @@ async function persistFancyResult(connection, fancy, result) {
 async function applyResults(results, candidates) {
   const regularById = new Map(candidates.markets.map((market) => [String(market.marketid), market]));
   const fancyById = new Map(candidates.fancies.map((market) => [String(market.marketid), market]));
-  const settled = [];
+  const settled = []; const changedEventIds = new Set();
   for (const result of results) {
     const market = regularById.get(result.marketId) || fancyById.get(result.marketId);
     if (!market) continue;
@@ -179,7 +180,14 @@ async function applyResults(results, candidates) {
     catch (error) {
       logger.error("[ResultSync] Redis cleanup failed", { marketId: result.marketId, error: error.message });
     }
+    changedEventIds.add(String(market.eventid));
     settled.push(result.marketId);
+  }
+  for (const eventId of changedEventIds) {
+    try { await frontendSocket.publishEventSnapshot(eventId); }
+    catch (error) {
+      logger.error("[ResultSync] frontend snapshot publish failed", { eventId, error: error.message });
+    }
   }
   if (settled.length) await subscriptions.unsubscribeResultMarkets(settled);
   return settled;

@@ -76,6 +76,16 @@ function attachFrontendSocket(server) {
   return io;
 }
 
+async function publishEventSnapshot(eventId) {
+  if (!io || !validEventId(eventId)) return false;
+  const snapshot = await redis.getEventSnapshot(eventId);
+  io.to(`event:${eventId}`).emit("tick", {
+    eventId: String(eventId), data: snapshot, receivedAt: new Date().toISOString(),
+    snapshot: true,
+  });
+  return true;
+}
+
 async function closeFrontendSocket() {
   if (!io) return;
   const current = io; io = undefined;
@@ -84,4 +94,4 @@ async function closeFrontendSocket() {
   await new Promise((resolve) => current.close(resolve));
 }
 
-module.exports = { attachFrontendSocket, closeFrontendSocket };
+module.exports = { attachFrontendSocket, publishEventSnapshot, closeFrontendSocket };
