@@ -1,11 +1,14 @@
 const { createClient } = require("redis");
 const { getSourcePool } = require("./sourceDb");
 const Market = require("../models/Market");
+const provider = require("../services/providerApi");
 const logger = require("../utils/logger");
 
 let client;
 let connecting;
 const marketCache = new Map();
+const runnerNameCache = new Map();
+const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
 const tickActivity = new Map();
 
@@ -110,7 +113,7 @@ function bookmakerPayload(item, market) {
   }));
 }
 
-function oddsPayload(item, market) {
+function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item.mid))) {
   const runners = Array.isArray(item.r) ? item.r : [];
   return {
     matchName: marketMatchName(item, market), marketId: String(item.mid), status: item.s ?? item.status ?? "",
@@ -126,7 +129,8 @@ function oddsPayload(item, market) {
       adjustmentFactor: numberOr(runner?.af ?? runner?.adjustmentFactor, 0),
       ex: { availableToBack: runnerPrices(runner, "back"),
         availableToLay: runnerPrices(runner, "lay") },
-      name: runner?.na ?? runner?.name ?? null,
+      name: runner?.na ?? runner?.name
+        ?? runnerNames?.get(String(runner?.rid ?? runner?.selectionId)) ?? null,
     })),
     marketDataDelayed: booleanOr(item.delay ?? item.marketDataDelayed, false), Name: market.marketname || item.na || "",
     isActive: booleanOr(market.isactive), isPause: booleanOr(market.isPause ?? market.fancypause, false),
@@ -170,6 +174,40 @@ function transformedTick(item, market) {
 
 function entryMarketId(entry) { return String(entry.marketId ?? entry.mid ?? ""); }
 
+async function loadRunnerNames(marketId) {
+  const normalized = String(marketId);
+  if (runnerNameCache.has(normalized)) return runnerNameCache.get(normalized);
+  if (runnerNameLoads.has(normalized)) return runnerNameLoads.get(normalized);
+  const loading = provider.runners(normalized).then((response) => {
+    const rows = Array.isArray(response?.data) ? response.data
+      : Array.isArray(response) ? response : [];
+    const names = new Map(rows.map((runner) => [
+      String(runner?.runnerId ?? runner?.selectionId ?? runner?.id), runner?.name ?? runner?.nation ?? null,
+    ]).filter(([selectionId, name]) => selectionId && name));
+    runnerNameCache.set(normalized, names);
+    return names;
+  }).catch((error) => {
+    logger.warn("[Redis] runner metadata lookup failed", { marketId: normalized, error: error.message });
+    return new Map();
+  }).finally(() => runnerNameLoads.delete(normalized));
+  runnerNameLoads.set(normalized, loading);
+  return loading;
+}
+
+async function primeRunnerNames(marketIds) {
+  await Promise.allSettled((marketIds || []).map((marketId) => loadRunnerNames(marketId)));
+}
+
+function preserveRunnerNames(entries, previousEntries) {
+  const previous = new Map((previousEntries || []).flatMap((entry) =>
+    (entry.runners || []).map((runner) => [String(runner.selectionId), runner.name])));
+  for (const entry of entries) {
+    for (const runner of entry.runners || []) {
+      if (!runner.name) runner.name = previous.get(String(runner.selectionId)) ?? null;
+    }
+  }
+}
+
 async function writeTick(item) {
   if (!item || typeof item !== "object" || !item.eid || !item.mid) return false;
   const redis = await getRedisClient(); if (!redis?.isOpen) return false;
@@ -188,7 +226,10 @@ async function writeTick(item) {
       } catch { /* Replace malformed legacy data with a valid event payload. */ }
     }
   }
+  if (payloadGroup(item, market) === "Odds") await loadRunnerNames(item.mid);
   const { group, entries } = transformedTick(item, market);
+  const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === String(item.mid));
+  if (group === "Odds") preserveRunnerNames(entries, previousEntries);
   payload[group] = payload[group].filter((entry) => entryMarketId(entry) !== String(item.mid));
   const removeBookmaker = group === "Bookmaker"
     && (item.go === true || String(item.go).toLowerCase() === "true" || Number(item.go) === 1);
@@ -280,4 +321,4 @@ function getRedisStatus() {
 
 module.exports = { getRedisClient, writeTick, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
-  transformedTick, emptyEventPayload };
+  transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames };

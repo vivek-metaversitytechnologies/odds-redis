@@ -3,7 +3,7 @@ const test = require("node:test");
 const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
 const { bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, emptyEventPayload,
-  runnerPrices } = require("../src/config/redis");
+  runnerPrices, preserveRunnerNames } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
@@ -69,6 +69,19 @@ test("standard odds ticks match the frontend Redis contract", () => {
   assert.equal(output.matchName, "India v Australia");
   assert.deepEqual(output.runners[0].ex.availableToBack, [{ price: 1.8, size: 250 }]);
   assert.deepEqual(output.runners[0].ex.availableToLay, [{ price: 1.82, size: 300 }]);
+});
+
+test("odds runners use cached provider selection names", () => {
+  const names = new Map([["11", "India"], ["12", "Australia"]]);
+  const output = oddsPayload({ mid: "1.2", r: [{ rid: 11 }, { rid: 12 }] },
+    { marketname: "Match Odds" }, names);
+  assert.deepEqual(output.runners.map((runner) => runner.name), ["India", "Australia"]);
+});
+
+test("existing runner names survive unnamed socket updates", () => {
+  const entries = [{ runners: [{ selectionId: 11, name: null }] }];
+  preserveRunnerNames(entries, [{ runners: [{ selectionId: 11, name: "India" }] }]);
+  assert.equal(entries[0].runners[0].name, "India");
 });
 
 test("compact socket odds fields become three-level price ladders", () => {
