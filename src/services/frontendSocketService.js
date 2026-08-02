@@ -16,7 +16,7 @@ function validMarketId(value) {
 
 function allowedOrigins() {
   const configured = String(process.env.FRONTEND_ORIGINS || "http://localhost:5173")
-    .split(",").map((value) => value.trim()).filter(Boolean);
+    .split(",").map((value) => value.trim().replace(/\/$/, "")).filter(Boolean);
   return configured.includes("*") ? true : configured;
 }
 

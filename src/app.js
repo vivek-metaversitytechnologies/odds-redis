@@ -27,7 +27,9 @@ function createApp() {
   app.use(express.static(path.join(__dirname, "../public")));
   app.use((req, res, next) => {
     const origins = String(process.env.FRONTEND_ORIGINS || "http://localhost:5173")
-      .split(",").map((value) => value.trim());
+      .split(",")
+      .map((value) => value.trim().replace(/\/$/, ""))
+      .filter(Boolean);
     const origin = req.headers.origin;
     if (origin && (origins.includes("*") || origins.includes(origin))) {
       res.setHeader("Access-Control-Allow-Origin", origins.includes("*") ? "*" : origin);
