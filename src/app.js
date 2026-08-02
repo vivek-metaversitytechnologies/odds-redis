@@ -34,7 +34,7 @@ function createApp() {
     if (origin && (origins.includes("*") || origins.includes(origin))) {
       res.setHeader("Access-Control-Allow-Origin", origins.includes("*") ? "*" : origin);
       res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Internal-API-Key");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-API-Key");
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     }
     if (req.method === "OPTIONS") return res.sendStatus(204);
