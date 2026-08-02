@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subscription Monitor · Sports Exchange</title>
+    <meta name="description" content="Monitor provider subscriptions and incoming odds ticks">
+    <link rel="stylesheet" href="/admin/styles.css">
+    <link rel="stylesheet" href="/admin/subscriptions/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">SE</span><div><strong>Subscription Monitor</strong><small>Provider feed operations</small></div></div>
+      <div class="top-actions"><a class="button ghost" href="/admin/redis/">Redis data</a><a class="button ghost" href="/admin/source-markets/">Source markets</a><a class="button ghost" href="/admin/logs/">Logs</a><a class="button ghost" href="/admin/">Dashboard</a><label class="key-field"><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"></label><button id="refresh" class="button success">Refresh</button></div>
+    </header>
+    <main>
+      <section class="monitor-hero">
+        <div><p class="eyebrow">Live market pipeline</p><h1>From subscribed to receiving.</h1><p class="lede">See which source markets the vendor accepted and whether fresh odds are actually reaching the service.</p></div>
+        <div class="status-grid" aria-live="polite">
+          <article><span>Source markets</span><strong id="total">0</strong></article>
+          <article><span>Subscribed</span><strong id="subscribed">0</strong></article>
+          <article><span>Receiving</span><strong id="receiving">0</strong></article>
+          <article><span>Needs attention</span><strong id="attention">0</strong></article>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><div><p class="step-label">Market-level status</p><h2>Subscription feed</h2><p id="socketSummary">Checking vendor connection…</p></div><label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked> Refresh every 5 seconds</label></div>
+        <div class="toolbar"><input id="search" type="search" placeholder="Search event, market or ID"><select id="providerFilter" aria-label="Provider status"><option value="all">All provider states</option><option value="subscribed">Subscribed</option><option value="pending">Pending</option><option value="skipped">Skipped</option></select><select id="freshnessFilter" aria-label="Freshness"><option value="all">All freshness states</option><option value="healthy">Healthy</option><option value="delayed">Delayed</option><option value="stale">Stale</option><option value="waiting">Waiting for first tick</option></select></div>
+        <div id="summary" class="table-status">Loading subscriptions…</div>
+        <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Event</th><th>Market</th><th>Provider</th><th>Feed</th><th>Last tick</th><th>Ticks</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/admin/subscriptions/app.js"></script>
+  </body>
+</html>

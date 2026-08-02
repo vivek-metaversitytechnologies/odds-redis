@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Source Markets · Sports Exchange</title>
+    <meta name="description" content="Active Cricket markets from the subscription source database">
+    <link rel="stylesheet" href="/admin/styles.css">
+    <link rel="stylesheet" href="/admin/source-markets/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">SE</span><div><strong>Source Markets</strong><small>Read-only subscription catalogue</small></div></div>
+      <div class="top-actions">
+        <a class="button ghost" href="/admin/subscriptions/">Subscriptions</a>
+        <a class="button ghost" href="/admin/redis/">Redis data</a>
+        <a class="button ghost" href="/admin/logs/">Logs</a>
+        <a class="button ghost" href="/admin/">Stream Control</a>
+        <label class="key-field"><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"></label>
+        <button id="refresh" class="button success">Refresh data</button>
+      </div>
+    </header>
+    <main>
+      <section class="source-hero">
+        <div><p class="eyebrow">Source database · Sport 4</p><h1>Active cricket markets.</h1><p class="lede">The exact records used by the automatic subscription sync, ordered newest first.</p></div>
+        <div class="status-grid" aria-live="polite">
+          <article><span>Connection</span><strong id="connection">Checking</strong></article>
+          <article><span>Markets</span><strong id="marketTotal">0</strong></article>
+          <article><span>Events</span><strong id="eventTotal">0</strong></article>
+          <article><span>Bookmakers</span><strong id="bookmakerTotal">0</strong></article>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="step-label">Live source view</p><h2>t_market records</h2><p>Filtered by <code>isactive = 1</code> and <code>sportid = 4</code>.</p></div>
+          <label class="search-field"><span>Search</span><input id="search" type="search" placeholder="Event, market or ID"></label>
+        </div>
+        <div id="tableStatus" class="table-status">Loading source markets…</div>
+        <div id="eventGroups" class="event-groups"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="step-label">Subscription operations</p><h2>Control the market feed</h2><p>Run the full database sync or test a single provider market independently.</p></div>
+          <a class="button ghost logs-link" href="/admin/logs/?source=provider">Open provider logs</a>
+        </div>
+        <div class="operation-grid">
+          <article class="operation-card automatic-card"><span class="operation-number">01</span><div><p>Database-driven</p><h3>Automatic source sync</h3><span>Read all 67 active Cricket markets and subscribe them in provider-safe batches.</span></div><button id="runSync" class="button primary">Run sync now</button></article>
+          <article class="operation-card test-card"><span class="operation-number">02</span><div><p>One-off diagnostic</p><h3>Test a market ID</h3><span>Subscribe directly without changing the automatic database list.</span></div><div class="test-control"><input id="manualMarketId" type="text" value="1.260546286" aria-label="Market ID"><button id="subscribeManual" class="button success">Subscribe ID</button></div></article>
+        </div>
+        <div class="sync-summary">
+          <div><span>Status</span><strong id="syncStatus">Waiting</strong></div>
+          <div><span>Subscribed</span><strong id="syncSubscribed">0</strong></div>
+          <div><span>Last completed</span><strong id="syncCompleted">Never</strong></div>
+          <div><span>Last error</span><strong id="syncError">None</strong></div>
+        </div>
+        <div class="activity-heading"><strong>Recent sync activity</strong><span>Updates every 10 seconds</span></div>
+        <div id="syncLog" class="activity-log"><div class="log-line muted"><time>—</time><span>No sync activity recorded.</span></div></div>
+      </section>
+    </main>
+    <div id="toast" class="toast" role="status"></div>
+    <script src="/admin/source-markets/app.js"></script>
+  </body>
+</html>

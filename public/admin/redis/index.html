@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Redis Data · Sports Exchange</title><meta name="description" content="Inspect live odds stored in Redis"><link rel="stylesheet" href="/admin/styles.css"><link rel="stylesheet" href="/admin/redis/styles.css"></head>
+  <body>
+    <header class="topbar"><div class="brand"><span class="brand-mark">SE</span><div><strong>Redis Events</strong><small>Frontend-ready payloads</small></div></div><div class="top-actions"><a class="button ghost" href="/admin/subscriptions/">Subscriptions</a><a class="button ghost" href="/admin/">Overview</a><label class="key-field"><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"></label><button id="refresh" class="button success">Refresh</button></div></header>
+    <main>
+      <section class="redis-hero"><div><p class="eyebrow">Event payloads</p><h1>What the frontend receives.</h1><p class="lede">Each row is one event key containing grouped odds, bookmaker, and fancy data.</p></div><div class="status-grid"><article><span>Redis</span><strong id="connection">Checking</strong></article><article><span>Event keys</span><strong id="keyTotal">0</strong></article><article><span>Events</span><strong id="eventTotal">0</strong></article><article><span>Fresh events</span><strong id="freshTotal">0</strong></article></div></section>
+      <section class="panel"><div class="panel-heading"><div><p class="step-label">Bounded key browser</p><h2>Live market values</h2><p>Up to 250 matching odds keys are loaded at a time.</p></div></div>
+        <div class="toolbar"><input id="eventId" type="search" placeholder="Filter event ID"><button id="apply" class="button primary">Apply filter</button><label class="auto-refresh"><input id="autoRefresh" type="checkbox" checked> Auto-refresh</label></div>
+        <div id="summary" class="table-status">Loading event keys…</div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Event ID</th><th>Redis key</th><th>Last write</th><th>Updates</th><th>TTL</th><th></th></tr></thead><tbody id="rows"></tbody></table></div>
+        <section id="detail" class="detail-drawer" hidden><header><div><strong id="detailTitle">Market payload</strong><div id="detailMeta"></div></div><button id="closeDetail" class="runner-button">Close</button></header><pre id="payload"></pre></section>
+      </section>
+    </main><div id="toast" class="toast" role="status"></div><script src="/admin/redis/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Odds Admin</title><meta name="description" content="Live odds status"><link rel="stylesheet" href="/admin/styles.css"></head>
+<body>
+  <header class="topbar simple-topbar"><div class="brand"><span class="brand-mark">SE</span><div><strong>Odds Admin</strong><small>Live data status</small></div></div><div class="top-actions"><label class="key-field"><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"></label><button id="refresh" class="button success">Refresh</button></div></header>
+  <main class="simple-main">
+    <section id="overallState" class="simple-health waiting" aria-live="polite"><span class="state-dot"></span><div><strong id="overallTitle">Checking data flow…</strong><p id="overallDetail">Connecting to the source database, provider and Redis.</p></div></section>
+    <section class="simple-metrics" aria-label="Live totals"><article><span>Active markets</span><strong id="marketCount">—</strong></article><article><span>Events in Redis</span><strong id="eventCount">—</strong></article><article><span>Last update</span><strong id="lastTick">—</strong></article></section>
+    <section class="panel event-panel"><div class="panel-heading"><div><h1>Event data in Redis</h1><p>One row per event. This is the data available to the frontend.</p></div></div><div id="eventSummary" class="table-status">Loading events…</div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Event ID</th><th>Redis key</th><th>Last updated</th><th></th></tr></thead><tbody id="eventRows"></tbody></table></div></section>
+    <details class="advanced-tools"><summary>Advanced tools</summary><div><a href="/admin/subscriptions/">Market subscriptions</a><a href="/admin/logs/">Application logs</a><a href="/admin/source-markets/">Source market records</a></div></details>
+    <p id="updatedAt" class="updated-at">Not refreshed yet</p>
+  </main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div><script src="/admin/app.js" defer></script>
+</body></html>
