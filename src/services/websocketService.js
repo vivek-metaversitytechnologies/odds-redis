@@ -4,7 +4,7 @@ const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
 
 let socket;
-let writeChain = Promise.resolve();
+const eventWriteChains = new Map();
 let tickPublisher = () => {};
 let rawTickPublisher = () => {};
 let resultHandler = async () => {};
@@ -143,6 +143,18 @@ async function persist(items, receivedAtMs = Date.now()) {
   }
 }
 
+function enqueueEventTicks(eventId, items, receivedAtMs) {
+  const key = String(eventId);
+  const previous = eventWriteChains.get(key) || Promise.resolve();
+  const next = previous.catch(() => {}).then(() => persist(items, receivedAtMs));
+  eventWriteChains.set(key, next);
+  const cleanup = () => {
+    if (eventWriteChains.get(key) === next) eventWriteChains.delete(key);
+  };
+  next.then(cleanup, cleanup);
+  return next;
+}
+
 function connectSocket() {
   state.connectionRequested = true;
   if (socket) {
@@ -190,7 +202,15 @@ function connectSocket() {
       state.tickCount += oddsTicks.length; state.lastTickAt = new Date().toISOString();
       state.lastTickSummary = summarize(oddsTicks.at(-1));
       logShape("odds", messages[0]);
-      writeChain = writeChain.then(() => persist(oddsTicks, receivedAtMs));
+      const ticksByEvent = new Map();
+      for (const item of oddsTicks) {
+        const eventId = String(item.eid);
+        if (!ticksByEvent.has(eventId)) ticksByEvent.set(eventId, []);
+        ticksByEvent.get(eventId).push(item);
+      }
+      for (const [eventId, eventTicks] of ticksByEvent) {
+        enqueueEventTicks(eventId, eventTicks, receivedAtMs);
+      }
     }
     if (!scores.length && !oddsTicks.length) {
       state.unknownMessageCount += messages.length;
@@ -230,7 +250,7 @@ function unsubscribeMarkets(ids) {
 async function stopSocket() {
   state.connectionRequested = false;
   if (socket) { socket.disconnect(); socket = undefined; }
-  await writeChain;
+  await Promise.allSettled([...eventWriteChains.values()]);
 }
 
 function getSocketStatus() {
@@ -240,7 +260,7 @@ function getSocketStatus() {
 module.exports = { connectSocket, subscribeMarkets, unsubscribeMarkets, stopSocket, getSocketStatus,
   getSubscribedMarketIds: () => [...subscribedMarketIds],
   collectOddsTicks, collectScores, messageShape, logRawSocketPayload, logSocketTiming,
-  getRawSocketPayloads, payloadContainsMarket, isResultTick,
+  getRawSocketPayloads, payloadContainsMarket, isResultTick, enqueueEventTicks,
   setTickPublisher: (publisher) => { tickPublisher = typeof publisher === "function" ? publisher : () => {}; },
   setRawTickPublisher: (publisher) => { rawTickPublisher = typeof publisher === "function" ? publisher : () => {}; },
   setResultHandler: (handler) => { resultHandler = typeof handler === "function" ? handler : async () => {}; } };
