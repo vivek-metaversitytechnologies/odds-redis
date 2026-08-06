@@ -4,7 +4,7 @@ const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
 const { bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, emptyEventPayload,
   runnerPrices, preserveRunnerNames, shouldRemoveFromPayload,
-  fancyDefinitionEntry, normalizeEventPayload } = require("../src/config/redis");
+  fancyDefinitionEntry, regularDefinitionEntries, normalizeEventPayload } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
@@ -222,10 +222,11 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
   assert.equal(payloadGroup({ mid: "4.1-F2" }, {}), "Fancy2");
   assert.equal(payloadGroup({ mid: "4.1-OE" }, {}), "OddEven");
   assert.equal(payloadGroup({ mid: "4.1-F3" }, {}), "OtherMarket");
+  assert.equal(payloadGroup({ mid: "1.123" }, { marketname: "1st Innings 20 Overs Line" }), "LineMarket");
   assert.equal(output.gameover, true);
   assert.equal(output.nation, "Six over runs");
   assert.deepEqual(Object.keys(emptyEventPayload()),
-    ["Odds", "Bookmaker", "Fancy2", "OddEven", "OtherMarket", "Fancy3",
+    ["Odds", "Bookmaker", "LineMarket", "Fancy2", "OddEven", "OtherMarket", "Fancy3",
       "CricketCasino", "BallByBall"]);
 });
 
@@ -233,6 +234,26 @@ test("legacy Fancy3 Redis rows migrate to OtherMarket", () => {
   const payload = normalizeEventPayload({ Fancy3: [{ mid: "4.1-F3", nation: "Caught Out" }] });
   assert.equal(payload.Fancy3.length, 0);
   assert.equal(payload.OtherMarket[0].mid, "4.1-F3");
+});
+
+test("legacy line markets migrate from Odds to their separate group", () => {
+  const market = { marketId: "1.123", Name: "1st Innings 20 Overs Line" };
+  const payload = normalizeEventPayload({ Odds: [market] });
+  assert.equal(payload.Odds.length, 0);
+  assert.deepEqual(payload.LineMarket, [market]);
+});
+
+test("regular API definitions seed line markets with suspended runner placeholders", () => {
+  const output = regularDefinitionEntries({ marketId: "1.123", eventId: 10, sportId: 4,
+    marketName: "1st Innings 20 Overs Line", matchName: "A v B", isActive: true,
+    minBet: 100, maxBet: 1, betDelay: 3 }, [
+    { selectionId: 1, runnerName: "Over" }, { selectionId: 2, runnerName: "Under" },
+  ]);
+  assert.equal(output.group, "LineMarket");
+  assert.equal(output.entries[0].status, "WAITING");
+  assert.deepEqual(output.entries[0].runners.map((runner) => [runner.name, runner.status]),
+    [["Over", "SUSPENDED"], ["Under", "SUSPENDED"]]);
+  assert.deepEqual(output.entries[0].runners[0].ex.availableToBack, []);
 });
 
 test("top-level provider fancy fields map to frontend prices and sizes", () => {

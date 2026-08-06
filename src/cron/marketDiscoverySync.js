@@ -112,9 +112,9 @@ async function upsertMarkets(markets) {
       if (existing.has(market.marketId)) {
         await connection.execute(
           `UPDATE t_market SET marketname=?, matchname=?, opendate=?, sportid=?, eventid=?, seriesid=?,
-             inplay=IF(inplay=1,1,?), updatedon=NOW() WHERE marketid=?`,
+             inplay=IF(inplay=1,1,?), isactive=?, updatedon=NOW() WHERE marketid=?`,
           [market.marketName, market.matchName, market.openDate, market.sportId, market.eventId,
-            market.seriesId, market.inPlay, market.marketId],
+            market.seriesId, market.inPlay, market.isActive && !market.gameOver, market.marketId],
         );
         updated += 1; continue;
       }
@@ -186,6 +186,22 @@ async function fetchAndStoreRunners(marketIds) {
     failedMarkets: responses.filter((result) => result.status === "rejected").length };
 }
 
+async function regularMarketsWithRunners(markets) {
+  const ids = [...new Set((markets || []).map((market) => String(market.marketId)).filter(Boolean))];
+  if (!ids.length) return [];
+  const [rows] = await getSourcePool().query(
+    `SELECT marketid,selectionid,runner_name FROM t_selectionid
+      WHERE marketid IN (${ids.map(() => "?").join(",")}) ORDER BY id ASC`, ids,
+  );
+  const byMarket = new Map();
+  for (const row of rows) {
+    const marketId = String(row.marketid);
+    if (!byMarket.has(marketId)) byMarket.set(marketId, []);
+    byMarket.get(marketId).push({ selectionId: row.selectionid, runnerName: row.runner_name });
+  }
+  return markets.map((market) => ({ ...market, runners: byMarket.get(String(market.marketId)) || [] }));
+}
+
 async function seedTossMarkets(markets) {
   const tossMarkets = (markets || []).filter((market) =>
     String(market.marketName || "").trim().toUpperCase() === "TOSS"
@@ -229,6 +245,9 @@ async function syncMarketDiscovery(events) {
     const fancyPersisted = await upsertFancies(fancies);
     const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
     const runnerResult = await fetchAndStoreRunners(persisted.marketIds);
+    const regularDefinitions = await redisStore.reconcileRegularDefinitions(
+      await regularMarketsWithRunners(regularMarkets),
+    );
     const tossDefinitions = await seedTossMarkets(regularMarkets);
     const subscriptionResult = await syncMarketSubscriptions();
     const subscription = { total: subscriptionResult.total, requested: subscriptionResult.requested,
@@ -240,7 +259,7 @@ async function syncMarketDiscovery(events) {
       fancies: activeFancies, sessionRecords: fancies.length,
       inserted: persisted.inserted, updated: persisted.updated,
       fancyInserted: fancyPersisted.inserted, fancyUpdated: fancyPersisted.updated,
-      redisDefinitions, tossDefinitions, runners: runnerResult, subscription };
+      redisDefinitions, regularDefinitions, tossDefinitions, runners: runnerResult, subscription };
     state.lastResult = result; state.lastCompletedAt = new Date().toISOString();
     logger.info("[MarketDiscovery] completed", result); return result;
   } catch (error) {
@@ -282,6 +301,7 @@ function startMarketDiscoverySync() {
 function getMarketDiscoveryStatus() { return { ...state }; }
 
 module.exports = { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
-  marketRows, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners, seedTossMarkets,
+  marketRows, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
+  regularMarketsWithRunners, seedTossMarkets,
   fetchActiveEventsForMarketDiscovery, syncMarketDiscovery, syncStoredEventMarkets,
   startMarketDiscoverySync, getMarketDiscoveryStatus };

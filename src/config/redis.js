@@ -12,8 +12,8 @@ const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
 const tickActivity = new Map();
 
-const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "Fancy2", "OddEven", "OtherMarket", "Fancy3",
-  "CricketCasino", "BallByBall"];
+const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "LineMarket", "Fancy2", "OddEven", "OtherMarket",
+  "Fancy3", "CricketCasino", "BallByBall"];
 
 function emptyEventPayload() {
   return Object.fromEntries(PAYLOAD_GROUPS.map((group) => [group, []]));
@@ -22,6 +22,14 @@ function emptyEventPayload() {
 function normalizeEventPayload(payload) {
   const normalized = emptyEventPayload();
   for (const group of PAYLOAD_GROUPS) normalized[group] = Array.isArray(payload?.[group]) ? payload[group] : [];
+  // Move line markets written by older builds out of the generic Odds group immediately.
+  const legacyLineMarkets = normalized.Odds.filter((market) => /\bline\b/i.test(String(market?.Name || "")));
+  for (const market of legacyLineMarkets) {
+    if (!normalized.LineMarket.some((item) => entryMarketId(item) === entryMarketId(market))) {
+      normalized.LineMarket.push(market);
+    }
+  }
+  normalized.Odds = normalized.Odds.filter((market) => !/\bline\b/i.test(String(market?.Name || "")));
   for (const entry of normalized.Fancy3) {
     if (!normalized.OtherMarket.some((item) => entryMarketId(item) === entryMarketId(entry))) {
       normalized.OtherMarket.push(entry);
@@ -187,6 +195,9 @@ function payloadGroup(item, market) {
   const id = String(item.mid).toUpperCase();
   const name = String(market.marketname || "").toLowerCase();
   if (id.includes("BM") || name.includes("bookmaker") || name === "toss") return "Bookmaker";
+  // Vendor line-market IDs look like normal exchange IDs (for example 1.260761724),
+  // so their persisted market name is the stable discriminator available on socket ticks.
+  if (/\bline\b/.test(name)) return "LineMarket";
   if (id.includes("OE") || name.includes("odd even")) return "OddEven";
   if (id.includes("F3") || name.includes("other market")) return "OtherMarket";
   if (id.includes("BB") || name.includes("ball by ball")) return "BallByBall";
@@ -198,7 +209,7 @@ function payloadGroup(item, market) {
 function transformedTick(item, market) {
   const group = payloadGroup(item, market);
   const entries = group === "Bookmaker" ? bookmakerPayload(item, market)
-    : group === "Odds" ? [oddsPayload(item, market)] : [fancyPayload(item, market)];
+    : ["Odds", "LineMarket"].includes(group) ? [oddsPayload(item, market)] : [fancyPayload(item, market)];
   return { group, entries };
 }
 
@@ -258,6 +269,66 @@ async function reconcileFancyDefinitions(markets) {
   return { events: byEvent.size, added, removed };
 }
 
+function regularDefinitionEntries(market, runners = []) {
+  const marketRow = {
+    eventid: market.eventId, sportid: market.sportId, marketid: market.marketId,
+    marketname: market.marketName, matchname: market.matchName, opendate: market.openDate,
+    inplay: market.inPlay, isactive: market.isActive, minbet: market.minBet,
+    maxbet: market.maxBet, betDelay: market.betDelay, minBetRate: 1, maxBetRate: 500,
+  };
+  const itemRunners = runners.map((runner) => ({
+    rid: runner.selectionId, na: runner.runnerName, s: "SUSPENDED", sb: "S",
+    b: [], l: [], b1: null, l1: null, bs1: 0, ls1: 0,
+  }));
+  const group = payloadGroup({ mid: market.marketId }, marketRow);
+  if (group === "Bookmaker") {
+    const entries = bookmakerPayload({ eid: market.eventId, mid: market.marketId,
+      na: market.marketName, s: "WAITING", r: itemRunners }, marketRow);
+    return { group, entries: entries.length ? entries : [{
+      mid: String(market.marketId), t: market.marketName, sid: String(market.marketId),
+      nation: market.marketName, b1: null, bs1: 0, l1: null, ls1: 0,
+      gstatus: "WAITING", rem: null, display_message: null, betlock: 0,
+      minBet: numberOr(market.minBet), maxBet: numberOr(market.maxBet),
+      betDelay: numberOr(market.betDelay, 0), minBetRate: 1, maxBetRate: 500,
+      matchName: market.matchName ?? null, matchId: numberOr(market.eventId, market.eventId),
+      isActive: true, isPause: false, sportId: numberOr(market.sportId, market.sportId),
+    }] };
+  }
+  return { group, entries: [oddsPayload({ eid: market.eventId, mid: market.marketId,
+    na: market.marketName, s: "WAITING", ip: market.inPlay, r: itemRunners }, marketRow)] };
+}
+
+async function reconcileRegularDefinitions(markets) {
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return { events: 0, added: 0 };
+  const byEvent = new Map();
+  for (const market of markets || []) {
+    if (!market?.eventId || !market?.marketId || !market.isActive || market.gameOver) continue;
+    const eventId = String(market.eventId);
+    if (!byEvent.has(eventId)) byEvent.set(eventId, []);
+    byEvent.get(eventId).push(market);
+  }
+  let added = 0;
+  for (const [eventId, definitions] of byEvent) {
+    const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+    let payload = emptyEventPayload();
+    const current = await redis.get(key);
+    if (current) {
+      try { payload = normalizeEventPayload(JSON.parse(current)); } catch { /* replace malformed payload */ }
+    }
+    let changed = false;
+    for (const market of definitions) {
+      if (payloadHasMarket(payload, market.marketId)) continue;
+      const { group, entries } = regularDefinitionEntries(market, market.runners || []);
+      payload[group].push(...entries); added += 1; changed = true;
+    }
+    if (changed) {
+      await redis.set(key, JSON.stringify(payload)); eventPayloadCache.set(eventId, payload);
+    }
+  }
+  return { events: byEvent.size, added };
+}
+
 function entryMarketId(entry) { return String(entry.marketId ?? entry.mid ?? ""); }
 
 function shouldRemoveFromPayload(group, item) {
@@ -304,6 +375,7 @@ async function writeTick(item) {
   if (!item || typeof item !== "object" || !item.eid || !item.mid) return false;
   const redis = await getRedisClient(); if (!redis?.isOpen) return false;
   const market = await findMarket(String(item.mid)); if (!market) return false;
+  if (booleanOr(market.isactive, false) === false) return false;
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${item.eid}`;
   let payload = eventPayloadCache.get(String(item.eid));
   if (!payload) {
@@ -322,7 +394,11 @@ async function writeTick(item) {
   const { group, entries } = transformedTick(item, market);
   const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === String(item.mid));
   if (group === "Odds") preserveRunnerNames(entries, previousEntries);
-  payload[group] = payload[group].filter((entry) => entryMarketId(entry) !== String(item.mid));
+  // A market can change grouping as discovery metadata improves; keep exactly one copy.
+  for (const payloadGroupName of PAYLOAD_GROUPS) {
+    payload[payloadGroupName] = payload[payloadGroupName]
+      .filter((entry) => entryMarketId(entry) !== String(item.mid));
+  }
   if (!shouldRemoveFromPayload(group, item)) payload[group].push(...entries);
   await redis.set(key, JSON.stringify(payload));
   eventPayloadCache.set(String(item.eid), payload);
@@ -436,4 +512,5 @@ function getRedisStatus() {
 module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
   transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
-  shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions, normalizeEventPayload };
+  shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions, regularDefinitionEntries,
+  reconcileRegularDefinitions, normalizeEventPayload };
