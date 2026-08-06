@@ -42,7 +42,7 @@ function marketRows(response, eventsById) {
       maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
       seriesId: event?.seriesId ?? null,
     };
-  }).filter((item) => item.marketId && Number.isInteger(item.eventId)
+  }).filter((item) => redisStore.validMarketIdentifier(item.marketId) && Number.isInteger(item.eventId)
     && Number.isInteger(item.sportId) && item.marketName
     && (FANCY_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)));
 }

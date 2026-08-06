@@ -19,9 +19,17 @@ function emptyEventPayload() {
   return Object.fromEntries(PAYLOAD_GROUPS.map((group) => [group, []]));
 }
 
+function validMarketIdentifier(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return Boolean(normalized) && !["undefined", "null", "nan"].includes(normalized);
+}
+
 function normalizeEventPayload(payload) {
   const normalized = emptyEventPayload();
-  for (const group of PAYLOAD_GROUPS) normalized[group] = Array.isArray(payload?.[group]) ? payload[group] : [];
+  for (const group of PAYLOAD_GROUPS) {
+    normalized[group] = Array.isArray(payload?.[group])
+      ? payload[group].filter((entry) => validMarketIdentifier(entryMarketId(entry))) : [];
+  }
   // Move line markets written by older builds out of the generic Odds group immediately.
   const legacyLineMarkets = normalized.Odds.filter((market) => /\bline\b/i.test(String(market?.Name || "")));
   for (const market of legacyLineMarkets) {
@@ -513,4 +521,4 @@ module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, ge
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
   transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
   shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions, regularDefinitionEntries,
-  reconcileRegularDefinitions, normalizeEventPayload };
+  reconcileRegularDefinitions, normalizeEventPayload, validMarketIdentifier };

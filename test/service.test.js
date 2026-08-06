@@ -4,7 +4,8 @@ const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
 const { bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, emptyEventPayload,
   runnerPrices, preserveRunnerNames, shouldRemoveFromPayload,
-  fancyDefinitionEntry, regularDefinitionEntries, normalizeEventPayload } = require("../src/config/redis");
+  fancyDefinitionEntry, regularDefinitionEntries, normalizeEventPayload,
+  validMarketIdentifier } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
@@ -241,6 +242,13 @@ test("legacy line markets migrate from Odds to their separate group", () => {
   const payload = normalizeEventPayload({ Odds: [market] });
   assert.equal(payload.Odds.length, 0);
   assert.deepEqual(payload.LineMarket, [market]);
+});
+
+test("invalid sentinel market IDs are rejected and removed from snapshots", () => {
+  assert.equal(validMarketIdentifier("undefined"), false);
+  assert.equal(validMarketIdentifier("1.123"), true);
+  const payload = normalizeEventPayload({ Odds: [{ marketId: "undefined", Name: "Market undefined" }] });
+  assert.equal(payload.Odds.length, 0);
 });
 
 test("regular API definitions seed line markets with suspended runner placeholders", () => {
