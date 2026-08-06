@@ -12,7 +12,7 @@ const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
 const tickActivity = new Map();
 
-const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "LineMarket", "Fancy2", "OddEven", "OtherMarket",
+const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "LineMarket", "Fancy2", "Khado", "OddEven", "OtherMarket",
   "Fancy3", "CricketCasino", "BallByBall"];
 
 function emptyEventPayload() {
@@ -38,6 +38,13 @@ function normalizeEventPayload(payload) {
     }
   }
   normalized.Odds = normalized.Odds.filter((market) => !/\bline\b/i.test(String(market?.Name || "")));
+  const legacyKhado = normalized.Fancy2.filter((entry) => /-KD$/i.test(entryMarketId(entry)));
+  for (const entry of legacyKhado) {
+    if (!normalized.Khado.some((item) => entryMarketId(item) === entryMarketId(entry))) {
+      normalized.Khado.push(entry);
+    }
+  }
+  normalized.Fancy2 = normalized.Fancy2.filter((entry) => !/-KD$/i.test(entryMarketId(entry)));
   for (const entry of normalized.Fancy3) {
     if (!normalized.OtherMarket.some((item) => entryMarketId(item) === entryMarketId(entry))) {
       normalized.OtherMarket.push(entry);
@@ -202,6 +209,7 @@ function fancyPayload(item, market) {
 function payloadGroup(item, market) {
   const id = String(item.mid).toUpperCase();
   const name = String(market.marketname || "").toLowerCase();
+  const marketType = String(market.markettype || market.mtype || item.type || "").toLowerCase();
   if (id.includes("BM") || name.includes("bookmaker") || name === "toss") return "Bookmaker";
   // Vendor line-market IDs look like normal exchange IDs (for example 1.260761724),
   // so their persisted market name is the stable discriminator available on socket ticks.
@@ -210,7 +218,8 @@ function payloadGroup(item, market) {
   if (id.includes("F3") || name.includes("other market")) return "OtherMarket";
   if (id.includes("BB") || name.includes("ball by ball")) return "BallByBall";
   if (id.includes("-CC") || id.includes("CASINO") || name.includes("casino")) return "CricketCasino";
-  if (id.includes("F2") || id.includes("KD") || id.includes("MT")) return "Fancy2";
+  if (marketType === "khado" || id.includes("KD") || name.includes("khado")) return "Khado";
+  if (id.includes("F2") || id.includes("MT")) return "Fancy2";
   return "Odds";
 }
 

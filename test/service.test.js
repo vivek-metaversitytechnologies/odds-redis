@@ -79,11 +79,13 @@ test("explicitly inactive line markets remain in discovery for deactivation", ()
   assert.equal(rows.length, 1);
   assert.equal(rows[0].isActive, false);
   assert.equal(rows[0].marketType, "line-market");
+  assert.equal(rows[0].betDelay, 5);
 });
 
 test("session market suffixes map to Java fancy odds types", () => {
   assert.equal(oddsType("4.1-F2"), "F2"); assert.equal(oddsType("4.1-OE"), "OE");
   assert.equal(oddsType("4.1-F3"), "F3"); assert.equal(oddsType("4.1-BB"), "BB");
+  assert.equal(oddsType("4.1-KD"), "KD");
 });
 
 test("fancy discovery uses Java-compatible betting limits", () => {
@@ -144,7 +146,7 @@ test("unnamed BM2 markets remain available for socket population", () => {
 
 test("advanced market families use separate vendor discovery requests", () => {
   assert.deepEqual(FANCY_MARKET_REQUESTS,
-    [["session"], ["odd-even"], ["cricket-casino"], ["ball-by-ball"]]);
+    [["session"], ["khado"], ["odd-even"], ["cricket-casino"], ["ball-by-ball"]]);
   assert.equal(REGULAR_MARKET_TYPES.includes("match-odd"), true);
   assert.equal(REGULAR_MARKET_TYPES.includes("odd-even"), false);
 });
@@ -234,11 +236,13 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
   assert.equal(payloadGroup({ mid: "4.1-F2" }, {}), "Fancy2");
   assert.equal(payloadGroup({ mid: "4.1-OE" }, {}), "OddEven");
   assert.equal(payloadGroup({ mid: "4.1-F3" }, {}), "OtherMarket");
+  assert.equal(payloadGroup({ mid: "4.1-KD" }, {}), "Khado");
+  assert.equal(payloadGroup({ mid: "4.1" }, { mtype: "khado" }), "Khado");
   assert.equal(payloadGroup({ mid: "1.123" }, { marketname: "1st Innings 20 Overs Line" }), "LineMarket");
   assert.equal(output.gameover, true);
   assert.equal(output.nation, "Six over runs");
   assert.deepEqual(Object.keys(emptyEventPayload()),
-    ["Odds", "Bookmaker", "LineMarket", "Fancy2", "OddEven", "OtherMarket", "Fancy3",
+    ["Odds", "Bookmaker", "LineMarket", "Fancy2", "Khado", "OddEven", "OtherMarket", "Fancy3",
       "CricketCasino", "BallByBall"]);
 });
 
@@ -253,6 +257,13 @@ test("legacy line markets migrate from Odds to their separate group", () => {
   const payload = normalizeEventPayload({ Odds: [market] });
   assert.equal(payload.Odds.length, 0);
   assert.deepEqual(payload.LineMarket, [market]);
+});
+
+test("legacy KD rows migrate from Fancy2 to Khado", () => {
+  const row = { mid: "4.1-KD", nation: "Innings Khado" };
+  const payload = normalizeEventPayload({ Fancy2: [row] });
+  assert.equal(payload.Fancy2.length, 0);
+  assert.deepEqual(payload.Khado, [row]);
 });
 
 test("invalid sentinel market IDs are rejected and removed from snapshots", () => {

@@ -9,11 +9,11 @@ const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
 
 const FANCY_MARKET_TYPES = new Set([
-  "session", "odd-even", "cricket-casino", "ball-by-ball", "other-market", "meter",
+  "session", "khado", "odd-even", "cricket-casino", "ball-by-ball", "other-market", "meter",
 ]);
 const REGULAR_MARKET_TYPES = ["bookmaker", "tied-match", "match-odd", "winner-market",
   "TOSS", "super-over", "goals", "line-market", "completed-match"];
-const FANCY_MARKET_REQUESTS = ["session", "odd-even", "cricket-casino", "ball-by-ball"]
+const FANCY_MARKET_REQUESTS = ["session", "khado", "odd-even", "cricket-casino", "ball-by-ball"]
   .map((type) => [type]);
 const MARKET_TYPES = [...FANCY_MARKET_TYPES, ...REGULAR_MARKET_TYPES];
 const DISCOVERABLE_MARKET_TYPES = new Set(MARKET_TYPES.map((type) => String(type).toLowerCase()));
@@ -41,7 +41,7 @@ function marketRows(response, eventsById) {
       marketType,
       matchName: event?.eventName || null, openDate: event?.openDate || null,
       inPlay: Boolean(event?.inPlay), gameOver: Boolean(item?.gameOver), isActive: item?.isActive !== false,
-      betDelay: bookmaker || fancy ? 0 : 3, minBet: 100,
+      betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3, minBet: 100,
       maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
       seriesId: event?.seriesId ?? null,
     };
@@ -53,6 +53,7 @@ function marketRows(response, eventsById) {
 function oddsType(marketId) {
   const id = String(marketId).toUpperCase();
   if (id.includes("F2")) return "F2"; if (id.includes("OE")) return "OE";
+  if (id.includes("KD")) return "KD";
   if (id.includes("F3")) return "F3"; if (id.includes("BB")) return "BB";
   if (id.includes("CC")) return "CC"; return "UNKNOWN";
 }
@@ -72,9 +73,9 @@ async function upsertFancies(fancies) {
       if (existing.has(fancy.marketId)) {
         await connection.execute(
           `UPDATE t_matchfancy SET name=?, oddstype=?, eventid=?, isactive=?, isshow=?, is_show=?,
-             matchname=?, sportid=?, updatedon=NOW() WHERE fancyid=?`,
+             matchname=?, sportid=?, mtype=?, updatedon=NOW() WHERE fancyid=?`,
           [fancy.marketName, oddsType(fancy.marketId), fancy.eventId, active, true, true,
-            fancy.matchName, fancy.sportId, fancy.marketId],
+            fancy.matchName, fancy.sportId, fancy.marketType, fancy.marketId],
         );
         updated += 1; continue;
       }
@@ -89,7 +90,7 @@ async function upsertFancies(fancies) {
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [fancy.marketId, fancy.marketName, oddsType(fancy.marketId), "OPEN", 100000, 0, 100,
           100000, fancy.eventId, false, active,
-          "player", true, true, "", new Date(),
+          fancy.marketType, true, true, "", new Date(),
           fancy.matchName, fancy.sportId, "RS", 1, fancy.inPlay, 100000],
       );
       inserted += 1;
@@ -117,9 +118,9 @@ async function upsertMarkets(markets) {
       if (existing.has(market.marketId)) {
         await connection.execute(
           `UPDATE t_market SET marketname=?, matchname=?, opendate=?, sportid=?, eventid=?, seriesid=?,
-             inplay=IF(inplay=1,1,?), isactive=?, updatedon=NOW() WHERE marketid=?`,
+             inplay=IF(inplay=1,1,?), isactive=?, betdelay=?, updatedon=NOW() WHERE marketid=?`,
           [market.marketName, market.matchName, market.openDate, market.sportId, market.eventId,
-            market.seriesId, market.inPlay, active, market.marketId],
+            market.seriesId, market.inPlay, active, market.betDelay, market.marketId],
         );
         if (existing.get(market.marketId) && !active) deactivatedMarketIds.push(market.marketId);
         updated += 1; continue;
@@ -251,7 +252,7 @@ async function syncMarketDiscovery(events) {
     const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
     const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const persisted = await upsertMarkets(regularMarkets);
-    redisStore.invalidateMarkets(persisted.deactivatedMarketIds);
+    redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
     const fancyPersisted = await upsertFancies(fancies);
     const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
     const runnerResult = await fetchAndStoreRunners(persisted.marketIds);
