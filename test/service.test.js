@@ -3,7 +3,8 @@ const test = require("node:test");
 const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
 const { bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, emptyEventPayload,
-  runnerPrices, preserveRunnerNames, shouldRemoveFromPayload } = require("../src/config/redis");
+  runnerPrices, preserveRunnerNames, shouldRemoveFromPayload,
+  fancyDefinitionEntry } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
@@ -11,7 +12,8 @@ const { parseJsonObjects, containsMarketId } = require("../src/services/logReade
 const { dashboardEntry } = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
 const { eventRows } = require("../src/cron/eventSync");
-const { MARKET_TYPES, FANCY_MARKET_TYPES, marketRows, oddsType } = require("../src/cron/marketDiscoverySync");
+const { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
+  marketRows, oddsType } = require("../src/cron/marketDiscoverySync");
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
 
 test("database rows map to API event fields", () => {
@@ -72,6 +74,13 @@ test("session market suffixes map to Java fancy odds types", () => {
   assert.equal(oddsType("4.1-F3"), "F3"); assert.equal(oddsType("4.1-BB"), "BB");
 });
 
+test("fancy discovery uses Java-compatible betting limits", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const [row] = marketRows({ data: [{ id: "4.1-OE", eventId: "10", sportId: 4,
+    name: "Odd Even", type: "odd-even", isActive: true, gameOver: false }] }, events);
+  assert.equal(row.minBet, 100); assert.equal(row.maxBet, 100000); assert.equal(row.betDelay, 0);
+});
+
 test("inactive sessions remain available for fancy-table deactivation", () => {
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
   const rows = marketRows({ data: [{ id: "4.1-F2", eventId: "10", sportId: 4,
@@ -97,6 +106,25 @@ test("advanced fancy market types are requested and retained for deactivation", 
     [["4.1-OE", "OE"], ["11.1-CC", "CC"], ["4.1-BB", "BB"]]);
 });
 
+test("advanced market families use separate vendor discovery requests", () => {
+  assert.deepEqual(FANCY_MARKET_REQUESTS,
+    [["session"], ["odd-even"], ["cricket-casino"], ["ball-by-ball"]]);
+  assert.equal(REGULAR_MARKET_TYPES.includes("match-odd"), true);
+  assert.equal(REGULAR_MARKET_TYPES.includes("odd-even"), false);
+});
+
+test("active fancy definitions create socket-updatable placeholder rows", () => {
+  assert.deepEqual(fancyDefinitionEntry({ marketId: "4.1-OE", marketName: "Odd runs",
+    marketType: "odd-even", eventId: 10, matchName: "A v B", minBet: 100,
+    maxBet: 100000, betDelay: 0 }), {
+    mid: "4.1-OE", sid: "4.1-OE", nation: "Odd runs", b1: null, l1: null,
+    bs1: 0, ls1: 0, gstatus: "WAITING", rem: "", srno: "", gameover: false,
+    s: true, maxBet: 100000, minBet: 100, betDelay: 0, matchId: 10,
+    isActive: true, isShow: true, matchName: "A v B", matchType: "odd-even",
+    maxLiabilityPerMarket: 100000, rate: null,
+  });
+});
+
 test("market rows map betting configuration", () => {
   const market = Market.fromRow({ marketid: "1.2", betdelay: 3,
     minbetrate: "1.5", maxbetrate: "100", is_redis_updated: 0 });
@@ -119,12 +147,12 @@ test("bookmaker ticks are transformed for Redis", () => {
   assert.equal(output[0].betlock, 2);
 });
 
-test("toss bookmaker markets force odds to 95", () => {
+test("toss bookmaker markets retain vendor runner odds", () => {
   const [runner] = bookmakerPayload({ mid: "BM-TOSS", r: [
-    { rid: 1, na: "Heads", b: 10, l: 20 },
+    { rid: 1, na: "Heads", back: 98, lay: 0 },
   ] }, { marketname: "TOSS" });
-  assert.equal(runner.b1, 95);
-  assert.equal(runner.l1, 95);
+  assert.equal(runner.b1, 98);
+  assert.equal(runner.l1, 0);
 });
 
 test("standard odds ticks match the frontend Redis contract", () => {

@@ -174,6 +174,11 @@ async function retrySkippedMarkets() {
       .filter((id) => !completedMarketIds.has(id));
     if (!batch.length) continue;
     try {
+      // A provider "skipped" response can mean the IDs remain registered from an
+      // earlier subscription while this socket is not attached to them. Clear that
+      // stale provider state before retrying, otherwise the same IDs can skip forever.
+      await provider.unsubscribe(batch);
+      websocket.unsubscribeMarkets(batch);
       const response = await provider.subscribe(batch);
       const acknowledgement = normalizeProviderAcknowledgement(response, batch);
       websocket.subscribeMarkets(acknowledgement.subscribed);

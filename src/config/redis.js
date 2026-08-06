@@ -110,11 +110,10 @@ function marketMatchName(item, market) {
 function bookmakerPayload(item, market) {
   const runners = Array.isArray(item.r) ? item.r : [];
   const matchName = marketMatchName(item, market);
-  const toss = String(market.marketname).toUpperCase() === "TOSS";
   return runners.map((runner) => ({
     mid: String(item.mid), t: market.marketname || item.na || "", sid: runner?.rid ?? runner?.selectionId ?? null,
-    nation: runner?.na ?? runner?.name ?? null, b1: toss ? 95 : numberOr(runner?.b ?? runner?.b1),
-    bs1: numberOr(runner?.bs ?? runner?.bs1, 0), l1: toss ? 95 : numberOr(runner?.l ?? runner?.l1),
+    nation: runner?.na ?? runner?.name ?? null, b1: numberOr(runner?.b ?? runner?.b1 ?? runner?.back),
+    bs1: numberOr(runner?.bs ?? runner?.bs1, 0), l1: numberOr(runner?.l ?? runner?.l1 ?? runner?.lay),
     ls1: numberOr(runner?.ls ?? runner?.ls1, 0), gstatus: status(runner?.sb ?? runner?.gstatus),
     rem: runner?.rem ?? item.rem ?? null, display_message: market.displayMessage ?? null,
     betlock: numberOr(market.betDelay, 0), minBet: numberOr(market.minbet), maxBet: numberOr(market.maxbet),
@@ -188,6 +187,62 @@ function transformedTick(item, market) {
   const entries = group === "Bookmaker" ? bookmakerPayload(item, market)
     : group === "Odds" ? [oddsPayload(item, market)] : [fancyPayload(item, market)];
   return { group, entries };
+}
+
+function fancyDefinitionEntry(market) {
+  return {
+    mid: String(market.marketId), sid: String(market.marketId), nation: market.marketName,
+    b1: null, l1: null, bs1: 0, ls1: 0, gstatus: "WAITING", rem: "", srno: "",
+    gameover: false, s: true, maxBet: numberOr(market.maxBet, 100000),
+    minBet: numberOr(market.minBet, 100), betDelay: numberOr(market.betDelay, 0),
+    matchId: numberOr(market.eventId, market.eventId), isActive: true, isShow: true,
+    matchName: market.matchName ?? null, matchType: market.marketType ?? null,
+    maxLiabilityPerMarket: 100000, rate: null,
+  };
+}
+
+async function reconcileFancyDefinitions(markets) {
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return { events: 0, added: 0, removed: 0 };
+  const byEvent = new Map();
+  for (const market of markets || []) {
+    if (!market?.eventId || !market?.marketId) continue;
+    const group = payloadGroup({ mid: market.marketId }, { marketname: market.marketName });
+    if (["Odds", "Bookmaker"].includes(group)) continue;
+    const eventId = String(market.eventId);
+    if (!byEvent.has(eventId)) byEvent.set(eventId, []);
+    byEvent.get(eventId).push({ market, group });
+  }
+  let added = 0; let removed = 0;
+  for (const [eventId, definitions] of byEvent) {
+    const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+    let payload = emptyEventPayload();
+    const current = await redis.get(key);
+    if (current) {
+      try {
+        const parsed = JSON.parse(current);
+        for (const group of PAYLOAD_GROUPS) payload[group] = Array.isArray(parsed?.[group]) ? parsed[group] : [];
+      } catch { /* replace malformed payload */ }
+    }
+    let changed = false;
+    for (const { market, group } of definitions) {
+      const marketId = String(market.marketId);
+      const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
+      const active = market.isActive && !market.gameOver;
+      if (active && index < 0) {
+        payload[group].push(fancyDefinitionEntry(market)); added += 1; changed = true;
+      } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
+        payload[group][index] = fancyDefinitionEntry(market); changed = true;
+      } else if (!active && index >= 0) {
+        payload[group].splice(index, 1); removed += 1; changed = true;
+      }
+    }
+    if (changed) {
+      await redis.set(key, JSON.stringify(payload));
+      eventPayloadCache.set(eventId, payload);
+    }
+  }
+  return { events: byEvent.size, added, removed };
 }
 
 function entryMarketId(entry) { return String(entry.marketId ?? entry.mid ?? ""); }
@@ -368,4 +423,4 @@ function getRedisStatus() {
 module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
   transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
-  shouldRemoveFromPayload };
+  shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions };
