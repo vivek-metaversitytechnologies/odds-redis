@@ -12,10 +12,23 @@ const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
 const tickActivity = new Map();
 
-const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "Fancy2", "OddEven", "Fancy3", "CricketCasino", "BallByBall"];
+const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "Fancy2", "OddEven", "OtherMarket", "Fancy3",
+  "CricketCasino", "BallByBall"];
 
 function emptyEventPayload() {
   return Object.fromEntries(PAYLOAD_GROUPS.map((group) => [group, []]));
+}
+
+function normalizeEventPayload(payload) {
+  const normalized = emptyEventPayload();
+  for (const group of PAYLOAD_GROUPS) normalized[group] = Array.isArray(payload?.[group]) ? payload[group] : [];
+  for (const entry of normalized.Fancy3) {
+    if (!normalized.OtherMarket.some((item) => entryMarketId(item) === entryMarketId(entry))) {
+      normalized.OtherMarket.push(entry);
+    }
+  }
+  normalized.Fancy3 = [];
+  return normalized;
 }
 
 function redisUrl() {
@@ -175,7 +188,7 @@ function payloadGroup(item, market) {
   const name = String(market.marketname || "").toLowerCase();
   if (id.includes("BM") || name.includes("bookmaker") || name === "toss") return "Bookmaker";
   if (id.includes("OE") || name.includes("odd even")) return "OddEven";
-  if (id.includes("F3")) return "Fancy3";
+  if (id.includes("F3") || name.includes("other market")) return "OtherMarket";
   if (id.includes("BB") || name.includes("ball by ball")) return "BallByBall";
   if (id.includes("-CC") || id.includes("CASINO") || name.includes("casino")) return "CricketCasino";
   if (id.includes("F2") || id.includes("KD") || id.includes("MT")) return "Fancy2";
@@ -221,7 +234,7 @@ async function reconcileFancyDefinitions(markets) {
     if (current) {
       try {
         const parsed = JSON.parse(current);
-        for (const group of PAYLOAD_GROUPS) payload[group] = Array.isArray(parsed?.[group]) ? parsed[group] : [];
+        payload = normalizeEventPayload(parsed);
       } catch { /* replace malformed payload */ }
     }
     let changed = false;
@@ -300,7 +313,7 @@ async function writeTick(item) {
       try {
         const parsed = JSON.parse(current);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          for (const group of PAYLOAD_GROUPS) payload[group] = Array.isArray(parsed[group]) ? parsed[group] : [];
+          payload = normalizeEventPayload(parsed);
         }
       } catch { /* Replace malformed legacy data with a valid event payload. */ }
     }
@@ -371,7 +384,7 @@ async function getEventSnapshot(eventId) {
   const redis = await getRedisClient(); if (!redis?.isOpen) return emptyEventPayload();
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
   const value = await redis.get(key); if (!value) return emptyEventPayload();
-  try { return JSON.parse(value); } catch { return emptyEventPayload(); }
+  try { return normalizeEventPayload(JSON.parse(value)); } catch { return emptyEventPayload(); }
 }
 
 async function getEventSnapshots(eventIds) {
@@ -382,7 +395,7 @@ async function getEventSnapshots(eventIds) {
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   const values = await redis.mGet(ids.map((eventId) => `${prefix}${eventId}`));
   ids.forEach((eventId, index) => {
-    try { snapshots.set(eventId, values[index] ? JSON.parse(values[index]) : null); }
+    try { snapshots.set(eventId, values[index] ? normalizeEventPayload(JSON.parse(values[index])) : null); }
     catch { snapshots.set(eventId, null); }
   });
   return snapshots;
@@ -423,4 +436,4 @@ function getRedisStatus() {
 module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
   transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
-  shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions };
+  shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions, normalizeEventPayload };

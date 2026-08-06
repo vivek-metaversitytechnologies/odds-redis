@@ -6,10 +6,13 @@ const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 
-const FANCY_MARKET_TYPES = new Set(["session", "odd-even", "cricket-casino", "ball-by-ball"]);
+const FANCY_MARKET_TYPES = new Set([
+  "session", "odd-even", "cricket-casino", "ball-by-ball", "other-market", "meter",
+]);
 const REGULAR_MARKET_TYPES = ["bookmaker", "tied-match", "match-odd", "winner-market",
-  "TOSS", "super-over", "goals"];
-const FANCY_MARKET_REQUESTS = [...FANCY_MARKET_TYPES].map((type) => [type]);
+  "TOSS", "super-over", "goals", "line-market", "completed-match"];
+const FANCY_MARKET_REQUESTS = ["session", "odd-even", "cricket-casino", "ball-by-ball"]
+  .map((type) => [type]);
 const MARKET_TYPES = [...FANCY_MARKET_TYPES, ...REGULAR_MARKET_TYPES];
 let running = false;
 const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
@@ -19,14 +22,19 @@ function marketRows(response, eventsById) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
   return rows.map((item) => {
     const event = eventsById.get(String(item?.eventId));
-    const bookmaker = String(item?.type || "").toLowerCase() === "bookmaker";
-    const marketType = String(item?.type || "").toLowerCase();
+    const marketId = String(item?.id || "").trim();
+    const inferredBookmaker2 = /-BM2$/i.test(marketId);
+    const marketType = String(item?.type || (inferredBookmaker2 ? "bookmaker" : "unknown")).toLowerCase();
+    const bookmaker = marketType === "bookmaker";
     const fancy = FANCY_MARKET_TYPES.has(marketType);
     const zeroCommission = bookmaker && ["bookmaker 0%comm", "0%comm"]
       .includes(String(item?.name || "").toLowerCase());
+    const providedName = String(item?.name || "").trim();
+    const marketName = zeroCommission ? "Bookmaker"
+      : providedName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
     return {
-      marketId: String(item?.id || "").trim(), eventId: Number(item?.eventId),
-      sportId: Number(item?.sportId), marketName: zeroCommission ? "Bookmaker" : String(item?.name || "").trim(),
+      marketId, eventId: Number(item?.eventId),
+      sportId: Number(item?.sportId), marketName,
       marketType,
       matchName: event?.eventName || null, openDate: event?.openDate || null,
       inPlay: Boolean(event?.inPlay), gameOver: Boolean(item?.gameOver), isActive: item?.isActive !== false,
@@ -206,8 +214,12 @@ async function syncMarketDiscovery(events) {
       const eids = eventIds.slice(index, index + batchSize);
       // The vendor omits some advanced markets (notably odd-even) when every type is
       // requested together. Fetch each fancy family independently, matching its API behavior.
-      const requests = [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
-      const responses = await Promise.all(requests.map((type) => provider.markets({ eids, type })));
+      // Omitting `type` returns undocumented families such as other-market/F3,
+      // meter/MT, line-market and BM2. Keep the explicit fancy calls as a fallback
+      // because the vendor has previously omitted odd-even from combined responses.
+      const requests = [null, REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
+      const responses = await Promise.all(requests.map((type) =>
+        provider.markets(type === null ? { eids } : { eids, type })));
       for (const response of responses) discovered.push(...marketRows(response, eventsById));
     }
     const unique = [...new Map(discovered.map((market) => [market.marketId, market])).values()];

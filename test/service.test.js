@@ -4,7 +4,7 @@ const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
 const { bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, emptyEventPayload,
   runnerPrices, preserveRunnerNames, shouldRemoveFromPayload,
-  fancyDefinitionEntry } = require("../src/config/redis");
+  fancyDefinitionEntry, normalizeEventPayload } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { collectOddsTicks, collectScores, messageShape, logRawSocketPayload,
   payloadContainsMarket, isResultTick } = require("../src/services/websocketService");
@@ -106,6 +106,30 @@ test("advanced fancy market types are requested and retained for deactivation", 
     [["4.1-OE", "OE"], ["11.1-CC", "CC"], ["4.1-BB", "BB"]]);
 });
 
+test("undocumented vendor families are classified instead of dropped", () => {
+  assert.equal(FANCY_MARKET_TYPES.has("other-market"), true);
+  assert.equal(FANCY_MARKET_TYPES.has("meter"), true);
+  assert.equal(REGULAR_MARKET_TYPES.includes("line-market"), true);
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const rows = marketRows({ data: [
+    { id: "4.1-F3", eventId: "10", sportId: 4, name: "Caught Out",
+      type: "other-market", isActive: true, gameOver: false },
+    { id: "4.2-MT", eventId: "10", sportId: 4, name: "Wicket Meter",
+      type: "meter", isActive: true, gameOver: false },
+  ] }, events);
+  assert.deepEqual(rows.map((row) => [row.marketId, row.marketType]),
+    [["4.1-F3", "other-market"], ["4.2-MT", "meter"]]);
+});
+
+test("unnamed BM2 markets remain available for socket population", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const [row] = marketRows({ data: [{ id: "1.2-BM2", eventId: "10", sportId: 4,
+    name: null, type: null, isActive: true, gameOver: false }] }, events);
+  assert.equal(row.marketName, "Bookmaker2");
+  assert.equal(row.marketType, "bookmaker");
+  assert.equal(row.maxBet, 25000);
+});
+
 test("advanced market families use separate vendor discovery requests", () => {
   assert.deepEqual(FANCY_MARKET_REQUESTS,
     [["session"], ["odd-even"], ["cricket-casino"], ["ball-by-ball"]]);
@@ -197,10 +221,18 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
     isactive: Buffer.from([0]), isShow: Buffer.from([1]) });
   assert.equal(payloadGroup({ mid: "4.1-F2" }, {}), "Fancy2");
   assert.equal(payloadGroup({ mid: "4.1-OE" }, {}), "OddEven");
+  assert.equal(payloadGroup({ mid: "4.1-F3" }, {}), "OtherMarket");
   assert.equal(output.gameover, true);
   assert.equal(output.nation, "Six over runs");
   assert.deepEqual(Object.keys(emptyEventPayload()),
-    ["Odds", "Bookmaker", "Fancy2", "OddEven", "Fancy3", "CricketCasino", "BallByBall"]);
+    ["Odds", "Bookmaker", "Fancy2", "OddEven", "OtherMarket", "Fancy3",
+      "CricketCasino", "BallByBall"]);
+});
+
+test("legacy Fancy3 Redis rows migrate to OtherMarket", () => {
+  const payload = normalizeEventPayload({ Fancy3: [{ mid: "4.1-F3", nation: "Caught Out" }] });
+  assert.equal(payload.Fancy3.length, 0);
+  assert.equal(payload.OtherMarket[0].mid, "4.1-F3");
 });
 
 test("top-level provider fancy fields map to frontend prices and sizes", () => {
