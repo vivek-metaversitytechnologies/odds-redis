@@ -235,7 +235,7 @@ function fancyDefinitionEntry(market) {
 
 async function reconcileFancyDefinitions(markets) {
   const redis = await getRedisClient();
-  if (!redis?.isOpen) return { events: 0, added: 0, removed: 0 };
+  if (!redis?.isOpen) return { events: 0, added: 0, removed: 0, changedEventIds: [] };
   const byEvent = new Map();
   for (const market of markets || []) {
     if (!market?.eventId || !market?.marketId) continue;
@@ -245,7 +245,7 @@ async function reconcileFancyDefinitions(markets) {
     if (!byEvent.has(eventId)) byEvent.set(eventId, []);
     byEvent.get(eventId).push({ market, group });
   }
-  let added = 0; let removed = 0;
+  let added = 0; let removed = 0; const changedEventIds = [];
   for (const [eventId, definitions] of byEvent) {
     const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
     let payload = emptyEventPayload();
@@ -272,9 +272,10 @@ async function reconcileFancyDefinitions(markets) {
     if (changed) {
       await redis.set(key, JSON.stringify(payload));
       eventPayloadCache.set(eventId, payload);
+      changedEventIds.push(eventId);
     }
   }
-  return { events: byEvent.size, added, removed };
+  return { events: byEvent.size, added, removed, changedEventIds };
 }
 
 function regularDefinitionEntries(market, runners = []) {
@@ -308,15 +309,15 @@ function regularDefinitionEntries(market, runners = []) {
 
 async function reconcileRegularDefinitions(markets) {
   const redis = await getRedisClient();
-  if (!redis?.isOpen) return { events: 0, added: 0 };
+  if (!redis?.isOpen) return { events: 0, added: 0, removed: 0, changedEventIds: [] };
   const byEvent = new Map();
   for (const market of markets || []) {
-    if (!market?.eventId || !market?.marketId || !market.isActive || market.gameOver) continue;
+    if (!market?.eventId || !market?.marketId) continue;
     const eventId = String(market.eventId);
     if (!byEvent.has(eventId)) byEvent.set(eventId, []);
     byEvent.get(eventId).push(market);
   }
-  let added = 0;
+  let added = 0; let removed = 0; const changedEventIds = [];
   for (const [eventId, definitions] of byEvent) {
     const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
     let payload = emptyEventPayload();
@@ -326,15 +327,26 @@ async function reconcileRegularDefinitions(markets) {
     }
     let changed = false;
     for (const market of definitions) {
+      const active = market.isActive && !market.gameOver;
+      if (!active) {
+        for (const group of PAYLOAD_GROUPS) {
+          const filtered = payload[group].filter((entry) => entryMarketId(entry) !== String(market.marketId));
+          if (filtered.length !== payload[group].length) {
+            removed += 1; changed = true; payload[group] = filtered;
+          }
+        }
+        continue;
+      }
       if (payloadHasMarket(payload, market.marketId)) continue;
       const { group, entries } = regularDefinitionEntries(market, market.runners || []);
       payload[group].push(...entries); added += 1; changed = true;
     }
     if (changed) {
       await redis.set(key, JSON.stringify(payload)); eventPayloadCache.set(eventId, payload);
+      changedEventIds.push(eventId);
     }
   }
-  return { events: byEvent.size, added };
+  return { events: byEvent.size, added, removed, changedEventIds };
 }
 
 function entryMarketId(entry) { return String(entry.marketId ?? entry.mid ?? ""); }
@@ -411,6 +423,10 @@ async function writeTick(item) {
   await redis.set(key, JSON.stringify(payload));
   eventPayloadCache.set(String(item.eid), payload);
   recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid); return payload;
+}
+
+function invalidateMarkets(marketIds) {
+  for (const marketId of marketIds || []) marketCache.delete(String(marketId));
 }
 
 function recordTickActivity(key, eventId, marketId) {
@@ -521,4 +537,4 @@ module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, ge
   getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
   transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
   shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions, regularDefinitionEntries,
-  reconcileRegularDefinitions, normalizeEventPayload, validMarketIdentifier };
+  reconcileRegularDefinitions, normalizeEventPayload, validMarketIdentifier, invalidateMarkets };

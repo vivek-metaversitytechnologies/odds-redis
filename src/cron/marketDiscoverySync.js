@@ -2,9 +2,11 @@ const cron = require("node-cron");
 const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
 const { syncMarketSubscriptions } = require("./marketSync");
+const { unsubscribeEventMarkets } = require("../services/marketSubscriptionService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
+const { publishEventSnapshot } = require("../services/frontendSocketService");
 
 const FANCY_MARKET_TYPES = new Set([
   "session", "odd-even", "cricket-casino", "ball-by-ball", "other-market", "meter",
@@ -14,6 +16,7 @@ const REGULAR_MARKET_TYPES = ["bookmaker", "tied-match", "match-odd", "winner-ma
 const FANCY_MARKET_REQUESTS = ["session", "odd-even", "cricket-casino", "ball-by-ball"]
   .map((type) => [type]);
 const MARKET_TYPES = [...FANCY_MARKET_TYPES, ...REGULAR_MARKET_TYPES];
+const DISCOVERABLE_MARKET_TYPES = new Set(MARKET_TYPES.map((type) => String(type).toLowerCase()));
 let running = false;
 const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
   lastError: null, lastResult: null };
@@ -44,7 +47,7 @@ function marketRows(response, eventsById) {
     };
   }).filter((item) => redisStore.validMarketIdentifier(item.marketId) && Number.isInteger(item.eventId)
     && Number.isInteger(item.sportId) && item.marketName
-    && (FANCY_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)));
+    && (DISCOVERABLE_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)));
 }
 
 function oddsType(marketId) {
@@ -99,25 +102,29 @@ async function upsertFancies(fancies) {
 }
 
 async function upsertMarkets(markets) {
-  if (!markets.length) return { inserted: 0, updated: 0, marketIds: [] };
+  if (!markets.length) return { inserted: 0, updated: 0, marketIds: [], deactivatedMarketIds: [] };
   const connection = await getSourcePool().getConnection(); let inserted = 0; let updated = 0;
+  const deactivatedMarketIds = [];
   try {
     await connection.beginTransaction();
     const ids = markets.map((market) => market.marketId);
     const [existingRows] = await connection.query(
-      `SELECT marketid FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids,
+      `SELECT marketid,isactive FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids,
     );
-    const existing = new Set(existingRows.map((row) => String(row.marketid)));
+    const existing = new Map(existingRows.map((row) => [String(row.marketid), Number(row.isactive) === 1]));
     for (const market of markets) {
+      const active = market.isActive && !market.gameOver;
       if (existing.has(market.marketId)) {
         await connection.execute(
           `UPDATE t_market SET marketname=?, matchname=?, opendate=?, sportid=?, eventid=?, seriesid=?,
              inplay=IF(inplay=1,1,?), isactive=?, updatedon=NOW() WHERE marketid=?`,
           [market.marketName, market.matchName, market.openDate, market.sportId, market.eventId,
-            market.seriesId, market.inPlay, market.isActive && !market.gameOver, market.marketId],
+            market.seriesId, market.inPlay, active, market.marketId],
         );
+        if (existing.get(market.marketId) && !active) deactivatedMarketIds.push(market.marketId);
         updated += 1; continue;
       }
+      if (!active) continue;
       await connection.execute(
         `INSERT INTO t_market
           (marketid,sportid,eventid,marketname,matchname,status,isactive,createdon,updatedon,opendate,
@@ -130,7 +137,9 @@ async function upsertMarkets(markets) {
       );
       inserted += 1;
     }
-    await connection.commit(); return { inserted, updated, marketIds: ids };
+    await connection.commit(); return { inserted, updated,
+      marketIds: markets.filter((market) => market.isActive && !market.gameOver).map((market) => market.marketId),
+      deactivatedMarketIds };
   } catch (error) { await connection.rollback(); throw error; }
   finally { connection.release(); }
 }
@@ -242,12 +251,21 @@ async function syncMarketDiscovery(events) {
     const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
     const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const persisted = await upsertMarkets(regularMarkets);
+    redisStore.invalidateMarkets(persisted.deactivatedMarketIds);
     const fancyPersisted = await upsertFancies(fancies);
     const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
     const runnerResult = await fetchAndStoreRunners(persisted.marketIds);
     const regularDefinitions = await redisStore.reconcileRegularDefinitions(
       await regularMarketsWithRunners(regularMarkets),
     );
+    if (persisted.deactivatedMarketIds.length) {
+      await unsubscribeEventMarkets(persisted.deactivatedMarketIds);
+    }
+    const changedEventIds = [...new Set([
+      ...(redisDefinitions.changedEventIds || []),
+      ...(regularDefinitions.changedEventIds || []),
+    ])];
+    await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
     const tossDefinitions = await seedTossMarkets(regularMarkets);
     const subscriptionResult = await syncMarketSubscriptions();
     const subscription = { total: subscriptionResult.total, requested: subscriptionResult.requested,
@@ -258,6 +276,7 @@ async function syncMarketDiscovery(events) {
     const result = { skipped: false, events: eventIds.length, markets: regularMarkets.length,
       fancies: activeFancies, sessionRecords: fancies.length,
       inserted: persisted.inserted, updated: persisted.updated,
+      deactivated: persisted.deactivatedMarketIds.length,
       fancyInserted: fancyPersisted.inserted, fancyUpdated: fancyPersisted.updated,
       redisDefinitions, regularDefinitions, tossDefinitions, runners: runnerResult, subscription };
     state.lastResult = result; state.lastCompletedAt = new Date().toISOString();

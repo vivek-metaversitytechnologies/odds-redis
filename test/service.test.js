@@ -66,8 +66,19 @@ test("market discovery maps active unfinished markets with Java betting defaults
     { id: "1.2", eventId: "10", sportId: 4, name: "Match Odds", type: "match-odd", isActive: true },
     { id: "1.3", eventId: "10", sportId: 4, name: "Closed", type: "match-odd", isActive: false },
   ] }, events);
-  assert.deepEqual(rows.map((row) => [row.marketName, row.maxBet, row.betDelay]),
+  assert.deepEqual(rows.filter((row) => row.isActive).map((row) => [row.marketName, row.maxBet, row.betDelay]),
     [["Bookmaker", 25000, 0], ["Match Odds", 1, 3]]);
+  assert.equal(rows.find((row) => row.marketName === "Closed")?.isActive, false);
+});
+
+test("explicitly inactive line markets remain in discovery for deactivation", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const rows = marketRows({ data: [{ id: "1.3", eventId: "10", sportId: 4,
+    name: "1st Innings 75 Balls Runs Line", type: "line-market",
+    isActive: false, gameOver: false }] }, events);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].isActive, false);
+  assert.equal(rows[0].marketType, "line-market");
 });
 
 test("session market suffixes map to Java fancy odds types", () => {
