@@ -5,6 +5,7 @@ const { supportedSportIds } = require("./competitionSync");
 const logger = require("../utils/logger");
 const { syncMarketDiscovery } = require("./marketDiscoverySync");
 const cronConfig = require("../config/cron");
+const { utcToIstSql } = require("../utils/dateTime");
 
 let running = false;
 const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
@@ -16,11 +17,12 @@ function eventRows(responses) {
     : Array.isArray(response) ? response : []).map((item) => ({
     eventId: Number(item?.id), eventName: String(item?.name || "").trim(),
     sportId: Number(item?.sportId), seriesId: Number(item?.leagueId),
-    openDate: item?.startTime ? new Date(item.startTime) : null,
+    // Provider start times are UTC; persist an IST wall-clock DATETIME for consumers.
+    openDate: utcToIstSql(item?.startTime),
     inPlay: Boolean(item?.inPlay), gameOver: Boolean(item?.gameOver),
   })).filter((item) => Number.isInteger(item.eventId) && item.eventName
     && sports.has(item.sportId) && Number.isInteger(item.seriesId)
-    && item.openDate && !Number.isNaN(item.openDate.getTime()) && !item.gameOver);
+    && item.openDate && !item.gameOver);
 }
 
 async function upsertEvents(events) {

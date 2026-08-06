@@ -5,8 +5,9 @@ const { syncMarketSubscriptions } = require("./marketSync");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 
-const MARKET_TYPES = ["session", "bookmaker", "tied-match", "match-odd",
-  "winner-market", "TOSS", "super-over", "goals"];
+const FANCY_MARKET_TYPES = new Set(["session", "odd-even", "cricket-casino", "ball-by-ball"]);
+const MARKET_TYPES = ["session", "odd-even", "cricket-casino", "ball-by-ball",
+  "bookmaker", "tied-match", "match-odd", "winner-market", "TOSS", "super-over", "goals"];
 let running = false;
 const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
   lastError: null, lastResult: null };
@@ -29,7 +30,7 @@ function marketRows(response, eventsById) {
     };
   }).filter((item) => item.marketId && Number.isInteger(item.eventId)
     && Number.isInteger(item.sportId) && item.marketName
-    && (item.marketType === "session" || (item.isActive && !item.gameOver)));
+    && (FANCY_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)));
 }
 
 function oddsType(marketId) {
@@ -182,8 +183,8 @@ async function syncMarketDiscovery(events) {
       discovered.push(...marketRows(response, eventsById));
     }
     const unique = [...new Map(discovered.map((market) => [market.marketId, market])).values()];
-    const fancies = unique.filter((market) => market.marketType === "session");
-    const regularMarkets = unique.filter((market) => market.marketType !== "session");
+    const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
+    const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const persisted = await upsertMarkets(regularMarkets);
     const fancyPersisted = await upsertFancies(fancies);
     const runnerResult = await fetchAndStoreRunners(persisted.marketIds);
@@ -238,6 +239,6 @@ function startMarketDiscoverySync() {
 
 function getMarketDiscoveryStatus() { return { ...state }; }
 
-module.exports = { MARKET_TYPES, marketRows, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
+module.exports = { MARKET_TYPES, FANCY_MARKET_TYPES, marketRows, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
   fetchActiveEventsForMarketDiscovery, syncMarketDiscovery, syncStoredEventMarkets,
   startMarketDiscoverySync, getMarketDiscoveryStatus };

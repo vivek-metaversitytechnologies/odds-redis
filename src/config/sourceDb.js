@@ -13,6 +13,8 @@ function getSourcePool() {
     waitForConnections: true,
     connectionLimit: Number(process.env.SOURCE_DB_CONNECTION_LIMIT || 5),
     queueLimit: 0,
+    // Preserve stored IST DATETIME values instead of converting them through the host timezone.
+    dateStrings: true,
   });
   return pool;
 }

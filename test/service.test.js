@@ -11,7 +11,7 @@ const { parseJsonObjects, containsMarketId } = require("../src/services/logReade
 const { dashboardEntry } = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
 const { eventRows } = require("../src/cron/eventSync");
-const { marketRows, oddsType } = require("../src/cron/marketDiscoverySync");
+const { MARKET_TYPES, FANCY_MARKET_TYPES, marketRows, oddsType } = require("../src/cron/marketDiscoverySync");
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
 
 test("database rows map to API event fields", () => {
@@ -52,6 +52,7 @@ test("event sync keeps supported unfinished events", () => {
     { id: "30", name: "Unsupported", sportId: 7, leagueId: "7", startTime: "2026-08-02T14:00:00Z", gameOver: false },
   ] }]);
   assert.deepEqual(rows.map((row) => row.eventId), [10]);
+  assert.equal(rows[0].openDate, "2026-08-02 17:30:00");
 });
 
 test("market discovery maps active unfinished markets with Java betting defaults", () => {
@@ -76,6 +77,24 @@ test("inactive sessions remain available for fancy-table deactivation", () => {
   const rows = marketRows({ data: [{ id: "4.1-F2", eventId: "10", sportId: 4,
     name: "Over runs", type: "session", isActive: false, gameOver: false }] }, events);
   assert.equal(rows.length, 1); assert.equal(rows[0].isActive, false);
+});
+
+test("advanced fancy market types are requested and retained for deactivation", () => {
+  for (const type of ["odd-even", "cricket-casino", "ball-by-ball"]) {
+    assert.equal(MARKET_TYPES.includes(type), true);
+    assert.equal(FANCY_MARKET_TYPES.has(type), true);
+  }
+  const events = new Map([["10", { eventName: "A v B", openDate: new Date(), inPlay: true }]]);
+  const rows = marketRows({ data: [
+    { id: "4.1-OE", eventId: "10", sportId: 4, name: "Odd Even", type: "odd-even",
+      isActive: false, gameOver: true },
+    { id: "11.1-CC", eventId: "10", sportId: 4, name: "Cricket Casino", type: "cricket-casino",
+      isActive: true, gameOver: false },
+    { id: "4.1-BB", eventId: "10", sportId: 4, name: "Ball By Ball", type: "ball-by-ball",
+      isActive: true, gameOver: false },
+  ] }, events);
+  assert.deepEqual(rows.map((row) => [row.marketId, oddsType(row.marketId)]),
+    [["4.1-OE", "OE"], ["11.1-CC", "CC"], ["4.1-BB", "BB"]]);
 });
 
 test("market rows map betting configuration", () => {
@@ -170,6 +189,17 @@ test("top-level provider fancy fields map to frontend prices and sizes", () => {
   assert.equal(output.isActive, false);
   assert.equal(output.isShow, true);
   assert.equal(payloadGroup({ mid: "4.1-CC" }, {}), "CricketCasino");
+});
+
+test("cricket casino rate maps to the visible back price", () => {
+  const output = fancyPayload({ eid: 10, mid: "11.252631991096-CC",
+    na: "1st Ing 1-100 Ball Run", ra: 9, s: true },
+  { eventid: 10, marketname: "1st Ing 1-100 Ball Run", markettype: "cricket-casino" });
+  assert.equal(output.b1, 9);
+  assert.equal(output.l1, null);
+  assert.equal(output.rate, 9);
+  assert.equal(output.bs1, null);
+  assert.equal(output.ls1, null);
 });
 
 test("unavailable fancy ticks are removed without treating them as result ticks", () => {

@@ -152,12 +152,14 @@ function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item
 
 function fancyPayload(item, market) {
   const runner = Array.isArray(item.r) ? item.r[0] || {} : {};
+  const cricketCasino = String(item.mid || "").toUpperCase().includes("-CC");
+  const casinoRate = cricketCasino ? numberOr(runner.ra ?? item.ra) : null;
   return {
     mid: String(item.mid), sid: String(runner.rid ?? item.mid), nation: runner.na ?? item.na ?? market.marketname ?? null,
-    b1: numberOr(runner.b ?? runner.b1 ?? item.b ?? item.b1),
+    b1: numberOr(runner.b ?? runner.b1 ?? item.b ?? item.b1, casinoRate),
     l1: numberOr(runner.l ?? runner.l1 ?? item.l ?? item.l1),
-    bs1: numberOr(runner.bs ?? runner.bs1 ?? item.br ?? item.bs ?? item.bs1, 0),
-    ls1: numberOr(runner.ls ?? runner.ls1 ?? item.lr ?? item.ls ?? item.ls1, 0),
+    bs1: numberOr(runner.bs ?? runner.bs1 ?? item.br ?? item.bs ?? item.bs1, cricketCasino ? null : 0),
+    ls1: numberOr(runner.ls ?? runner.ls1 ?? item.lr ?? item.ls ?? item.ls1, cricketCasino ? null : 0),
     gstatus: status(runner.sb ?? item.sb), rem: runner.rem ?? item.rem ?? item.res ?? "",
     srno: String(item.srno ?? item.di ?? runner.srno ?? ""),
     gameover: booleanOr(item.go, false), s: booleanOr(item.s, true), maxBet: numberOr(market.maxbet),
@@ -165,6 +167,7 @@ function fancyPayload(item, market) {
     matchId: numberOr(market.eventid, market.eventid), isActive: booleanOr(market.isactive),
     isShow: booleanOr(market.isShow, true), matchName: market.matchname ?? null,
     matchType: market.markettype ?? null, maxLiabilityPerMarket: numberOr(market.maximumProfit),
+    rate: casinoRate,
   };
 }
 
