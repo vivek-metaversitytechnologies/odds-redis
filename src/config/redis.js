@@ -292,6 +292,12 @@ function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item
 
 function fancyPayload(item, market) {
   const runner = Array.isArray(item.r) ? item.r[0] || {} : {};
+  const marketType = String(market.markettype || market.mtype || item.type || "").toLowerCase();
+  const ballByBall =
+    marketType === "ball-by-ball" ||
+    String(item.mid || "")
+      .toUpperCase()
+      .endsWith("-BB");
   const cricketCasino = String(item.mid || "")
     .toUpperCase()
     .includes("-CC");
@@ -299,7 +305,9 @@ function fancyPayload(item, market) {
   return {
     mid: String(item.mid),
     sid: String(runner.rid ?? item.mid),
-    nation: runner.na ?? item.na ?? market.marketname ?? null,
+    nation: ballByBall
+      ? market.marketname || runner.na || item.na || null
+      : (runner.na ?? item.na ?? market.marketname ?? null),
     b1: numberOr(runner.b ?? runner.b1 ?? item.b ?? item.b1, casinoRate),
     l1: numberOr(runner.l ?? runner.l1 ?? item.l ?? item.l1),
     bs1: numberOr(runner.bs ?? runner.bs1 ?? item.br ?? item.bs ?? item.bs1, cricketCasino ? null : 0),

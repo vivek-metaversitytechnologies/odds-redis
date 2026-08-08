@@ -248,6 +248,27 @@ test("market discovery maps active unfinished markets with Java betting defaults
   assert.equal(rows.find((row) => row.marketName === "Closed")?.isActive, false);
 });
 
+test("ball-by-ball discovery prefixes the vendor ball line", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const [row] = marketRows(
+    {
+      data: [
+        {
+          id: "4.1-BB",
+          eventId: "10",
+          sportId: 4,
+          name: "Ball Run SB",
+          type: "ball-by-ball",
+          ballLine: 29,
+          isActive: true,
+        },
+      ],
+    },
+    events,
+  );
+  assert.equal(row.marketName, "29 Ball Run SB");
+});
+
 test("vendor inPlayFilter maps to the persisted display message", () => {
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
   const [row] = marketRows(
@@ -765,6 +786,14 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
     "CricketCasino",
     "BallByBall",
   ]);
+});
+
+test("ball-by-ball socket ticks retain the numbered discovery name", () => {
+  const output = fancyPayload(
+    { mid: "4.1-BB", na: "Ball Run SB", r: [{ na: "Ball Run SB", b: 1, l: 2 }] },
+    { marketname: "29 Ball Run SB", mtype: "ball-by-ball", isactive: 1 },
+  );
+  assert.equal(output.nation, "29 Ball Run SB");
 });
 
 test("legacy Fancy3 Redis rows migrate to OtherMarket", () => {

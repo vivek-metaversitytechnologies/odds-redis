@@ -67,11 +67,16 @@ function marketRows(response, eventsById) {
       const zeroCommission =
         bookmaker && ["bookmaker 0%comm", "0%comm"].includes(String(item?.name || "").toLowerCase());
       const providedName = String(item?.name || "").trim();
+      const ballLine = item?.ballLine == null ? null : String(item.ballLine).trim();
+      const numberedBallName =
+        marketType === "ball-by-ball" && ballLine && !providedName.startsWith(`${ballLine} `)
+          ? `${ballLine} ${providedName}`.trim()
+          : providedName;
       const displayMessage =
         item?.inPlayFilter == null ? null : String(item.inPlayFilter).trim().slice(0, 255) || null;
       const marketName = zeroCommission
         ? "Bookmaker"
-        : providedName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
+        : numberedBallName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
       return {
         marketId,
         eventId: Number(item?.eventId),
