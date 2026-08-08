@@ -746,6 +746,8 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
   assert.equal(payloadGroup({ mid: "4.1-OE" }, {}), "OddEven");
   assert.equal(payloadGroup({ mid: "4.1-F3" }, {}), "OtherMarket");
   assert.equal(payloadGroup({ mid: "4.1-KD" }, {}), "Khado");
+  assert.equal(payloadGroup({ mid: "4.1-MT" }, {}), "Meter");
+  assert.equal(payloadGroup({ mid: "4.1" }, { mtype: "meter" }), "Meter");
   assert.equal(payloadGroup({ mid: "4.1" }, { mtype: "khado" }), "Khado");
   assert.equal(payloadGroup({ mid: "1.123" }, { marketname: "1st Innings 20 Overs Line" }), "LineMarket");
   assert.equal(output.gameover, true);
@@ -755,6 +757,7 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
     "Bookmaker",
     "LineMarket",
     "Fancy2",
+    "Meter",
     "Khado",
     "OddEven",
     "OtherMarket",
@@ -782,6 +785,13 @@ test("legacy KD rows migrate from Fancy2 to Khado", () => {
   const payload = normalizeEventPayload({ Fancy2: [row] });
   assert.equal(payload.Fancy2.length, 0);
   assert.deepEqual(payload.Khado, [row]);
+});
+
+test("legacy MT rows migrate from Fancy2 to Meter", () => {
+  const row = { mid: "4.1-MT", nation: "Wicket Meter" };
+  const payload = normalizeEventPayload({ Fancy2: [row] });
+  assert.equal(payload.Fancy2.length, 0);
+  assert.deepEqual(payload.Meter, [row]);
 });
 
 test("invalid sentinel market IDs are rejected and removed from snapshots", () => {

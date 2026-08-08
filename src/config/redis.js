@@ -21,6 +21,7 @@ const PAYLOAD_GROUPS = [
   "Bookmaker",
   "LineMarket",
   "Fancy2",
+  "Meter",
   "Khado",
   "OddEven",
   "OtherMarket",
@@ -91,6 +92,13 @@ function normalizeEventPayload(payload) {
     }
   }
   normalized.Fancy2 = normalized.Fancy2.filter((entry) => !/-KD$/i.test(entryMarketId(entry)));
+  const legacyMeter = normalized.Fancy2.filter((entry) => /-MT$/i.test(entryMarketId(entry)));
+  for (const entry of legacyMeter) {
+    if (!normalized.Meter.some((item) => entryMarketId(item) === entryMarketId(entry))) {
+      normalized.Meter.push(entry);
+    }
+  }
+  normalized.Fancy2 = normalized.Fancy2.filter((entry) => !/-MT$/i.test(entryMarketId(entry)));
   for (const entry of normalized.Fancy3) {
     if (!normalized.OtherMarket.some((item) => entryMarketId(item) === entryMarketId(entry))) {
       normalized.OtherMarket.push(entry);
@@ -328,7 +336,8 @@ function payloadGroup(item, market) {
   if (id.includes("BB") || name.includes("ball by ball")) return "BallByBall";
   if (id.includes("-CC") || id.includes("CASINO") || name.includes("casino")) return "CricketCasino";
   if (marketType === "khado" || id.includes("KD") || name.includes("khado")) return "Khado";
-  if (id.includes("F2") || id.includes("MT")) return "Fancy2";
+  if (marketType === "meter" || id.endsWith("-MT") || /\bmeter\b/.test(name)) return "Meter";
+  if (id.includes("F2")) return "Fancy2";
   return "Odds";
 }
 
