@@ -73,6 +73,19 @@ function inferredMarketType(marketId, providedType) {
   return "unknown";
 }
 
+function fallbackMarketName(marketType, marketId) {
+  const names = {
+    session: "Fancy2",
+    "odd-even": "OddEven",
+    khado: "Khado",
+    "other-market": "OtherMarket",
+    "ball-by-ball": "BallByBall",
+    "cricket-casino": "CricketCasino",
+    meter: "Meter",
+  };
+  return names[marketType] || `Market ${marketId}`;
+}
+
 function marketRows(response, eventsById) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
   return rows
@@ -95,7 +108,7 @@ function marketRows(response, eventsById) {
         item?.inPlayFilter == null ? null : String(item.inPlayFilter).trim().slice(0, 255) || null;
       const marketName = zeroCommission
         ? "Bookmaker"
-        : numberedBallName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
+        : numberedBallName || (inferredBookmaker2 ? "Bookmaker2" : fallbackMarketName(marketType, marketId));
       return {
         marketId,
         eventId: Number(item?.eventId),
@@ -700,6 +713,7 @@ module.exports = {
   FANCY_MARKET_REQUESTS,
   marketRows,
   inferredMarketType,
+  fallbackMarketName,
   mergeDiscoveredMarkets,
   oddsType,
   upsertMarkets,

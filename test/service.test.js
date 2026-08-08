@@ -38,6 +38,7 @@ const {
   FANCY_MARKET_REQUESTS,
   marketRows,
   inferredMarketType,
+  fallbackMarketName,
   mergeDiscoveredMarkets,
   bookmaker2BaseMarketId,
   runnerSourceMarketId,
@@ -257,6 +258,13 @@ test("market discovery infers fancy families from vendor suffixes", () => {
   assert.equal(inferredMarketType("4.1-OE", null), "odd-even");
   assert.equal(inferredMarketType("4.1-F2", null), "session");
   assert.equal(inferredMarketType("4.1-BM2", null), "bookmaker");
+});
+
+test("unnamed fancy markets use their Redis section name", () => {
+  assert.equal(fallbackMarketName("odd-even", "4.1-OE"), "OddEven");
+  assert.equal(fallbackMarketName("other-market", "4.1-F3"), "OtherMarket");
+  assert.equal(fallbackMarketName("meter", "4.1-MT"), "Meter");
+  assert.equal(fallbackMarketName("unknown", "1.2"), "Market 1.2");
 });
 
 test("ball-by-ball discovery prefixes the vendor ball line", () => {
