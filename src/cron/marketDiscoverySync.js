@@ -33,6 +33,8 @@ function marketRows(response, eventsById) {
     const zeroCommission = bookmaker && ["bookmaker 0%comm", "0%comm"]
       .includes(String(item?.name || "").toLowerCase());
     const providedName = String(item?.name || "").trim();
+    const displayMessage = item?.inPlayFilter == null
+      ? null : String(item.inPlayFilter).trim().slice(0, 255) || null;
     const marketName = zeroCommission ? "Bookmaker"
       : providedName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
     return {
@@ -43,11 +45,37 @@ function marketRows(response, eventsById) {
       inPlay: Boolean(event?.inPlay), gameOver: Boolean(item?.gameOver), isActive: item?.isActive !== false,
       betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3, minBet: 100,
       maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
+      displayMessage,
       seriesId: event?.seriesId ?? null,
     };
   }).filter((item) => redisStore.validMarketIdentifier(item.marketId) && Number.isInteger(item.eventId)
     && Number.isInteger(item.sportId) && item.marketName
     && (DISCOVERABLE_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)));
+}
+
+// The vendor can return contradictory states for the same market between the
+// unfiltered request and a typed request. Treat the responses as a union: a
+// market remains active when any response says it is active. It is deactivated
+// only when every response containing that ID agrees that it is inactive.
+function mergeDiscoveredMarkets(markets) {
+  const merged = new Map();
+  for (const market of markets || []) {
+    const current = merged.get(market.marketId);
+    if (!current) {
+      merged.set(market.marketId, market);
+      continue;
+    }
+    const currentActive = current.isActive && !current.gameOver;
+    const incomingActive = market.isActive && !market.gameOver;
+    const preferIncomingMetadata = current.marketType === "unknown" && market.marketType !== "unknown";
+    const metadata = preferIncomingMetadata ? market : current;
+    merged.set(market.marketId, {
+      ...metadata,
+      isActive: currentActive || incomingActive,
+      gameOver: !currentActive && !incomingActive && (current.gameOver || market.gameOver),
+    });
+  }
+  return [...merged.values()];
 }
 
 function oddsType(marketId) {
@@ -73,9 +101,9 @@ async function upsertFancies(fancies) {
       if (existing.has(fancy.marketId)) {
         await connection.execute(
           `UPDATE t_matchfancy SET name=?, oddstype=?, eventid=?, isactive=?, isshow=?, is_show=?,
-             matchname=?, sportid=?, mtype=?, updatedon=NOW() WHERE fancyid=?`,
+             matchname=?, sportid=?, mtype=?, remarks=?, updatedon=NOW() WHERE fancyid=?`,
           [fancy.marketName, oddsType(fancy.marketId), fancy.eventId, active, true, true,
-            fancy.matchName, fancy.sportId, fancy.marketType, fancy.marketId],
+            fancy.matchName, fancy.sportId, fancy.marketType, fancy.displayMessage, fancy.marketId],
         );
         updated += 1; continue;
       }
@@ -85,12 +113,12 @@ async function upsertFancies(fancies) {
       await connection.execute(
         `INSERT INTO t_matchfancy
           (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
-           issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,createdon,matchname,
+           issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
            sportid,provider,isbettable,isplay,maxliabilityperbet)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [fancy.marketId, fancy.marketName, oddsType(fancy.marketId), "OPEN", 100000, 0, 100,
           100000, fancy.eventId, false, active,
-          fancy.marketType, true, true, "", new Date(),
+          fancy.marketType, true, true, "", fancy.displayMessage, new Date(),
           fancy.matchName, fancy.sportId, "RS", 1, fancy.inPlay, 100000],
       );
       inserted += 1;
@@ -118,9 +146,10 @@ async function upsertMarkets(markets) {
       if (existing.has(market.marketId)) {
         await connection.execute(
           `UPDATE t_market SET marketname=?, matchname=?, opendate=?, sportid=?, eventid=?, seriesid=?,
-             inplay=IF(inplay=1,1,?), isactive=?, betdelay=?, updatedon=NOW() WHERE marketid=?`,
+             inplay=IF(inplay=1,1,?), isactive=?, betdelay=?, display_message=?, updatedon=NOW() WHERE marketid=?`,
           [market.marketName, market.matchName, market.openDate, market.sportId, market.eventId,
-            market.seriesId, market.inPlay, active, market.betDelay, market.marketId],
+            market.seriesId, market.inPlay, active, market.betDelay,
+            market.displayMessage, market.marketId],
         );
         if (existing.get(market.marketId) && !active) deactivatedMarketIds.push(market.marketId);
         updated += 1; continue;
@@ -134,7 +163,7 @@ async function upsertMarkets(markets) {
          VALUES (?,?,?,?,?,?,?,NOW(),NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [market.marketId, market.sportId, market.eventId, market.marketName, market.matchName,
           true, true, market.openDate, market.minBet, market.maxBet, market.betDelay, market.inPlay,
-          1, 500, false, "", false, false, 0, 1000000, false, market.seriesId],
+          1, 500, false, market.displayMessage, false, false, 0, 1000000, false, market.seriesId],
       );
       inserted += 1;
     }
@@ -145,20 +174,58 @@ async function upsertMarkets(markets) {
   finally { connection.release(); }
 }
 
+function bookmaker2BaseMarketId(marketId) {
+  const normalized = String(marketId || "").trim();
+  return /-BM2$/i.test(normalized) ? normalized.replace(/-BM2$/i, "") : null;
+}
+
+function runnerSourceMarketId(marketId) {
+  return bookmaker2BaseMarketId(marketId) || String(marketId);
+}
+
+function runnerLookupMarketIds(marketIds) {
+  return [...new Set((marketIds || []).flatMap((marketId) => {
+    const normalized = String(marketId);
+    const baseMarketId = bookmaker2BaseMarketId(normalized);
+    return baseMarketId ? [normalized, baseMarketId] : [normalized];
+  }))];
+}
+
+function enforceBookmaker2Eligibility(markets) {
+  const byId = new Map((markets || []).map((market) => [String(market.marketId), market]));
+  return (markets || []).map((market) => {
+    const baseMarketId = bookmaker2BaseMarketId(market.marketId);
+    if (!baseMarketId) return market;
+    const baseMarket = byId.get(baseMarketId);
+    // Only the Match Odds clone belongs in the Bookmaker2 section. When the
+    // vendor also exposes BM2 clones for Tied/Completed/etc., retain them as
+    // explicit inactive records so reconciliation removes old Redis rows.
+    if (baseMarket && baseMarket.marketType !== "match-odd") {
+      return { ...market, isActive: false };
+    }
+    return market;
+  });
+}
+
 async function marketsMissingRunners(marketIds) {
   if (!marketIds.length) return [];
+  const lookupIds = runnerLookupMarketIds(marketIds);
   const [rows] = await getSourcePool().query(
-    `SELECT DISTINCT marketid FROM t_selectionid WHERE marketid IN (${marketIds.map(() => "?").join(",")})`,
-    marketIds,
+    `SELECT DISTINCT marketid FROM t_selectionid WHERE marketid IN (${lookupIds.map(() => "?").join(",")})`,
+    lookupIds,
   );
   const present = new Set(rows.map((row) => String(row.marketid)));
-  return marketIds.filter((marketId) => !present.has(String(marketId)));
+  return marketIds.filter((marketId) => {
+    const normalized = String(marketId);
+    const baseMarketId = bookmaker2BaseMarketId(normalized);
+    return !present.has(normalized) && !(baseMarketId && present.has(baseMarketId));
+  });
 }
 
 async function fetchAndStoreRunners(marketIds) {
   const missing = await marketsMissingRunners(marketIds);
   const responses = await Promise.allSettled(missing.map(async (marketId) => ({
-    marketId, response: await provider.runners(marketId),
+    marketId, response: await provider.runners(runnerSourceMarketId(marketId)),
   })));
   const runners = responses.flatMap((result) => {
     if (result.status !== "fulfilled") return [];
@@ -199,9 +266,10 @@ async function fetchAndStoreRunners(marketIds) {
 async function regularMarketsWithRunners(markets) {
   const ids = [...new Set((markets || []).map((market) => String(market.marketId)).filter(Boolean))];
   if (!ids.length) return [];
+  const lookupIds = runnerLookupMarketIds(ids);
   const [rows] = await getSourcePool().query(
     `SELECT marketid,selectionid,runner_name FROM t_selectionid
-      WHERE marketid IN (${ids.map(() => "?").join(",")}) ORDER BY id ASC`, ids,
+      WHERE marketid IN (${lookupIds.map(() => "?").join(",")}) ORDER BY id ASC`, lookupIds,
   );
   const byMarket = new Map();
   for (const row of rows) {
@@ -209,7 +277,13 @@ async function regularMarketsWithRunners(markets) {
     if (!byMarket.has(marketId)) byMarket.set(marketId, []);
     byMarket.get(marketId).push({ selectionId: row.selectionid, runnerName: row.runner_name });
   }
-  return markets.map((market) => ({ ...market, runners: byMarket.get(String(market.marketId)) || [] }));
+  return markets.map((market) => {
+    const marketId = String(market.marketId);
+    const exactRunners = byMarket.get(marketId) || [];
+    const baseMarketId = bookmaker2BaseMarketId(marketId);
+    return { ...market, runners: exactRunners.length
+      ? exactRunners : baseMarketId ? byMarket.get(baseMarketId) || [] : [] };
+  });
 }
 
 async function seedTossMarkets(markets) {
@@ -248,12 +322,13 @@ async function syncMarketDiscovery(events) {
         provider.markets(type === null ? { eids } : { eids, type })));
       for (const response of responses) discovered.push(...marketRows(response, eventsById));
     }
-    const unique = [...new Map(discovered.map((market) => [market.marketId, market])).values()];
+    const unique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(discovered));
     const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
     const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const persisted = await upsertMarkets(regularMarkets);
     redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
     const fancyPersisted = await upsertFancies(fancies);
+    redisStore.invalidateMarkets(fancyPersisted.fancyIds);
     const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
     const runnerResult = await fetchAndStoreRunners(persisted.marketIds);
     const regularDefinitions = await redisStore.reconcileRegularDefinitions(
@@ -321,7 +396,8 @@ function startMarketDiscoverySync() {
 function getMarketDiscoveryStatus() { return { ...state }; }
 
 module.exports = { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
-  marketRows, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
+  marketRows, mergeDiscoveredMarkets, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
+  bookmaker2BaseMarketId, runnerSourceMarketId, runnerLookupMarketIds, enforceBookmaker2Eligibility,
   regularMarketsWithRunners, seedTossMarkets,
   fetchActiveEventsForMarketDiscovery, syncMarketDiscovery, syncStoredEventMarkets,
   startMarketDiscoverySync, getMarketDiscoveryStatus };

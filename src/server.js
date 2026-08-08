@@ -24,12 +24,14 @@ async function startServer() {
   frontendSocket.attachFrontendSocket(server);
   logger.info("HTTP server started", { port: server.address().port });
   websocket.setResultHandler((marketIds) => subscriptions.unsubscribeResultMarkets(marketIds));
-  if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "true").toLowerCase() === "true") {
+  // Establish the replacement socket before any optional provider cleanup. Redis remains
+  // the durable frontend snapshot and must not be touched during a process restart.
+  websocket.connectSocket();
+  if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "false").toLowerCase() === "true") {
     const markets = await fetchActiveMarkets();
     const marketIds = markets.map((market) => market.marketid).filter(Boolean);
     await subscriptions.reconcileProviderSubscriptions(marketIds);
   }
-  websocket.connectSocket();
   subscriptions.startSkippedRetries();
   const competitionCronTask = startCompetitionSync();
   const eventCronTask = startEventSync();
@@ -65,7 +67,9 @@ async function startServer() {
       websocket.setResultHandler(null);
       await frontendSocket.closeFrontendSocket();
       await new Promise((resolve) => server.close(resolve));
-      await subscriptions.unsubscribeAll().catch((error) => logger.warn("Provider unsubscribe failed", { error: error.message }));
+      // Do not bulk-unsubscribe on SIGTERM/SIGINT. PM2 restarts replace this process and
+      // the new socket immediately restores subscriptions. Explicit admin/result/event
+      // unsubscribe operations still use the provider unsubscribe API.
       await websocket.stopSocket();
       await closeRedis();
       await closeSourceDb();

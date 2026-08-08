@@ -41,7 +41,8 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - Store the grouped frontend payload at `Data-Rs:<eid>`.
 - Convert bookmaker runner payloads using market metadata before storing them.
 - Publish the complete Redis-backed event payload to subscribed frontends after each persisted update.
-- Unsubscribe and close HTTP, Socket.IO, Redis, and MySQL during shutdown.
+- Preserve provider registrations and Redis snapshots during a process restart; close only
+  local HTTP, Socket.IO, Redis, and MySQL connections during shutdown.
 
 ## API
 

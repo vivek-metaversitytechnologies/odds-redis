@@ -202,7 +202,7 @@ function fancyPayload(item, market) {
     matchId: numberOr(market.eventid, market.eventid), isActive: booleanOr(market.isactive),
     isShow: booleanOr(market.isShow, true), matchName: market.matchname ?? null,
     matchType: market.markettype ?? null, maxLiabilityPerMarket: numberOr(market.maximumProfit),
-    rate: casinoRate,
+    display_message: market.displayMessage ?? market.remarks ?? null, rate: casinoRate,
   };
 }
 
@@ -238,7 +238,7 @@ function fancyDefinitionEntry(market) {
     minBet: numberOr(market.minBet, 100), betDelay: numberOr(market.betDelay, 0),
     matchId: numberOr(market.eventId, market.eventId), isActive: true, isShow: true,
     matchName: market.matchName ?? null, matchType: market.marketType ?? null,
-    maxLiabilityPerMarket: 100000, rate: null,
+    maxLiabilityPerMarket: 100000, display_message: market.displayMessage ?? null, rate: null,
   };
 }
 
@@ -274,6 +274,9 @@ async function reconcileFancyDefinitions(markets) {
         payload[group].push(fancyDefinitionEntry(market)); added += 1; changed = true;
       } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
         payload[group][index] = fancyDefinitionEntry(market); changed = true;
+      } else if (active && index >= 0
+        && payload[group][index]?.display_message !== (market.displayMessage ?? null)) {
+        payload[group][index].display_message = market.displayMessage ?? null; changed = true;
       } else if (!active && index >= 0) {
         payload[group].splice(index, 1); removed += 1; changed = true;
       }
@@ -293,10 +296,11 @@ function regularDefinitionEntries(market, runners = []) {
     marketname: market.marketName, matchname: market.matchName, opendate: market.openDate,
     inplay: market.inPlay, isactive: market.isActive, minbet: market.minBet,
     maxbet: market.maxBet, betDelay: market.betDelay, minBetRate: 1, maxBetRate: 500,
+    displayMessage: market.displayMessage ?? null,
   };
   const itemRunners = runners.map((runner) => ({
     rid: runner.selectionId, na: runner.runnerName, s: "SUSPENDED", sb: "S",
-    b: [], l: [], b1: null, l1: null, bs1: 0, ls1: 0,
+    b1: null, l1: null, bs1: 0, ls1: 0,
   }));
   const group = payloadGroup({ mid: market.marketId }, marketRow);
   if (group === "Bookmaker") {
@@ -305,7 +309,7 @@ function regularDefinitionEntries(market, runners = []) {
     return { group, entries: entries.length ? entries : [{
       mid: String(market.marketId), t: market.marketName, sid: String(market.marketId),
       nation: market.marketName, b1: null, bs1: 0, l1: null, ls1: 0,
-      gstatus: "WAITING", rem: null, display_message: null, betlock: 0,
+      gstatus: "WAITING", rem: null, display_message: market.displayMessage ?? null, betlock: 0,
       minBet: numberOr(market.minBet), maxBet: numberOr(market.maxBet),
       betDelay: numberOr(market.betDelay, 0), minBetRate: 1, maxBetRate: 500,
       matchName: market.matchName ?? null, matchId: numberOr(market.eventId, market.eventId),
@@ -346,7 +350,32 @@ async function reconcileRegularDefinitions(markets) {
         }
         continue;
       }
-      if (payloadHasMarket(payload, market.marketId)) continue;
+      if (payloadHasMarket(payload, market.marketId)) {
+        // Discovery initially has no metadata for BM2 itself. Replace the single
+        // synthetic "Bookmaker2" row once base-market runner names are available.
+        const marketId = String(market.marketId);
+        const currentEntries = payload.Bookmaker
+          .filter((entry) => entryMarketId(entry) === marketId);
+        const syntheticBookmaker2 = /-BM2$/i.test(marketId) && currentEntries.length === 1
+          && String(currentEntries[0]?.nation || "").toLowerCase() === "bookmaker2";
+        if (syntheticBookmaker2 && (market.runners || []).length) {
+          for (const groupName of PAYLOAD_GROUPS) {
+            payload[groupName] = payload[groupName]
+              .filter((entry) => entryMarketId(entry) !== marketId);
+          }
+          const seeded = regularDefinitionEntries(market, market.runners);
+          payload[seeded.group].push(...seeded.entries); changed = true;
+        }
+        for (const groupName of PAYLOAD_GROUPS) {
+          for (const entry of payload[groupName]) {
+            if (entryMarketId(entry) === marketId
+              && entry.display_message !== (market.displayMessage ?? null)) {
+              entry.display_message = market.displayMessage ?? null; changed = true;
+            }
+          }
+        }
+        continue;
+      }
       const { group, entries } = regularDefinitionEntries(market, market.runners || []);
       payload[group].push(...entries); added += 1; changed = true;
     }

@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const Event = require("../src/models/Event");
 const Market = require("../src/models/Market");
@@ -14,8 +16,17 @@ const { dashboardEntry } = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
 const { eventRows } = require("../src/cron/eventSync");
 const { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
-  marketRows, oddsType } = require("../src/cron/marketDiscoverySync");
+  marketRows, mergeDiscoveredMarkets, bookmaker2BaseMarketId,
+  runnerSourceMarketId, runnerLookupMarketIds,
+  enforceBookmaker2Eligibility, oddsType } = require("../src/cron/marketDiscoverySync");
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
+
+test("normal service shutdown preserves provider registrations", () => {
+  const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.doesNotMatch(serverSource, /subscriptions\.unsubscribeAll\s*\(/);
+  assert.match(serverSource,
+    /RECONCILE_SUBSCRIPTIONS_ON_START\s*\|\|\s*"false"/);
+});
 
 test("database rows map to API event fields", () => {
   const event = Event.fromRow({ id: 1, eventid: 123, eventname: "A v B",
@@ -69,6 +80,14 @@ test("market discovery maps active unfinished markets with Java betting defaults
   assert.deepEqual(rows.filter((row) => row.isActive).map((row) => [row.marketName, row.maxBet, row.betDelay]),
     [["Bookmaker", 25000, 0], ["Match Odds", 1, 3]]);
   assert.equal(rows.find((row) => row.marketName === "Closed")?.isActive, false);
+});
+
+test("vendor inPlayFilter maps to the persisted display message", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const [row] = marketRows({ data: [{ id: "1.2", eventId: "10", sportId: 4,
+    name: "Match Odds", type: "match-odd", isActive: true,
+    inPlayFilter: "Winning bets only" }] }, events);
+  assert.equal(row.displayMessage, "Winning bets only");
 });
 
 test("explicitly inactive line markets remain in discovery for deactivation", () => {
@@ -144,11 +163,63 @@ test("unnamed BM2 markets remain available for socket population", () => {
   assert.equal(row.maxBet, 25000);
 });
 
+test("BM2 discovery inherits runner metadata from its base market", () => {
+  assert.equal(bookmaker2BaseMarketId("1.260815092-BM2"), "1.260815092");
+  assert.equal(bookmaker2BaseMarketId("4.1-BM"), null);
+  assert.equal(runnerSourceMarketId("1.260815092-BM2"), "1.260815092");
+  assert.deepEqual(runnerLookupMarketIds(["1.260815092-BM2", "4.1-BM"]),
+    ["1.260815092-BM2", "1.260815092", "4.1-BM"]);
+  const seeded = regularDefinitionEntries({ marketId: "1.260815092-BM2",
+    marketName: "Bookmaker2", eventId: 10, sportId: 4, matchName: "A v B",
+    isActive: true, minBet: 100, maxBet: 25000, betDelay: 0 }, [
+    { selectionId: 1, runnerName: "A" }, { selectionId: 2, runnerName: "B" },
+  ]);
+  assert.deepEqual(seeded.entries.map((entry) => entry.nation), ["A", "B"]);
+  assert.deepEqual(seeded.entries.map((entry) => entry.b1), [null, null]);
+});
+
+test("only Match Odds BM2 remains active", () => {
+  const rows = enforceBookmaker2Eligibility([
+    { marketId: "1.1", marketType: "match-odd", isActive: true },
+    { marketId: "1.1-BM2", marketType: "bookmaker", isActive: true },
+    { marketId: "1.2", marketType: "tied-match", isActive: true },
+    { marketId: "1.2-BM2", marketType: "bookmaker", isActive: true },
+    { marketId: "1.3", marketType: "completed-match", isActive: false },
+    { marketId: "1.3-BM2", marketType: "bookmaker", isActive: true },
+  ]);
+  assert.equal(rows.find((row) => row.marketId === "1.1-BM2").isActive, true);
+  assert.equal(rows.find((row) => row.marketId === "1.2-BM2").isActive, false);
+  assert.equal(rows.find((row) => row.marketId === "1.3-BM2").isActive, false);
+});
+
 test("advanced market families use separate vendor discovery requests", () => {
   assert.deepEqual(FANCY_MARKET_REQUESTS,
     [["session"], ["khado"], ["odd-even"], ["cricket-casino"], ["ball-by-ball"]]);
   assert.equal(REGULAR_MARKET_TYPES.includes("match-odd"), true);
   assert.equal(REGULAR_MARKET_TYPES.includes("odd-even"), false);
+});
+
+test("active vendor discovery wins over contradictory typed inactive records", () => {
+  const base = { marketId: "4.1-F2", eventId: 10, sportId: 4,
+    marketName: "Over runs", marketType: "session" };
+  const rows = mergeDiscoveredMarkets([
+    { ...base, isActive: true, gameOver: false },
+    { ...base, isActive: false, gameOver: false },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].isActive, true);
+  assert.equal(rows[0].gameOver, false);
+});
+
+test("vendor discovery deactivates a market when every response agrees", () => {
+  const base = { marketId: "4.1-F2", eventId: 10, sportId: 4,
+    marketName: "Over runs", marketType: "session" };
+  const [row] = mergeDiscoveredMarkets([
+    { ...base, isActive: false, gameOver: false },
+    { ...base, isActive: false, gameOver: true },
+  ]);
+  assert.equal(row.isActive, false);
+  assert.equal(row.gameOver, true);
 });
 
 test("active fancy definitions create socket-updatable placeholder rows", () => {
@@ -159,7 +230,7 @@ test("active fancy definitions create socket-updatable placeholder rows", () => 
     bs1: 0, ls1: 0, gstatus: "WAITING", rem: "", srno: "", gameover: false,
     s: true, maxBet: 100000, minBet: 100, betDelay: 0, matchId: 10,
     isActive: true, isShow: true, matchName: "A v B", matchType: "odd-even",
-    maxLiabilityPerMarket: 100000, rate: null,
+    maxLiabilityPerMarket: 100000, display_message: null, rate: null,
   });
 });
 
