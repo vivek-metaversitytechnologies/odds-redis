@@ -83,6 +83,14 @@ npm run db:migrate
 The runner uses a database lock, records checksums in `service_migrations`, and safely
 skips migrations already applied by an earlier deployment.
 
+If an interrupted remote connection retains the migration lock, inspect it and then
+release only that named lock owner:
+
+```bash
+npm run db:migrate:lock
+npm run db:migrate:lock -- --force
+```
+
 ## Deployed server
 
 The backend currently runs on port `5673` at:

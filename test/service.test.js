@@ -49,6 +49,7 @@ const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resu
 const { integer, boolean, csvIntegers } = require("../src/config/env");
 const { setBounded } = require("../src/utils/boundedMap");
 const { checksum, migrationFiles } = require("../scripts/migrate");
+const { lockName: migrationLockName } = require("../scripts/migration-lock");
 
 test("environment helpers reject invalid values and normalize lists", () => {
   const previous = {
@@ -91,6 +92,7 @@ test("migration runner discovers ordered SQL files and produces stable checksums
   assert.ok(files.includes("001_selection_runner_unique.sql"));
   assert.equal(checksum("SELECT 1"), checksum("SELECT 1"));
   assert.notEqual(checksum("SELECT 1"), checksum("SELECT 2"));
+  assert.equal(migrationLockName, "odds_socket_schema_migrations");
 });
 
 test("normal service shutdown preserves provider registrations", () => {
