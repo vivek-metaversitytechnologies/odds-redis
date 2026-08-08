@@ -37,6 +37,7 @@ const {
   FANCY_MARKET_TYPES,
   FANCY_MARKET_REQUESTS,
   marketRows,
+  inferredMarketType,
   mergeDiscoveredMarkets,
   bookmaker2BaseMarketId,
   runnerSourceMarketId,
@@ -246,6 +247,16 @@ test("market discovery maps active unfinished markets with Java betting defaults
     ],
   );
   assert.equal(rows.find((row) => row.marketName === "Closed")?.isActive, false);
+});
+
+test("market discovery infers fancy families from vendor suffixes", () => {
+  assert.equal(inferredMarketType("4.1-F3", null), "other-market");
+  assert.equal(inferredMarketType("4.1-MT", null), "meter");
+  assert.equal(inferredMarketType("4.1-BB", null), "ball-by-ball");
+  assert.equal(inferredMarketType("4.1-KD", null), "khado");
+  assert.equal(inferredMarketType("4.1-OE", null), "odd-even");
+  assert.equal(inferredMarketType("4.1-F2", null), "session");
+  assert.equal(inferredMarketType("4.1-BM2", null), "bookmaker");
 });
 
 test("ball-by-ball discovery prefixes the vendor ball line", () => {

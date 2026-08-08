@@ -54,6 +54,25 @@ function marketFingerprint(market) {
   ]);
 }
 
+function inferredMarketType(marketId, providedType) {
+  const explicit = String(providedType || "")
+    .trim()
+    .toLowerCase();
+  if (explicit) return explicit;
+  const id = String(marketId || "")
+    .trim()
+    .toUpperCase();
+  if (id.endsWith("-BM2")) return "bookmaker";
+  if (id.endsWith("-F2")) return "session";
+  if (id.endsWith("-OE")) return "odd-even";
+  if (id.endsWith("-KD")) return "khado";
+  if (id.endsWith("-F3")) return "other-market";
+  if (id.endsWith("-BB")) return "ball-by-ball";
+  if (id.endsWith("-CC")) return "cricket-casino";
+  if (id.endsWith("-MT")) return "meter";
+  return "unknown";
+}
+
 function marketRows(response, eventsById) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
   return rows
@@ -61,7 +80,7 @@ function marketRows(response, eventsById) {
       const event = eventsById.get(String(item?.eventId));
       const marketId = String(item?.id || "").trim();
       const inferredBookmaker2 = /-BM2$/i.test(marketId);
-      const marketType = String(item?.type || (inferredBookmaker2 ? "bookmaker" : "unknown")).toLowerCase();
+      const marketType = inferredMarketType(marketId, item?.type);
       const bookmaker = marketType === "bookmaker";
       const fancy = FANCY_MARKET_TYPES.has(marketType);
       const zeroCommission =
@@ -680,6 +699,7 @@ module.exports = {
   FANCY_MARKET_TYPES,
   FANCY_MARKET_REQUESTS,
   marketRows,
+  inferredMarketType,
   mergeDiscoveredMarkets,
   oddsType,
   upsertMarkets,
