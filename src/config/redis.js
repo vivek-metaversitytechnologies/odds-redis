@@ -255,10 +255,16 @@ async function reconcileFancyDefinitions(markets) {
     byEvent.get(eventId).push({ market, group });
   }
   let added = 0; let removed = 0; const changedEventIds = [];
-  for (const [eventId, definitions] of byEvent) {
-    const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+  const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+  const eventDefinitions = [...byEvent.entries()];
+  const currentValues = eventDefinitions.length
+    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`)) : [];
+  const writes = [];
+  for (let eventIndex = 0; eventIndex < eventDefinitions.length; eventIndex += 1) {
+    const [eventId, definitions] = eventDefinitions[eventIndex];
+    const key = `${prefix}${eventId}`;
     let payload = emptyEventPayload();
-    const current = await redis.get(key);
+    const current = currentValues[eventIndex];
     if (current) {
       try {
         const parsed = JSON.parse(current);
@@ -282,10 +288,15 @@ async function reconcileFancyDefinitions(markets) {
       }
     }
     if (changed) {
-      await redis.set(key, JSON.stringify(payload));
+      writes.push([key, JSON.stringify(payload)]);
       eventPayloadCache.set(eventId, payload);
       changedEventIds.push(eventId);
     }
+  }
+  if (writes.length) {
+    const transaction = redis.multi();
+    for (const [key, value] of writes) transaction.set(key, value);
+    await transaction.exec();
   }
   return { events: byEvent.size, added, removed, changedEventIds };
 }
@@ -331,10 +342,16 @@ async function reconcileRegularDefinitions(markets) {
     byEvent.get(eventId).push(market);
   }
   let added = 0; let removed = 0; const changedEventIds = [];
-  for (const [eventId, definitions] of byEvent) {
-    const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+  const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+  const eventDefinitions = [...byEvent.entries()];
+  const currentValues = eventDefinitions.length
+    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`)) : [];
+  const writes = [];
+  for (let eventIndex = 0; eventIndex < eventDefinitions.length; eventIndex += 1) {
+    const [eventId, definitions] = eventDefinitions[eventIndex];
+    const key = `${prefix}${eventId}`;
     let payload = emptyEventPayload();
-    const current = await redis.get(key);
+    const current = currentValues[eventIndex];
     if (current) {
       try { payload = normalizeEventPayload(JSON.parse(current)); } catch { /* replace malformed payload */ }
     }
@@ -380,9 +397,14 @@ async function reconcileRegularDefinitions(markets) {
       payload[group].push(...entries); added += 1; changed = true;
     }
     if (changed) {
-      await redis.set(key, JSON.stringify(payload)); eventPayloadCache.set(eventId, payload);
+      writes.push([key, JSON.stringify(payload)]); eventPayloadCache.set(eventId, payload);
       changedEventIds.push(eventId);
     }
+  }
+  if (writes.length) {
+    const transaction = redis.multi();
+    for (const [key, value] of writes) transaction.set(key, value);
+    await transaction.exec();
   }
   return { events: byEvent.size, added, removed, changedEventIds };
 }

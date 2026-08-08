@@ -20,6 +20,13 @@ const DISCOVERABLE_MARKET_TYPES = new Set(MARKET_TYPES.map((type) => String(type
 let running = false;
 const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
   lastError: null, lastResult: null };
+const DB_WRITE_BATCH_SIZE = Math.max(50, Number(process.env.MARKET_DB_WRITE_BATCH_SIZE || 500));
+
+function chunks(items, size = DB_WRITE_BATCH_SIZE) {
+  const result = [];
+  for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size));
+  return result;
+}
 
 function marketRows(response, eventsById) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
@@ -96,32 +103,28 @@ async function upsertFancies(fancies) {
       `SELECT fancyid FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`, ids,
     );
     const existing = new Set(existingRows.map((row) => String(row.fancyid)));
-    for (const fancy of fancies) {
-      const active = fancy.isActive && !fancy.gameOver;
-      if (existing.has(fancy.marketId)) {
-        await connection.execute(
-          `UPDATE t_matchfancy SET name=?, oddstype=?, eventid=?, isactive=?, isshow=?, is_show=?,
-             matchname=?, sportid=?, mtype=?, remarks=?, updatedon=NOW() WHERE fancyid=?`,
-          [fancy.marketName, oddsType(fancy.marketId), fancy.eventId, active, true, true,
-            fancy.matchName, fancy.sportId, fancy.marketType, fancy.displayMessage, fancy.marketId],
-        );
-        updated += 1; continue;
-      }
-      // Match the Java service: inactive/game-over sessions can deactivate an existing fancy,
-      // but must not create a new historical row.
-      if (!active) continue;
-      await connection.execute(
+    const writable = fancies.filter((fancy) => existing.has(fancy.marketId)
+      || (fancy.isActive && !fancy.gameOver));
+    inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
+    updated = writable.length - inserted;
+    for (const batch of chunks(writable)) {
+      const values = batch.map((fancy) => [
+        fancy.marketId, fancy.marketName, oddsType(fancy.marketId), "OPEN", 100000, 0, 100,
+        100000, fancy.eventId, false, fancy.isActive && !fancy.gameOver,
+        fancy.marketType, true, true, "", fancy.displayMessage, new Date(),
+        fancy.matchName, fancy.sportId, "RS", 1, fancy.inPlay, 100000,
+      ]);
+      await connection.query(
         `INSERT INTO t_matchfancy
           (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
            issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
-           sportid,provider,isbettable,isplay,maxliabilityperbet)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [fancy.marketId, fancy.marketName, oddsType(fancy.marketId), "OPEN", 100000, 0, 100,
-          100000, fancy.eventId, false, active,
-          fancy.marketType, true, true, "", fancy.displayMessage, new Date(),
-          fancy.matchName, fancy.sportId, "RS", 1, fancy.inPlay, 100000],
+           sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
+         ON DUPLICATE KEY UPDATE name=VALUES(name),oddstype=VALUES(oddstype),eventid=VALUES(eventid),
+           isactive=VALUES(isactive),isshow=VALUES(isshow),is_show=VALUES(is_show),
+           matchname=VALUES(matchname),sportid=VALUES(sportid),mtype=VALUES(mtype),
+           remarks=VALUES(remarks),updatedon=NOW()`,
+        [values],
       );
-      inserted += 1;
     }
     // Migrate only IDs positively identified as provider session markets in this response.
     await connection.query(`DELETE FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids);
@@ -141,31 +144,34 @@ async function upsertMarkets(markets) {
       `SELECT marketid,isactive FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids,
     );
     const existing = new Map(existingRows.map((row) => [String(row.marketid), Number(row.isactive) === 1]));
-    for (const market of markets) {
-      const active = market.isActive && !market.gameOver;
-      if (existing.has(market.marketId)) {
-        await connection.execute(
-          `UPDATE t_market SET marketname=?, matchname=?, opendate=?, sportid=?, eventid=?, seriesid=?,
-             inplay=IF(inplay=1,1,?), isactive=?, betdelay=?, display_message=?, updatedon=NOW() WHERE marketid=?`,
-          [market.marketName, market.matchName, market.openDate, market.sportId, market.eventId,
-            market.seriesId, market.inPlay, active, market.betDelay,
-            market.displayMessage, market.marketId],
-        );
-        if (existing.get(market.marketId) && !active) deactivatedMarketIds.push(market.marketId);
-        updated += 1; continue;
+    const writable = markets.filter((market) => existing.has(market.marketId)
+      || (market.isActive && !market.gameOver));
+    inserted = writable.filter((market) => !existing.has(market.marketId)).length;
+    updated = writable.length - inserted;
+    for (const market of writable) {
+      if (existing.get(market.marketId) && (!market.isActive || market.gameOver)) {
+        deactivatedMarketIds.push(market.marketId);
       }
-      if (!active) continue;
-      await connection.execute(
+    }
+    for (const batch of chunks(writable)) {
+      const values = batch.map((market) => [
+        market.marketId, market.sportId, market.eventId, market.marketName, market.matchName,
+        true, market.isActive && !market.gameOver, new Date(), new Date(), market.openDate,
+        market.minBet, market.maxBet, market.betDelay, market.inPlay, 1, 500, false,
+        market.displayMessage, false, false, 0, 1000000, false, market.seriesId,
+      ]);
+      await connection.query(
         `INSERT INTO t_market
           (marketid,sportid,eventid,marketname,matchname,status,isactive,createdon,updatedon,opendate,
            minbet,maxbet,betdelay,inplay,minbetrate,maxbetrate,is_redis_updated,display_message,
-           issuspended,is_rolled_back,maximum_profit,maximumprofit,betlock,seriesid)
-         VALUES (?,?,?,?,?,?,?,NOW(),NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [market.marketId, market.sportId, market.eventId, market.marketName, market.matchName,
-          true, true, market.openDate, market.minBet, market.maxBet, market.betDelay, market.inPlay,
-          1, 500, false, market.displayMessage, false, false, 0, 1000000, false, market.seriesId],
+           issuspended,is_rolled_back,maximum_profit,maximumprofit,betlock,seriesid) VALUES ?
+         ON DUPLICATE KEY UPDATE marketname=VALUES(marketname),matchname=VALUES(matchname),
+           opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
+           seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
+           isactive=VALUES(isactive),betdelay=VALUES(betdelay),
+           display_message=VALUES(display_message),updatedon=NOW()`,
+        [values],
       );
-      inserted += 1;
     }
     await connection.commit(); return { inserted, updated,
       marketIds: markets.filter((market) => market.isActive && !market.gameOver).map((market) => market.marketId),
@@ -304,22 +310,55 @@ async function seedTossMarkets(markets) {
     failed: results.filter((result) => result.status === "rejected").length };
 }
 
+function inactiveLineMarkets(markets) {
+  return (markets || []).filter((market) => market.marketType === "line-market"
+    && (!market.isActive || market.gameOver));
+}
+
+async function reconcileInactiveLineMarkets(markets) {
+  const inactive = inactiveLineMarkets(markets);
+  if (!inactive.length) return { checked: 0, deactivated: 0, removed: 0 };
+  const persisted = await upsertMarkets(inactive);
+  redisStore.invalidateMarkets([...inactive.map((market) => market.marketId),
+    ...persisted.deactivatedMarketIds]);
+  const redisDefinitions = await redisStore.reconcileRegularDefinitions(inactive);
+  if (persisted.deactivatedMarketIds.length) {
+    await unsubscribeEventMarkets(persisted.deactivatedMarketIds);
+  }
+  await Promise.allSettled((redisDefinitions.changedEventIds || [])
+    .map((eventId) => publishEventSnapshot(eventId)));
+  return { checked: inactive.length, deactivated: persisted.deactivatedMarketIds.length,
+    removed: redisDefinitions.removed };
+}
+
 async function syncMarketDiscovery(events) {
   if (running) return { skipped: true, reason: "already-running" };
   running = true; state.running = true; state.lastStartedAt = new Date().toISOString(); state.lastError = null;
   try {
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const eventIds = [...eventsById.keys()].map(Number); const batchSize = 50; const discovered = [];
-    for (let index = 0; index < eventIds.length; index += batchSize) {
-      const eids = eventIds.slice(index, index + batchSize);
+    const eventBatches = chunks(eventIds, batchSize);
+
+    // First pass: one unfiltered request per event batch. Inactive line markets are
+    // reconciled immediately instead of waiting for every fancy family and thousands
+    // of database upserts in the full discovery pass.
+    const primaryResponses = await Promise.all(eventBatches.map((eids) => provider.markets({ eids })));
+    const primaryRows = primaryResponses.flatMap((response) => marketRows(response, eventsById));
+    discovered.push(...primaryRows);
+    const fastLineReconciliation = await reconcileInactiveLineMarkets(primaryRows);
+
+    // Second pass: fetch typed fallbacks needed for families the vendor can omit from
+    // the unfiltered response. These no longer delay line-market deactivation.
+    const typedResponses = await Promise.all(eventBatches.map(async (eids) => {
       // The vendor omits some advanced markets (notably odd-even) when every type is
       // requested together. Fetch each fancy family independently, matching its API behavior.
       // Omitting `type` returns undocumented families such as other-market/F3,
       // meter/MT, line-market and BM2. Keep the explicit fancy calls as a fallback
       // because the vendor has previously omitted odd-even from combined responses.
-      const requests = [null, REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
-      const responses = await Promise.all(requests.map((type) =>
-        provider.markets(type === null ? { eids } : { eids, type })));
+      const requests = [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
+      return Promise.all(requests.map((type) => provider.markets({ eids, type })));
+    }));
+    for (const responses of typedResponses) {
       for (const response of responses) discovered.push(...marketRows(response, eventsById));
     }
     const unique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(discovered));
@@ -354,7 +393,8 @@ async function syncMarketDiscovery(events) {
       inserted: persisted.inserted, updated: persisted.updated,
       deactivated: persisted.deactivatedMarketIds.length,
       fancyInserted: fancyPersisted.inserted, fancyUpdated: fancyPersisted.updated,
-      redisDefinitions, regularDefinitions, tossDefinitions, runners: runnerResult, subscription };
+      fastLineReconciliation, redisDefinitions, regularDefinitions,
+      tossDefinitions, runners: runnerResult, subscription };
     state.lastResult = result; state.lastCompletedAt = new Date().toISOString();
     logger.info("[MarketDiscovery] completed", result); return result;
   } catch (error) {
@@ -398,6 +438,6 @@ function getMarketDiscoveryStatus() { return { ...state }; }
 module.exports = { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
   marketRows, mergeDiscoveredMarkets, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
   bookmaker2BaseMarketId, runnerSourceMarketId, runnerLookupMarketIds, enforceBookmaker2Eligibility,
-  regularMarketsWithRunners, seedTossMarkets,
+  regularMarketsWithRunners, seedTossMarkets, inactiveLineMarkets,
   fetchActiveEventsForMarketDiscovery, syncMarketDiscovery, syncStoredEventMarkets,
   startMarketDiscoverySync, getMarketDiscoveryStatus };

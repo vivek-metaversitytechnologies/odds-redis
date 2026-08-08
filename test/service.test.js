@@ -18,7 +18,8 @@ const { eventRows } = require("../src/cron/eventSync");
 const { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
   marketRows, mergeDiscoveredMarkets, bookmaker2BaseMarketId,
   runnerSourceMarketId, runnerLookupMarketIds,
-  enforceBookmaker2Eligibility, oddsType } = require("../src/cron/marketDiscoverySync");
+  enforceBookmaker2Eligibility, inactiveLineMarkets,
+  oddsType } = require("../src/cron/marketDiscoverySync");
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
 
 test("normal service shutdown preserves provider registrations", () => {
@@ -99,6 +100,16 @@ test("explicitly inactive line markets remain in discovery for deactivation", ()
   assert.equal(rows[0].isActive, false);
   assert.equal(rows[0].marketType, "line-market");
   assert.equal(rows[0].betDelay, 5);
+});
+
+test("inactive line markets are selected for immediate reconciliation", () => {
+  const rows = inactiveLineMarkets([
+    { marketId: "1.1", marketType: "line-market", isActive: true, gameOver: false },
+    { marketId: "1.2", marketType: "line-market", isActive: false, gameOver: false },
+    { marketId: "1.3", marketType: "line-market", isActive: true, gameOver: true },
+    { marketId: "4.1-F2", marketType: "session", isActive: false, gameOver: false },
+  ]);
+  assert.deepEqual(rows.map((row) => row.marketId), ["1.2", "1.3"]);
 });
 
 test("session market suffixes map to Java fancy odds types", () => {
