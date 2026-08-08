@@ -3,6 +3,8 @@ const { getSourcePool } = require("./sourceDb");
 const Market = require("../models/Market");
 const provider = require("../services/providerApi");
 const logger = require("../utils/logger");
+const { integer } = require("./env");
+const { setBounded } = require("../utils/boundedMap");
 
 let client;
 let connecting;
@@ -10,17 +12,60 @@ const marketCache = new Map();
 const runnerNameCache = new Map();
 const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
+const eventPayloadRevisions = new Map();
 const tickActivity = new Map();
+const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
 
-const PAYLOAD_GROUPS = ["Odds", "Bookmaker", "LineMarket", "Fancy2", "Khado", "OddEven", "OtherMarket",
-  "Fancy3", "CricketCasino", "BallByBall"];
+const PAYLOAD_GROUPS = [
+  "Odds",
+  "Bookmaker",
+  "LineMarket",
+  "Fancy2",
+  "Khado",
+  "OddEven",
+  "OtherMarket",
+  "Fancy3",
+  "CricketCasino",
+  "BallByBall",
+];
 
 function emptyEventPayload() {
   return Object.fromEntries(PAYLOAD_GROUPS.map((group) => [group, []]));
 }
 
+function scoreKey(eventId) {
+  return `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventId}`;
+}
+
+async function writeScore(score) {
+  const eventId = String(score?.eid ?? score?.eventId ?? "").trim();
+  const html = score?.data ?? score?.html ?? score?.scorecard;
+  if (!/^\d+$/.test(eventId) || typeof html !== "string" || !html.trim()) return null;
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return null;
+  const payload = { ...score, eid: Number(eventId), data: html, receivedAt: new Date().toISOString() };
+  await redis.set(scoreKey(eventId), JSON.stringify(payload));
+  return payload;
+}
+
+async function getScore(eventId) {
+  const normalized = String(eventId || "").trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return null;
+  const value = await redis.get(scoreKey(normalized));
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return { eid: Number(normalized), data: value };
+  }
+}
+
 function validMarketIdentifier(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase();
   return Boolean(normalized) && !["undefined", "null", "nan"].includes(normalized);
 }
 
@@ -28,7 +73,8 @@ function normalizeEventPayload(payload) {
   const normalized = emptyEventPayload();
   for (const group of PAYLOAD_GROUPS) {
     normalized[group] = Array.isArray(payload?.[group])
-      ? payload[group].filter((entry) => validMarketIdentifier(entryMarketId(entry))) : [];
+      ? payload[group].filter((entry) => validMarketIdentifier(entryMarketId(entry)))
+      : [];
   }
   // Move line markets written by older builds out of the generic Odds group immediately.
   const legacyLineMarkets = normalized.Odds.filter((market) => /\bline\b/i.test(String(market?.Name || "")));
@@ -68,14 +114,26 @@ async function getRedisClient() {
   if (connecting) return connecting;
   const url = redisUrl();
   if (!url) return null;
-  client = createClient({ url, database: Number(process.env.REDIS_DB || 0),
-    socket: { connectTimeout: Number(process.env.REDIS_TIMEOUT_MS || 15000) } });
+  client = createClient({
+    url,
+    database: Number(process.env.REDIS_DB || 0),
+    socket: { connectTimeout: Number(process.env.REDIS_TIMEOUT_MS || 15000) },
+  });
   client.on("error", (error) => logger.error("[Redis] client error", { error: error.message }));
-  connecting = client.connect().then(() => {
-    logger.info("[Redis] connected"); return client;
-  }).catch((error) => {
-    logger.error("[Redis] connection failed", { error: error.message }); client = undefined; return null;
-  }).finally(() => { connecting = undefined; });
+  connecting = client
+    .connect()
+    .then(() => {
+      logger.info("[Redis] connected");
+      return client;
+    })
+    .catch((error) => {
+      logger.error("[Redis] connection failed", { error: error.message });
+      client = undefined;
+      return null;
+    })
+    .finally(() => {
+      connecting = undefined;
+    });
   return connecting;
 }
 
@@ -83,17 +141,22 @@ async function findMarket(mid) {
   if (marketCache.has(mid)) return marketCache.get(mid);
   const [rows] = await getSourcePool().query("SELECT * FROM t_market WHERE marketid = ? LIMIT 1", [mid]);
   if (rows.length) {
-    const market = Market.fromRow(rows[0]); marketCache.set(mid, market); return market;
+    const market = Market.fromRow(rows[0]);
+    setBounded(marketCache, mid, market, CACHE_LIMIT);
+    return market;
   }
   const [fancies] = await getSourcePool().query(
     `SELECT f.*, f.fancyid AS marketid, f.name AS marketname,
        COALESCE(f.sportid,e.sportid) AS sportid, e.eventname AS matchname,
        e.open_date AS opendate, e.in_play AS inplay
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
-     WHERE f.fancyid=? LIMIT 1`, [mid],
+     WHERE f.fancyid=? LIMIT 1`,
+    [mid],
   );
   if (!fancies.length) return null;
-  const market = Market.fromRow(fancies[0]); marketCache.set(mid, market); return market;
+  const market = Market.fromRow(fancies[0]);
+  setBounded(marketCache, mid, market, CACHE_LIMIT);
+  return market;
 }
 
 function status(value) {
@@ -117,7 +180,8 @@ function booleanOr(value, fallback = null) {
 function prices(value) {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 3).map((entry) => ({
-    price: numberOr(entry?.price ?? entry?.p, 0), size: numberOr(entry?.size ?? entry?.s, 0),
+    price: numberOr(entry?.price ?? entry?.p, 0),
+    size: numberOr(entry?.size ?? entry?.s, 0),
   }));
 }
 
@@ -128,8 +192,9 @@ function runnerPrices(runner, side) {
   if (Array.isArray(runner?.ex?.[exchangeKey])) return prices(runner.ex[exchangeKey]);
   const pricePrefix = side === "back" ? "b" : "l";
   const sizePrefix = side === "back" ? "br" : "lr";
-  const hasCompactPrices = [1, 2, 3].some((level) =>
-    runner?.[`${pricePrefix}${level}`] != null || runner?.[`${sizePrefix}${level}`] != null);
+  const hasCompactPrices = [1, 2, 3].some(
+    (level) => runner?.[`${pricePrefix}${level}`] != null || runner?.[`${sizePrefix}${level}`] != null,
+  );
   if (!hasCompactPrices) return [];
   return [1, 2, 3].map((level) => ({
     price: numberOr(runner?.[`${pricePrefix}${level}`], 0),
@@ -138,24 +203,45 @@ function runnerPrices(runner, side) {
 }
 
 function marketMatchName(item, market) {
-  return market.matchname || item.mn || item.matchName
-    || (Array.isArray(item.r) ? item.r.map((runner) => runner?.na ?? runner?.name).filter(Boolean).join(" v ") : "")
-    || null;
+  return (
+    market.matchname ||
+    item.mn ||
+    item.matchName ||
+    (Array.isArray(item.r)
+      ? item.r
+          .map((runner) => runner?.na ?? runner?.name)
+          .filter(Boolean)
+          .join(" v ")
+      : "") ||
+    null
+  );
 }
 
 function bookmakerPayload(item, market) {
   const runners = Array.isArray(item.r) ? item.r : [];
   const matchName = marketMatchName(item, market);
   return runners.map((runner) => ({
-    mid: String(item.mid), t: market.marketname || item.na || "", sid: runner?.rid ?? runner?.selectionId ?? null,
-    nation: runner?.na ?? runner?.name ?? null, b1: numberOr(runner?.b ?? runner?.b1 ?? runner?.back),
-    bs1: numberOr(runner?.bs ?? runner?.bs1, 0), l1: numberOr(runner?.l ?? runner?.l1 ?? runner?.lay),
-    ls1: numberOr(runner?.ls ?? runner?.ls1, 0), gstatus: status(runner?.sb ?? runner?.gstatus),
-    rem: runner?.rem ?? item.rem ?? null, display_message: market.displayMessage ?? null,
-    betlock: numberOr(market.betDelay, 0), minBet: numberOr(market.minbet), maxBet: numberOr(market.maxbet),
-    betDelay: numberOr(market.betDelay, 0), minBetRate: numberOr(market.minBetRate, 0),
-    maxBetRate: numberOr(market.maxBetRate, 0), matchName, matchId: numberOr(market.eventid, market.eventid),
-    isActive: booleanOr(market.isactive), isPause: booleanOr(market.isPause ?? market.fancypause, false),
+    mid: String(item.mid),
+    t: market.marketname || item.na || "",
+    sid: runner?.rid ?? runner?.selectionId ?? null,
+    nation: runner?.na ?? runner?.name ?? null,
+    b1: numberOr(runner?.b ?? runner?.b1 ?? runner?.back),
+    bs1: numberOr(runner?.bs ?? runner?.bs1, 0),
+    l1: numberOr(runner?.l ?? runner?.l1 ?? runner?.lay),
+    ls1: numberOr(runner?.ls ?? runner?.ls1, 0),
+    gstatus: status(runner?.sb ?? runner?.gstatus),
+    rem: runner?.rem ?? item.rem ?? null,
+    display_message: market.displayMessage ?? null,
+    betlock: numberOr(market.betDelay, 0),
+    minBet: numberOr(market.minbet),
+    maxBet: numberOr(market.maxbet),
+    betDelay: numberOr(market.betDelay, 0),
+    minBetRate: numberOr(market.minBetRate, 0),
+    maxBetRate: numberOr(market.maxBetRate, 0),
+    matchName,
+    matchId: numberOr(market.eventid, market.eventid),
+    isActive: booleanOr(market.isactive),
+    isPause: booleanOr(market.isPause ?? market.fancypause, false),
     sportId: numberOr(market.sportid, market.sportid),
   }));
 }
@@ -163,46 +249,69 @@ function bookmakerPayload(item, market) {
 function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item.mid))) {
   const runners = Array.isArray(item.r) ? item.r : [];
   return {
-    matchName: marketMatchName(item, market), marketId: String(item.mid), status: item.s ?? item.status ?? "",
-    inplay: booleanOr(item.ip ?? market.inPlay, false), eventTime: market.opendate ?? null,
-    lastMatchTime: item.tm ?? null, maxBetRate: numberOr(market.maxBetRate, 0),
-    minBetRate: numberOr(market.minBetRate, 0), betDelay: numberOr(market.betDelay, 0),
-    maxBet: numberOr(market.maxbet), minBet: numberOr(market.minbet), betlock: booleanOr(market.betlock),
-    matchId: numberOr(market.eventid, market.eventid), display_message: market.displayMessage ?? null,
+    matchName: marketMatchName(item, market),
+    marketId: String(item.mid),
+    status: item.s ?? item.status ?? "",
+    inplay: booleanOr(item.ip ?? market.inPlay, false),
+    eventTime: market.opendate ?? null,
+    lastMatchTime: item.tm ?? null,
+    maxBetRate: numberOr(market.maxBetRate, 0),
+    minBetRate: numberOr(market.minBetRate, 0),
+    betDelay: numberOr(market.betDelay, 0),
+    maxBet: numberOr(market.maxbet),
+    minBet: numberOr(market.minbet),
+    betlock: booleanOr(market.betlock),
+    matchId: numberOr(market.eventid, market.eventid),
+    display_message: market.displayMessage ?? null,
     runners: runners.map((runner) => ({
-      selectionId: runner?.rid ?? runner?.selectionId ?? null, handicap: numberOr(runner?.hc ?? runner?.handicap, 0),
-      status: runner?.s ?? runner?.status ?? "ACTIVE", lastPriceTraded: numberOr(runner?.ltp ?? runner?.lastPriceTraded, 0),
+      selectionId: runner?.rid ?? runner?.selectionId ?? null,
+      handicap: numberOr(runner?.hc ?? runner?.handicap, 0),
+      status: runner?.s ?? runner?.status ?? "ACTIVE",
+      lastPriceTraded: numberOr(runner?.ltp ?? runner?.lastPriceTraded, 0),
       totalMatched: numberOr(runner?.tv ?? runner?.totalMatched, 0),
       adjustmentFactor: numberOr(runner?.af ?? runner?.adjustmentFactor, 0),
-      ex: { availableToBack: runnerPrices(runner, "back"),
-        availableToLay: runnerPrices(runner, "lay") },
-      name: runner?.na ?? runner?.name
-        ?? runnerNames?.get(String(runner?.rid ?? runner?.selectionId)) ?? null,
+      ex: { availableToBack: runnerPrices(runner, "back"), availableToLay: runnerPrices(runner, "lay") },
+      name:
+        runner?.na ?? runner?.name ?? runnerNames?.get(String(runner?.rid ?? runner?.selectionId)) ?? null,
     })),
-    marketDataDelayed: booleanOr(item.delay ?? item.marketDataDelayed, false), Name: market.marketname || item.na || "",
-    isActive: booleanOr(market.isactive), isPause: booleanOr(market.isPause ?? market.fancypause, false),
+    marketDataDelayed: booleanOr(item.delay ?? item.marketDataDelayed, false),
+    Name: market.marketname || item.na || "",
+    isActive: booleanOr(market.isactive),
+    isPause: booleanOr(market.isPause ?? market.fancypause, false),
     sportId: numberOr(market.sportid, market.sportid),
   };
 }
 
 function fancyPayload(item, market) {
   const runner = Array.isArray(item.r) ? item.r[0] || {} : {};
-  const cricketCasino = String(item.mid || "").toUpperCase().includes("-CC");
+  const cricketCasino = String(item.mid || "")
+    .toUpperCase()
+    .includes("-CC");
   const casinoRate = cricketCasino ? numberOr(runner.ra ?? item.ra) : null;
   return {
-    mid: String(item.mid), sid: String(runner.rid ?? item.mid), nation: runner.na ?? item.na ?? market.marketname ?? null,
+    mid: String(item.mid),
+    sid: String(runner.rid ?? item.mid),
+    nation: runner.na ?? item.na ?? market.marketname ?? null,
     b1: numberOr(runner.b ?? runner.b1 ?? item.b ?? item.b1, casinoRate),
     l1: numberOr(runner.l ?? runner.l1 ?? item.l ?? item.l1),
     bs1: numberOr(runner.bs ?? runner.bs1 ?? item.br ?? item.bs ?? item.bs1, cricketCasino ? null : 0),
     ls1: numberOr(runner.ls ?? runner.ls1 ?? item.lr ?? item.ls ?? item.ls1, cricketCasino ? null : 0),
-    gstatus: status(runner.sb ?? item.sb), rem: runner.rem ?? item.rem ?? item.res ?? "",
+    gstatus: status(runner.sb ?? item.sb),
+    rem: runner.rem ?? item.rem ?? item.res ?? "",
     srno: String(item.srno ?? item.di ?? runner.srno ?? ""),
-    gameover: booleanOr(item.go, false), s: booleanOr(item.s, true), maxBet: numberOr(market.maxbet),
-    minBet: numberOr(market.minbet), betDelay: numberOr(market.betDelay, 0),
-    matchId: numberOr(market.eventid, market.eventid), isActive: booleanOr(market.isactive),
-    isShow: booleanOr(market.isShow, true), matchName: market.matchname ?? null,
-    matchType: market.markettype ?? null, maxLiabilityPerMarket: numberOr(market.maximumProfit),
-    display_message: market.displayMessage ?? market.remarks ?? null, rate: casinoRate,
+    gameover: booleanOr(item.go, false),
+    s: booleanOr(item.s, true),
+    maxBet: numberOr(market.maxbet),
+    minBet: numberOr(market.minbet),
+    betDelay: numberOr(market.betDelay, 0),
+    matchId: numberOr(market.eventid, market.eventid),
+    isActive: booleanOr(market.isactive),
+    isShow: booleanOr(market.isShow, true),
+    matchName: market.matchname ?? null,
+    matchType: market.markettype ?? null,
+    maxLiabilityPerMarket: numberOr(market.maximumProfit),
+    display_message: market.displayMessage ?? market.remarks ?? null,
+    rate: casinoRate,
   };
 }
 
@@ -225,20 +334,40 @@ function payloadGroup(item, market) {
 
 function transformedTick(item, market) {
   const group = payloadGroup(item, market);
-  const entries = group === "Bookmaker" ? bookmakerPayload(item, market)
-    : ["Odds", "LineMarket"].includes(group) ? [oddsPayload(item, market)] : [fancyPayload(item, market)];
+  const entries =
+    group === "Bookmaker"
+      ? bookmakerPayload(item, market)
+      : ["Odds", "LineMarket"].includes(group)
+        ? [oddsPayload(item, market)]
+        : [fancyPayload(item, market)];
   return { group, entries };
 }
 
 function fancyDefinitionEntry(market) {
   return {
-    mid: String(market.marketId), sid: String(market.marketId), nation: market.marketName,
-    b1: null, l1: null, bs1: 0, ls1: 0, gstatus: "WAITING", rem: "", srno: "",
-    gameover: false, s: true, maxBet: numberOr(market.maxBet, 100000),
-    minBet: numberOr(market.minBet, 100), betDelay: numberOr(market.betDelay, 0),
-    matchId: numberOr(market.eventId, market.eventId), isActive: true, isShow: true,
-    matchName: market.matchName ?? null, matchType: market.marketType ?? null,
-    maxLiabilityPerMarket: 100000, display_message: market.displayMessage ?? null, rate: null,
+    mid: String(market.marketId),
+    sid: String(market.marketId),
+    nation: market.marketName,
+    b1: null,
+    l1: null,
+    bs1: 0,
+    ls1: 0,
+    gstatus: "WAITING",
+    rem: "",
+    srno: "",
+    gameover: false,
+    s: true,
+    maxBet: numberOr(market.maxBet, 100000),
+    minBet: numberOr(market.minBet, 100),
+    betDelay: numberOr(market.betDelay, 0),
+    matchId: numberOr(market.eventId, market.eventId),
+    isActive: true,
+    isShow: true,
+    matchName: market.matchName ?? null,
+    matchType: market.marketType ?? null,
+    maxLiabilityPerMarket: 100000,
+    display_message: market.displayMessage ?? null,
+    rate: null,
   };
 }
 
@@ -254,11 +383,17 @@ async function reconcileFancyDefinitions(markets) {
     if (!byEvent.has(eventId)) byEvent.set(eventId, []);
     byEvent.get(eventId).push({ market, group });
   }
-  let added = 0; let removed = 0; const changedEventIds = [];
+  let added = 0;
+  let removed = 0;
+  const changedEventIds = [];
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   const eventDefinitions = [...byEvent.entries()];
+  const startingRevisions = new Map(
+    eventDefinitions.map(([eventId]) => [eventId, eventPayloadRevisions.get(eventId) || 0]),
+  );
   const currentValues = eventDefinitions.length
-    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`)) : [];
+    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`))
+    : [];
   const writes = [];
   for (let eventIndex = 0; eventIndex < eventDefinitions.length; eventIndex += 1) {
     const [eventId, definitions] = eventDefinitions[eventIndex];
@@ -269,7 +404,9 @@ async function reconcileFancyDefinitions(markets) {
       try {
         const parsed = JSON.parse(current);
         payload = normalizeEventPayload(parsed);
-      } catch { /* replace malformed payload */ }
+      } catch {
+        /* replace malformed payload */
+      }
     }
     let changed = false;
     for (const { market, group } of definitions) {
@@ -277,19 +414,29 @@ async function reconcileFancyDefinitions(markets) {
       const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
       const active = market.isActive && !market.gameOver;
       if (active && index < 0) {
-        payload[group].push(fancyDefinitionEntry(market)); added += 1; changed = true;
+        payload[group].push(fancyDefinitionEntry(market));
+        added += 1;
+        changed = true;
       } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
-        payload[group][index] = fancyDefinitionEntry(market); changed = true;
-      } else if (active && index >= 0
-        && payload[group][index]?.display_message !== (market.displayMessage ?? null)) {
-        payload[group][index].display_message = market.displayMessage ?? null; changed = true;
+        payload[group][index] = fancyDefinitionEntry(market);
+        changed = true;
+      } else if (
+        active &&
+        index >= 0 &&
+        payload[group][index]?.display_message !== (market.displayMessage ?? null)
+      ) {
+        payload[group][index].display_message = market.displayMessage ?? null;
+        changed = true;
       } else if (!active && index >= 0) {
-        payload[group].splice(index, 1); removed += 1; changed = true;
+        payload[group].splice(index, 1);
+        removed += 1;
+        changed = true;
       }
     }
     if (changed) {
+      if ((eventPayloadRevisions.get(eventId) || 0) !== startingRevisions.get(eventId)) continue;
       writes.push([key, JSON.stringify(payload)]);
-      eventPayloadCache.set(eventId, payload);
+      setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
       changedEventIds.push(eventId);
     }
   }
@@ -303,32 +450,85 @@ async function reconcileFancyDefinitions(markets) {
 
 function regularDefinitionEntries(market, runners = []) {
   const marketRow = {
-    eventid: market.eventId, sportid: market.sportId, marketid: market.marketId,
-    marketname: market.marketName, matchname: market.matchName, opendate: market.openDate,
-    inplay: market.inPlay, isactive: market.isActive, minbet: market.minBet,
-    maxbet: market.maxBet, betDelay: market.betDelay, minBetRate: 1, maxBetRate: 500,
+    eventid: market.eventId,
+    sportid: market.sportId,
+    marketid: market.marketId,
+    marketname: market.marketName,
+    matchname: market.matchName,
+    opendate: market.openDate,
+    inplay: market.inPlay,
+    isactive: market.isActive,
+    minbet: market.minBet,
+    maxbet: market.maxBet,
+    betDelay: market.betDelay,
+    minBetRate: 1,
+    maxBetRate: 500,
     displayMessage: market.displayMessage ?? null,
   };
   const itemRunners = runners.map((runner) => ({
-    rid: runner.selectionId, na: runner.runnerName, s: "SUSPENDED", sb: "S",
-    b1: null, l1: null, bs1: 0, ls1: 0,
+    rid: runner.selectionId,
+    na: runner.runnerName,
+    s: "SUSPENDED",
+    sb: "S",
+    b1: null,
+    l1: null,
+    bs1: 0,
+    ls1: 0,
   }));
   const group = payloadGroup({ mid: market.marketId }, marketRow);
   if (group === "Bookmaker") {
-    const entries = bookmakerPayload({ eid: market.eventId, mid: market.marketId,
-      na: market.marketName, s: "WAITING", r: itemRunners }, marketRow);
-    return { group, entries: entries.length ? entries : [{
-      mid: String(market.marketId), t: market.marketName, sid: String(market.marketId),
-      nation: market.marketName, b1: null, bs1: 0, l1: null, ls1: 0,
-      gstatus: "WAITING", rem: null, display_message: market.displayMessage ?? null, betlock: 0,
-      minBet: numberOr(market.minBet), maxBet: numberOr(market.maxBet),
-      betDelay: numberOr(market.betDelay, 0), minBetRate: 1, maxBetRate: 500,
-      matchName: market.matchName ?? null, matchId: numberOr(market.eventId, market.eventId),
-      isActive: true, isPause: false, sportId: numberOr(market.sportId, market.sportId),
-    }] };
+    const entries = bookmakerPayload(
+      { eid: market.eventId, mid: market.marketId, na: market.marketName, s: "WAITING", r: itemRunners },
+      marketRow,
+    );
+    return {
+      group,
+      entries: entries.length
+        ? entries
+        : [
+            {
+              mid: String(market.marketId),
+              t: market.marketName,
+              sid: String(market.marketId),
+              nation: market.marketName,
+              b1: null,
+              bs1: 0,
+              l1: null,
+              ls1: 0,
+              gstatus: "WAITING",
+              rem: null,
+              display_message: market.displayMessage ?? null,
+              betlock: 0,
+              minBet: numberOr(market.minBet),
+              maxBet: numberOr(market.maxBet),
+              betDelay: numberOr(market.betDelay, 0),
+              minBetRate: 1,
+              maxBetRate: 500,
+              matchName: market.matchName ?? null,
+              matchId: numberOr(market.eventId, market.eventId),
+              isActive: true,
+              isPause: false,
+              sportId: numberOr(market.sportId, market.sportId),
+            },
+          ],
+    };
   }
-  return { group, entries: [oddsPayload({ eid: market.eventId, mid: market.marketId,
-    na: market.marketName, s: "WAITING", ip: market.inPlay, r: itemRunners }, marketRow)] };
+  return {
+    group,
+    entries: [
+      oddsPayload(
+        {
+          eid: market.eventId,
+          mid: market.marketId,
+          na: market.marketName,
+          s: "WAITING",
+          ip: market.inPlay,
+          r: itemRunners,
+        },
+        marketRow,
+      ),
+    ],
+  };
 }
 
 async function reconcileRegularDefinitions(markets) {
@@ -341,11 +541,17 @@ async function reconcileRegularDefinitions(markets) {
     if (!byEvent.has(eventId)) byEvent.set(eventId, []);
     byEvent.get(eventId).push(market);
   }
-  let added = 0; let removed = 0; const changedEventIds = [];
+  let added = 0;
+  let removed = 0;
+  const changedEventIds = [];
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   const eventDefinitions = [...byEvent.entries()];
+  const startingRevisions = new Map(
+    eventDefinitions.map(([eventId]) => [eventId, eventPayloadRevisions.get(eventId) || 0]),
+  );
   const currentValues = eventDefinitions.length
-    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`)) : [];
+    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`))
+    : [];
   const writes = [];
   for (let eventIndex = 0; eventIndex < eventDefinitions.length; eventIndex += 1) {
     const [eventId, definitions] = eventDefinitions[eventIndex];
@@ -353,7 +559,11 @@ async function reconcileRegularDefinitions(markets) {
     let payload = emptyEventPayload();
     const current = currentValues[eventIndex];
     if (current) {
-      try { payload = normalizeEventPayload(JSON.parse(current)); } catch { /* replace malformed payload */ }
+      try {
+        payload = normalizeEventPayload(JSON.parse(current));
+      } catch {
+        /* replace malformed payload */
+      }
     }
     let changed = false;
     for (const market of definitions) {
@@ -362,7 +572,9 @@ async function reconcileRegularDefinitions(markets) {
         for (const group of PAYLOAD_GROUPS) {
           const filtered = payload[group].filter((entry) => entryMarketId(entry) !== String(market.marketId));
           if (filtered.length !== payload[group].length) {
-            removed += 1; changed = true; payload[group] = filtered;
+            removed += 1;
+            changed = true;
+            payload[group] = filtered;
           }
         }
         continue;
@@ -371,33 +583,41 @@ async function reconcileRegularDefinitions(markets) {
         // Discovery initially has no metadata for BM2 itself. Replace the single
         // synthetic "Bookmaker2" row once base-market runner names are available.
         const marketId = String(market.marketId);
-        const currentEntries = payload.Bookmaker
-          .filter((entry) => entryMarketId(entry) === marketId);
-        const syntheticBookmaker2 = /-BM2$/i.test(marketId) && currentEntries.length === 1
-          && String(currentEntries[0]?.nation || "").toLowerCase() === "bookmaker2";
+        const currentEntries = payload.Bookmaker.filter((entry) => entryMarketId(entry) === marketId);
+        const syntheticBookmaker2 =
+          /-BM2$/i.test(marketId) &&
+          currentEntries.length === 1 &&
+          String(currentEntries[0]?.nation || "").toLowerCase() === "bookmaker2";
         if (syntheticBookmaker2 && (market.runners || []).length) {
           for (const groupName of PAYLOAD_GROUPS) {
-            payload[groupName] = payload[groupName]
-              .filter((entry) => entryMarketId(entry) !== marketId);
+            payload[groupName] = payload[groupName].filter((entry) => entryMarketId(entry) !== marketId);
           }
           const seeded = regularDefinitionEntries(market, market.runners);
-          payload[seeded.group].push(...seeded.entries); changed = true;
+          payload[seeded.group].push(...seeded.entries);
+          changed = true;
         }
         for (const groupName of PAYLOAD_GROUPS) {
           for (const entry of payload[groupName]) {
-            if (entryMarketId(entry) === marketId
-              && entry.display_message !== (market.displayMessage ?? null)) {
-              entry.display_message = market.displayMessage ?? null; changed = true;
+            if (
+              entryMarketId(entry) === marketId &&
+              entry.display_message !== (market.displayMessage ?? null)
+            ) {
+              entry.display_message = market.displayMessage ?? null;
+              changed = true;
             }
           }
         }
         continue;
       }
       const { group, entries } = regularDefinitionEntries(market, market.runners || []);
-      payload[group].push(...entries); added += 1; changed = true;
+      payload[group].push(...entries);
+      added += 1;
+      changed = true;
     }
     if (changed) {
-      writes.push([key, JSON.stringify(payload)]); eventPayloadCache.set(eventId, payload);
+      if ((eventPayloadRevisions.get(eventId) || 0) !== startingRevisions.get(eventId)) continue;
+      writes.push([key, JSON.stringify(payload)]);
+      setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
       changedEventIds.push(eventId);
     }
   }
@@ -409,7 +629,9 @@ async function reconcileRegularDefinitions(markets) {
   return { events: byEvent.size, added, removed, changedEventIds };
 }
 
-function entryMarketId(entry) { return String(entry.marketId ?? entry.mid ?? ""); }
+function entryMarketId(entry) {
+  return String(entry.marketId ?? entry.mid ?? "");
+}
 
 function shouldRemoveFromPayload(group, item) {
   if (group === "Bookmaker") return booleanOr(item.go, false);
@@ -421,18 +643,26 @@ async function loadRunnerNames(marketId) {
   const normalized = String(marketId);
   if (runnerNameCache.has(normalized)) return runnerNameCache.get(normalized);
   if (runnerNameLoads.has(normalized)) return runnerNameLoads.get(normalized);
-  const loading = provider.runners(normalized).then((response) => {
-    const rows = Array.isArray(response?.data) ? response.data
-      : Array.isArray(response) ? response : [];
-    const names = new Map(rows.map((runner) => [
-      String(runner?.runnerId ?? runner?.selectionId ?? runner?.id), runner?.name ?? runner?.nation ?? null,
-    ]).filter(([selectionId, name]) => selectionId && name));
-    runnerNameCache.set(normalized, names);
-    return names;
-  }).catch((error) => {
-    logger.warn("[Redis] runner metadata lookup failed", { marketId: normalized, error: error.message });
-    return new Map();
-  }).finally(() => runnerNameLoads.delete(normalized));
+  const loading = provider
+    .runners(normalized)
+    .then((response) => {
+      const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+      const names = new Map(
+        rows
+          .map((runner) => [
+            String(runner?.runnerId ?? runner?.selectionId ?? runner?.id),
+            runner?.name ?? runner?.nation ?? null,
+          ])
+          .filter(([selectionId, name]) => selectionId && name),
+      );
+      setBounded(runnerNameCache, normalized, names, CACHE_LIMIT);
+      return names;
+    })
+    .catch((error) => {
+      logger.warn("[Redis] runner metadata lookup failed", { marketId: normalized, error: error.message });
+      return new Map();
+    })
+    .finally(() => runnerNameLoads.delete(normalized));
   runnerNameLoads.set(normalized, loading);
   return loading;
 }
@@ -442,8 +672,11 @@ async function primeRunnerNames(marketIds) {
 }
 
 function preserveRunnerNames(entries, previousEntries) {
-  const previous = new Map((previousEntries || []).flatMap((entry) =>
-    (entry.runners || []).map((runner) => [String(runner.selectionId), runner.name])));
+  const previous = new Map(
+    (previousEntries || []).flatMap((entry) =>
+      (entry.runners || []).map((runner) => [String(runner.selectionId), runner.name]),
+    ),
+  );
   for (const entry of entries) {
     for (const runner of entry.runners || []) {
       if (!runner.name) runner.name = previous.get(String(runner.selectionId)) ?? null;
@@ -453,8 +686,10 @@ function preserveRunnerNames(entries, previousEntries) {
 
 async function writeTick(item) {
   if (!item || typeof item !== "object" || !item.eid || !item.mid) return false;
-  const redis = await getRedisClient(); if (!redis?.isOpen) return false;
-  const market = await findMarket(String(item.mid)); if (!market) return false;
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return false;
+  const market = await findMarket(String(item.mid));
+  if (!market) return false;
   if (booleanOr(market.isactive, false) === false) return false;
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${item.eid}`;
   let payload = eventPayloadCache.get(String(item.eid));
@@ -467,7 +702,9 @@ async function writeTick(item) {
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           payload = normalizeEventPayload(parsed);
         }
-      } catch { /* Replace malformed legacy data with a valid event payload. */ }
+      } catch {
+        /* Replace malformed legacy data with a valid event payload. */
+      }
     }
   }
   if (payloadGroup(item, market) === "Odds") await loadRunnerNames(item.mid);
@@ -476,13 +713,16 @@ async function writeTick(item) {
   if (group === "Odds") preserveRunnerNames(entries, previousEntries);
   // A market can change grouping as discovery metadata improves; keep exactly one copy.
   for (const payloadGroupName of PAYLOAD_GROUPS) {
-    payload[payloadGroupName] = payload[payloadGroupName]
-      .filter((entry) => entryMarketId(entry) !== String(item.mid));
+    payload[payloadGroupName] = payload[payloadGroupName].filter(
+      (entry) => entryMarketId(entry) !== String(item.mid),
+    );
   }
   if (!shouldRemoveFromPayload(group, item)) payload[group].push(...entries);
   await redis.set(key, JSON.stringify(payload));
-  eventPayloadCache.set(String(item.eid), payload);
-  recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid); return payload;
+  setBounded(eventPayloadCache, String(item.eid), payload, CACHE_LIMIT);
+  eventPayloadRevisions.set(String(item.eid), (eventPayloadRevisions.get(String(item.eid)) || 0) + 1);
+  recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
+  return payload;
 }
 
 function invalidateMarkets(marketIds) {
@@ -491,21 +731,35 @@ function invalidateMarkets(marketIds) {
 
 function recordTickActivity(key, eventId, marketId) {
   const previous = tickActivity.get(key);
-  tickActivity.set(key, { eventId: String(eventId), marketId: String(marketId),
-    lastUpdatedAt: new Date().toISOString(), tickCount: (previous?.tickCount || 0) + 1 });
+  setBounded(
+    tickActivity,
+    key,
+    {
+      eventId: String(eventId),
+      marketId: String(marketId),
+      lastUpdatedAt: new Date().toISOString(),
+      tickCount: (previous?.tickCount || 0) + 1,
+    },
+    CACHE_LIMIT,
+  );
 }
 
 function parseTickKey(key) {
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   if (!key.startsWith(prefix)) return null;
-  const value = key.slice(prefix.length); const separator = value.indexOf(":");
-  return separator < 0 ? { eventId: value, marketId: null }
+  const value = key.slice(prefix.length);
+  const separator = value.indexOf(":");
+  return separator < 0
+    ? { eventId: value, marketId: null }
     : { eventId: value.slice(0, separator), marketId: value.slice(separator + 1) };
 }
 
 function payloadHasMarket(payload, marketId) {
-  return PAYLOAD_GROUPS.some((group) => Array.isArray(payload?.[group])
-    && payload[group].some((entry) => entryMarketId(entry) === String(marketId)));
+  return PAYLOAD_GROUPS.some(
+    (group) =>
+      Array.isArray(payload?.[group]) &&
+      payload[group].some((entry) => entryMarketId(entry) === String(marketId)),
+  );
 }
 
 async function inspectTicks({ eventId, marketId, limit = 250, includePayload = false } = {}) {
@@ -514,37 +768,62 @@ async function inspectTicks({ eventId, marketId, limit = 250, includePayload = f
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   const boundedLimit = Math.max(1, Math.min(500, Number(limit) || 250));
   const pattern = eventId ? `${prefix}${eventId}*` : `${prefix}*`;
-  let cursor = "0"; const keys = [];
+  let cursor = "0";
+  const keys = [];
   do {
-    const result = await redis.scan(cursor, { MATCH: pattern, COUNT: 200 }); cursor = String(result.cursor);
+    const result = await redis.scan(cursor, { MATCH: pattern, COUNT: 200 });
+    cursor = String(result.cursor);
     keys.push(...result.keys.slice(0, boundedLimit - keys.length));
   } while (cursor !== "0" && keys.length < boundedLimit);
   const values = keys.length ? await redis.mGet(keys) : [];
   const items = [];
   for (let index = 0; index < keys.length; index += 1) {
-    const key = keys[index]; const parsedKey = parseTickKey(key);
+    const key = keys[index];
+    const parsedKey = parseTickKey(key);
     const eventActivity = [...tickActivity.values()].filter((entry) => entry.eventId === parsedKey.eventId);
-    const activity = eventActivity.sort((left, right) => String(right.lastUpdatedAt).localeCompare(String(left.lastUpdatedAt)))[0];
+    const activity = eventActivity.sort((left, right) =>
+      String(right.lastUpdatedAt).localeCompare(String(left.lastUpdatedAt)),
+    )[0];
     let payload = null;
-    try { payload = values[index] ? JSON.parse(values[index]) : null; } catch { payload = values[index]; }
+    try {
+      payload = values[index] ? JSON.parse(values[index]) : null;
+    } catch {
+      payload = values[index];
+    }
     if (marketId && parsedKey.marketId !== String(marketId) && !payloadHasMarket(payload, marketId)) continue;
-    items.push({ key, ...parsedKey, ttl: await redis.ttl(key), lastUpdatedAt: activity?.lastUpdatedAt || null,
+    items.push({
+      key,
+      ...parsedKey,
+      ttl: await redis.ttl(key),
+      lastUpdatedAt: activity?.lastUpdatedAt || null,
       tickCount: eventActivity.reduce((total, entry) => total + entry.tickCount, 0) || null,
-      payload: includePayload ? payload : null });
+      payload: includePayload ? payload : null,
+    });
   }
   return { connected: true, scanned: items.length, truncated: cursor !== "0", items };
 }
 
 function getTickActivity(marketId) {
-  const entries = [...tickActivity.values()].filter((item) => !marketId || item.marketId === String(marketId));
-  return entries.sort((left, right) => String(right.lastUpdatedAt).localeCompare(String(left.lastUpdatedAt)))[0] || null;
+  const entries = [...tickActivity.values()].filter(
+    (item) => !marketId || item.marketId === String(marketId),
+  );
+  return (
+    entries.sort((left, right) => String(right.lastUpdatedAt).localeCompare(String(left.lastUpdatedAt)))[0] ||
+    null
+  );
 }
 
 async function getEventSnapshot(eventId) {
-  const redis = await getRedisClient(); if (!redis?.isOpen) return emptyEventPayload();
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return emptyEventPayload();
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
-  const value = await redis.get(key); if (!value) return emptyEventPayload();
-  try { return normalizeEventPayload(JSON.parse(value)); } catch { return emptyEventPayload(); }
+  const value = await redis.get(key);
+  if (!value) return emptyEventPayload();
+  try {
+    return normalizeEventPayload(JSON.parse(value));
+  } catch {
+    return emptyEventPayload();
+  }
 }
 
 async function getEventSnapshots(eventIds) {
@@ -555,8 +834,11 @@ async function getEventSnapshots(eventIds) {
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   const values = await redis.mGet(ids.map((eventId) => `${prefix}${eventId}`));
   ids.forEach((eventId, index) => {
-    try { snapshots.set(eventId, values[index] ? normalizeEventPayload(JSON.parse(values[index])) : null); }
-    catch { snapshots.set(eventId, null); }
+    try {
+      snapshots.set(eventId, values[index] ? normalizeEventPayload(JSON.parse(values[index])) : null);
+    } catch {
+      snapshots.set(eventId, null);
+    }
   });
   return snapshots;
 }
@@ -564,13 +846,18 @@ async function getEventSnapshots(eventIds) {
 async function removeMarket(eventId, marketId) {
   const redis = await getRedisClient();
   if (!redis?.isOpen) return false;
-  const eventKey = String(eventId); const normalizedMarketId = String(marketId);
+  const eventKey = String(eventId);
+  const normalizedMarketId = String(marketId);
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`;
   let payload = eventPayloadCache.get(eventKey);
   if (!payload) {
     const value = await redis.get(key);
     if (!value) return false;
-    try { payload = JSON.parse(value); } catch { return false; }
+    try {
+      payload = JSON.parse(value);
+    } catch {
+      return false;
+    }
   }
   let removed = false;
   for (const group of PAYLOAD_GROUPS) {
@@ -581,20 +868,53 @@ async function removeMarket(eventId, marketId) {
   }
   if (!removed) return false;
   await redis.set(key, JSON.stringify(payload));
-  eventPayloadCache.set(eventKey, payload);
+  setBounded(eventPayloadCache, eventKey, payload, CACHE_LIMIT);
   return true;
 }
 
 async function closeRedis() {
-  if (!client?.isOpen) return; const current = client; client = undefined; await current.quit();
+  if (!client?.isOpen) return;
+  const current = client;
+  client = undefined;
+  await current.quit();
 }
 
 function getRedisStatus() {
-  return { configured: Boolean(redisUrl()), connected: Boolean(client?.isOpen), activityCount: tickActivity.size };
+  return {
+    configured: Boolean(redisUrl()),
+    connected: Boolean(client?.isOpen),
+    activityCount: tickActivity.size,
+  };
 }
 
-module.exports = { getRedisClient, writeTick, removeMarket, getEventSnapshot, getEventSnapshots, inspectTicks, getTickActivity,
-  getRedisStatus, closeRedis, bookmakerPayload, oddsPayload, fancyPayload, payloadGroup, runnerPrices,
-  transformedTick, emptyEventPayload, loadRunnerNames, primeRunnerNames, preserveRunnerNames,
-  shouldRemoveFromPayload, fancyDefinitionEntry, reconcileFancyDefinitions, regularDefinitionEntries,
-  reconcileRegularDefinitions, normalizeEventPayload, validMarketIdentifier, invalidateMarkets };
+module.exports = {
+  getRedisClient,
+  writeTick,
+  writeScore,
+  getScore,
+  removeMarket,
+  getEventSnapshot,
+  getEventSnapshots,
+  inspectTicks,
+  getTickActivity,
+  getRedisStatus,
+  closeRedis,
+  bookmakerPayload,
+  oddsPayload,
+  fancyPayload,
+  payloadGroup,
+  runnerPrices,
+  transformedTick,
+  emptyEventPayload,
+  loadRunnerNames,
+  primeRunnerNames,
+  preserveRunnerNames,
+  shouldRemoveFromPayload,
+  fancyDefinitionEntry,
+  reconcileFancyDefinitions,
+  regularDefinitionEntries,
+  reconcileRegularDefinitions,
+  normalizeEventPayload,
+  validMarketIdentifier,
+  invalidateMarkets,
+};

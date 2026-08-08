@@ -14,20 +14,28 @@ function getLogger() {
     level: "info",
     format: winston.format.combine(
       winston.format.timestamp(),
-      winston.format.printf((info) => JSON.stringify({
-        timestamp: info.timestamp,
-        type: info.type,
-        ...info.details,
-      }, null, 2)),
+      winston.format.printf((info) =>
+        JSON.stringify(
+          {
+            timestamp: info.timestamp,
+            type: info.type,
+            ...info.details,
+          },
+          null,
+          2,
+        ),
+      ),
     ),
-    transports: [new winston.transports.DailyRotateFile({
-      dirname: path.resolve(process.env.PROVIDER_LOG_DIR || "logs/provider"),
-      filename: "provider-http-%DATE%.log",
-      datePattern: "YYYY-MM-DD",
-      maxSize: process.env.PROVIDER_LOG_MAX_SIZE || "25m",
-      maxFiles: process.env.PROVIDER_LOG_MAX_FILES || "14d",
-      zippedArchive: false,
-    })],
+    transports: [
+      new winston.transports.DailyRotateFile({
+        dirname: path.resolve(process.env.PROVIDER_LOG_DIR || "logs/provider"),
+        filename: "provider-http-%DATE%.log",
+        datePattern: "YYYY-MM-DD",
+        maxSize: process.env.PROVIDER_LOG_MAX_SIZE || "25m",
+        maxFiles: process.env.PROVIDER_LOG_MAX_FILES || "14d",
+        zippedArchive: false,
+      }),
+    ],
     exitOnError: false,
   });
   return instance;

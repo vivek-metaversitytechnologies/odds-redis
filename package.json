@@ -11,9 +11,13 @@
     "start": "node src/server.js",
     "predev": "npm run build:admin-css",
     "dev": "nodemon src/server.js",
+    "db:migrate": "node scripts/migrate.js",
+    "lint": "eslint src test scripts",
+    "format": "prettier --write src test scripts README.md eslint.config.js",
+    "format:check": "prettier --check src test scripts README.md eslint.config.js",
     "test": "node --test test/*.test.js",
     "precheck": "npm run build:admin-css",
-    "check": "node --check src/server.js && node --test test/*.test.js"
+    "check": "node --check src/server.js && npm run lint && node --test test/*.test.js"
   },
   "engines": {
     "node": ">=20"
@@ -33,8 +37,11 @@
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.3.3",
+    "eslint": "^10.8.1",
     "flowbite": "^4.0.2",
+    "globals": "^17.9.0",
     "nodemon": "^3.1.14",
+    "prettier": "^3.9.6",
     "supertest": "^7.2.2",
     "tailwindcss": "^4.3.3"
   }

@@ -5,11 +5,18 @@ const subscriptions = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
+const { integer, csvIntegers } = require("../config/env");
 
 const activeMarketIds = new Set();
 let running = false;
-const syncState = { running: false, lastStartedAt: null, lastCompletedAt: null,
-  lastError: null, lastResult: null, recent: [] };
+const syncState = {
+  running: false,
+  lastStartedAt: null,
+  lastCompletedAt: null,
+  lastError: null,
+  lastResult: null,
+  recent: [],
+};
 
 function record(type, details = {}) {
   syncState.recent.unshift({ at: new Date().toISOString(), type, ...details });
@@ -17,8 +24,7 @@ function record(type, details = {}) {
 }
 
 async function fetchActiveMarkets() {
-  const sportIds = String(process.env.SPORT_IDS || "1,2,4").split(",")
-    .map((value) => Number(value.trim())).filter(Number.isFinite);
+  const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   const [rows] = await getSourcePool().query(
     `SELECT m.* FROM t_market m WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
@@ -41,17 +47,29 @@ async function fetchActiveMarkets() {
 
 async function syncMarketSubscriptions() {
   if (running) return { skipped: true, reason: "already-running" };
-  running = true; syncState.running = true; syncState.lastStartedAt = new Date().toISOString();
-  syncState.lastError = null; record("sync.started");
+  running = true;
+  syncState.running = true;
+  syncState.lastStartedAt = new Date().toISOString();
+  syncState.lastError = null;
+  record("sync.started");
   try {
     const markets = await fetchActiveMarkets();
     record("source.loaded", { markets: markets.length });
-    const discovered = [...new Set(markets.map((market) => market.marketid).filter(Boolean).map(String))];
+    const discovered = [
+      ...new Set(
+        markets
+          .map((market) => market.marketid)
+          .filter(Boolean)
+          .map(String),
+      ),
+    ];
     const socketSubscriptions = new Set(websocket.getSubscribedMarketIds());
-    const pending = discovered.filter((id) => !socketSubscriptions.has(id)
-      && !subscriptions.isMarketSuppressed(id));
-    const batchSize = Math.max(1, Number(process.env.MARKET_SUBSCRIPTION_BATCH_SIZE || 10));
-    const accepted = []; const skipped = [];
+    const pending = discovered.filter(
+      (id) => !socketSubscriptions.has(id) && !subscriptions.isMarketSuppressed(id),
+    );
+    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+    const accepted = [];
+    const skipped = [];
     for (let index = 0; index < pending.length; index += batchSize) {
       const batch = pending.slice(index, index + batchSize);
       record("batch.started", { batch: Math.floor(index / batchSize) + 1, size: batch.length });
@@ -59,31 +77,51 @@ async function syncMarketSubscriptions() {
       const subscribedIds = Array.isArray(result.subscribed) ? result.subscribed : [];
       const skippedIds = Array.isArray(result.skipped) ? result.skipped : [];
       subscribedIds.forEach((id) => activeMarketIds.add(id));
-      accepted.push(...subscribedIds); skipped.push(...skippedIds);
-      record("batch.completed", { batch: Math.floor(index / batchSize) + 1,
-        requested: batch.length, subscribed: subscribedIds.length, skipped: skippedIds.length });
+      accepted.push(...subscribedIds);
+      skipped.push(...skippedIds);
+      record("batch.completed", {
+        batch: Math.floor(index / batchSize) + 1,
+        requested: batch.length,
+        subscribed: subscribedIds.length,
+        skipped: skippedIds.length,
+      });
     }
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
-    const result = { skipped: false, total: markets.length, requested: pending.length,
-      newlySubscribed: accepted.length, providerSkipped: skipped.length,
-      activeMarketIds: currentActiveMarketIds, skippedMarketIds: [...new Set(skipped)] };
-    syncState.lastResult = result; syncState.lastCompletedAt = new Date().toISOString();
-    record("sync.completed", { total: result.total, subscribed: result.newlySubscribed,
-      providerSkipped: result.providerSkipped });
+    const result = {
+      skipped: false,
+      total: markets.length,
+      requested: pending.length,
+      newlySubscribed: accepted.length,
+      providerSkipped: skipped.length,
+      activeMarketIds: currentActiveMarketIds,
+      skippedMarketIds: [...new Set(skipped)],
+    };
+    syncState.lastResult = result;
+    syncState.lastCompletedAt = new Date().toISOString();
+    record("sync.completed", {
+      total: result.total,
+      subscribed: result.newlySubscribed,
+      providerSkipped: result.providerSkipped,
+    });
     return result;
   } catch (error) {
-    syncState.lastError = error.message; syncState.lastCompletedAt = new Date().toISOString();
+    syncState.lastError = error.message;
+    syncState.lastCompletedAt = new Date().toISOString();
     record("sync.failed", { error: error.message });
     throw error;
   } finally {
-    running = false; syncState.running = false;
+    running = false;
+    syncState.running = false;
   }
 }
 
 function getMarketSyncStatus() {
-  return { ...syncState, activeMarketCount: websocket.getSubscribedMarketIds().length,
+  return {
+    ...syncState,
+    activeMarketCount: websocket.getSubscribedMarketIds().length,
     skippedRetry: subscriptions.getSkippedRetryStatus(),
-    recent: syncState.recent.map((entry) => ({ ...entry })) };
+    recent: syncState.recent.map((entry) => ({ ...entry })),
+  };
 }
 
 function recordMarketSyncActivity(type, details) {
@@ -104,5 +142,10 @@ function startMarketSync() {
   return task;
 }
 
-module.exports = { fetchActiveMarkets, syncMarketSubscriptions, startMarketSync, getMarketSyncStatus,
-  recordMarketSyncActivity };
+module.exports = {
+  fetchActiveMarkets,
+  syncMarketSubscriptions,
+  startMarketSync,
+  getMarketSyncStatus,
+  recordMarketSyncActivity,
+};

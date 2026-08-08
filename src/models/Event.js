@@ -23,10 +23,17 @@ class Event {
   }
 
   static fromRow(row) {
-    return new Event({ ...row, openDate: row.open_date, isActive: row.isactive,
-      updatedOn: row.updatedon, betLock: row.betlock,
-      isRedisUpdated: row.is_redis_updated, inPlay: row.in_play,
-      fancyLock: row.fancylock, channelId: row.channel_id });
+    return new Event({
+      ...row,
+      openDate: row.open_date,
+      isActive: row.isactive,
+      updatedOn: row.updatedon,
+      betLock: row.betlock,
+      isRedisUpdated: row.is_redis_updated,
+      inPlay: row.in_play,
+      fancyLock: row.fancylock,
+      channelId: row.channel_id,
+    });
   }
 }
 

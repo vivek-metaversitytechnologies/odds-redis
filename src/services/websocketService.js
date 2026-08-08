@@ -1,29 +1,51 @@
 const { io } = require("socket.io-client");
+const crypto = require("node:crypto");
 const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
+const { integer } = require("../config/env");
+const { setBounded } = require("../utils/boundedMap");
 
 let socket;
 const eventWriteChains = new Map();
 let tickPublisher = () => {};
+let scorePublisher = () => {};
 let rawTickPublisher = () => {};
 let resultHandler = async () => {};
 const loggedShapes = new Set();
 const rawSocketActivity = [];
 const subscribedMarketIds = new Set();
+const scoreHashes = new Map();
+const SCORE_HASH_LIMIT = integer("SCORE_HASH_CACHE_LIMIT", 50000, { min: 1000 });
 const state = {
   connectionRequested: false,
-  connected: false, socketId: null, lastConnectedAt: null,
-  lastDisconnectedAt: null, lastConnectError: null,
-  socketMessageCount: 0, tickCount: 0, scoreUpdateCount: 0, unknownMessageCount: 0,
-  persistedTickCount: 0, failedTickCount: 0,
-  lastTickAt: null, lastTickSummary: null,
+  connected: false,
+  socketId: null,
+  lastConnectedAt: null,
+  lastDisconnectedAt: null,
+  lastConnectError: null,
+  socketMessageCount: 0,
+  tickCount: 0,
+  scoreUpdateCount: 0,
+  scorePersistedCount: 0,
+  scoreUnchangedCount: 0,
+  unknownMessageCount: 0,
+  persistedTickCount: 0,
+  failedTickCount: 0,
+  lastTickAt: null,
+  lastTickSummary: null,
 };
 
 function summarize(item) {
   if (!item || typeof item !== "object") return { type: typeof item };
-  return { eid: item.eid ?? null, mid: item.mid ?? null, name: item.na ?? null,
-    status: item.s ?? null, ts: item.t ?? null, level: item.level ?? null };
+  return {
+    eid: item.eid ?? null,
+    mid: item.mid ?? null,
+    name: item.na ?? null,
+    status: item.s ?? null,
+    ts: item.t ?? null,
+    level: item.level ?? null,
+  };
 }
 
 function isResultTick(item) {
@@ -50,10 +72,49 @@ function collectScores(value) {
   return Array.isArray(score) ? score : score && typeof score === "object" ? [score] : [];
 }
 
+async function persistScores(scores, receivedAtMs = Date.now()) {
+  // A provider packet can contain the same event more than once. Keep only its
+  // final scorecard and avoid rewriting/re-emitting unchanged HTML heartbeats.
+  const latestByEvent = new Map();
+  for (const score of scores || []) {
+    const eventId = String(score?.eid ?? score?.eventId ?? "").trim();
+    const html = score?.data ?? score?.html ?? score?.scorecard;
+    if (/^\d+$/.test(eventId) && typeof html === "string" && html.trim()) {
+      latestByEvent.set(eventId, score);
+    }
+  }
+  const writes = [...latestByEvent.entries()].map(async ([eventId, score]) => {
+    const html = score?.data ?? score?.html ?? score?.scorecard;
+    const hash = crypto.createHash("sha1").update(html).digest("base64url");
+    if (scoreHashes.get(eventId) === hash) {
+      state.scoreUnchangedCount += 1;
+      return false;
+    }
+    setBounded(scoreHashes, eventId, hash, SCORE_HASH_LIMIT);
+    try {
+      const payload = await redisStore.writeScore(score);
+      if (!payload) {
+        if (scoreHashes.get(eventId) === hash) scoreHashes.delete(eventId);
+        return false;
+      }
+      state.scorePersistedCount += 1;
+      scorePublisher(String(payload.eid), payload, receivedAtMs);
+      return true;
+    } catch (error) {
+      if (scoreHashes.get(eventId) === hash) scoreHashes.delete(eventId);
+      logger.error("[ProviderWS] scorecard write failed", { error: error.message });
+      return false;
+    }
+  });
+  await Promise.allSettled(writes);
+}
+
 function messageShape(value) {
   const keys = value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort() : [];
-  const messageKeys = value?.message && typeof value.message === "object" && !Array.isArray(value.message)
-    ? Object.keys(value.message).sort() : [];
+  const messageKeys =
+    value?.message && typeof value.message === "object" && !Array.isArray(value.message)
+      ? Object.keys(value.message).sort()
+      : [];
   return { type: Array.isArray(value) ? "array" : typeof value, keys, messageKeys };
 }
 
@@ -81,7 +142,9 @@ function payloadContainsMarket(value, marketId, visited = new Set()) {
 
 function getRawSocketPayloads(marketId, limit = 20) {
   const boundedLimit = Math.max(1, Math.min(100, Number(limit) || 20));
-  return rawSocketActivity.filter((record) => payloadContainsMarket(record.payload, marketId)).slice(0, boundedLimit);
+  return rawSocketActivity
+    .filter((record) => payloadContainsMarket(record.payload, marketId))
+    .slice(0, boundedLimit);
 }
 
 function logSocketTiming(details) {
@@ -99,15 +162,19 @@ async function persist(items, receivedAtMs = Date.now()) {
       if (payload) {
         state.persistedTickCount += 1;
         updatedEvents.set(String(item.eid), {
-          payload, lastWriteCompletedAt: Date.now(), marketId: String(item.mid),
+          payload,
+          lastWriteCompletedAt: Date.now(),
+          marketId: String(item.mid),
         });
         const providerTimestamp = Number(item.t);
         logSocketTiming({
-          eventId: String(item.eid), marketId: String(item.mid),
+          eventId: String(item.eid),
+          marketId: String(item.mid),
           providerTimestamp: Number.isFinite(providerTimestamp) ? providerTimestamp : null,
           receivedAt: new Date(receivedAtMs).toISOString(),
           providerToBackendMs: Number.isFinite(providerTimestamp)
-            ? Math.max(0, receivedAtMs - providerTimestamp) : null,
+            ? Math.max(0, receivedAtMs - providerTimestamp)
+            : null,
           queueDelayMs: writeStartedAt - receivedAtMs,
           redisWriteMs: Date.now() - writeStartedAt,
         });
@@ -123,7 +190,9 @@ async function persist(items, receivedAtMs = Date.now()) {
       const emitStartedAt = Date.now();
       tickPublisher(eventId, update.payload);
       logSocketTiming({
-        eventId, marketId: update.marketId, stage: "frontend.emit",
+        eventId,
+        marketId: update.marketId,
+        stage: "frontend.emit",
         backendProcessingMs: emitStartedAt - receivedAtMs,
         postRedisToEmitMs: emitStartedAt - update.lastWriteCompletedAt,
         emitCallMs: Date.now() - emitStartedAt,
@@ -137,7 +206,8 @@ async function persist(items, receivedAtMs = Date.now()) {
       await resultHandler([...resultedMarketIds]);
     } catch (error) {
       logger.error("[ProviderWS] result unsubscribe handler failed", {
-        marketIds: [...resultedMarketIds], error: error.message,
+        marketIds: [...resultedMarketIds],
+        error: error.message,
       });
     }
   }
@@ -171,14 +241,18 @@ function connectSocket() {
     transports: ["websocket"],
     reconnection: true,
     reconnectionAttempts: Infinity,
-    reconnectionDelay: Number(process.env.PROVIDER_SOCKET_RECONNECT_DELAY_MS || 1000),
-    reconnectionDelayMax: Number(process.env.PROVIDER_SOCKET_RECONNECT_DELAY_MAX_MS || 10000),
-    timeout: Number(process.env.PROVIDER_SOCKET_TIMEOUT_MS || 15000),
-    extraHeaders: { "x-api-key": process.env.PROVIDER_TOKEN || process.env.PROVIDER_X_API_KEY || "dummy_key" },
+    reconnectionDelay: integer("PROVIDER_SOCKET_RECONNECT_DELAY_MS", 1000, { min: 100 }),
+    reconnectionDelayMax: integer("PROVIDER_SOCKET_RECONNECT_DELAY_MAX_MS", 10000, { min: 1000 }),
+    timeout: integer("PROVIDER_SOCKET_TIMEOUT_MS", 15000, { min: 1000 }),
+    extraHeaders: {
+      "x-api-key": process.env.PROVIDER_TOKEN || process.env.PROVIDER_X_API_KEY || "dummy_key",
+    },
   });
   socket.on("connect", () => {
-    state.connected = true; state.socketId = socket.id;
-    state.lastConnectedAt = new Date().toISOString(); state.lastConnectError = null;
+    state.connected = true;
+    state.socketId = socket.id;
+    state.lastConnectedAt = new Date().toISOString();
+    state.lastConnectError = null;
     logger.info("[ProviderWS] connected", { socketId: socket.id });
     if (subscribedMarketIds.size) socket.emit("subscribe", [...subscribedMarketIds]);
   });
@@ -188,18 +262,22 @@ function connectSocket() {
     state.socketMessageCount += messages.length;
     const oddsTicks = collectOddsTicks(data);
     const scores = messages.flatMap(collectScores);
+    if (scores.length || oddsTicks.length) logRawSocketPayload(data);
     if (scores.length) {
       state.scoreUpdateCount += scores.length;
       logShape("score", messages[0]);
+      void persistScores(scores, receivedAtMs);
     }
     if (oddsTicks.length) {
-      logRawSocketPayload(data);
       for (const item of oddsTicks) {
-        try { rawTickPublisher(item, receivedAtMs); } catch (error) {
+        try {
+          rawTickPublisher(item, receivedAtMs);
+        } catch (error) {
           logger.error("[ProviderWS] raw tick publish failed", { error: error.message });
         }
       }
-      state.tickCount += oddsTicks.length; state.lastTickAt = new Date().toISOString();
+      state.tickCount += oddsTicks.length;
+      state.lastTickAt = new Date().toISOString();
       state.lastTickSummary = summarize(oddsTicks.at(-1));
       logShape("odds", messages[0]);
       const ticksByEvent = new Map();
@@ -218,20 +296,28 @@ function connectSocket() {
     }
   });
   socket.on("disconnect", (reason) => {
-    state.connected = false; state.socketId = null;
+    state.connected = false;
+    state.socketId = null;
     state.lastDisconnectedAt = new Date().toISOString();
     logger.warn("[ProviderWS] disconnected", { reason });
   });
   socket.on("connect_error", (error) => {
-    state.connected = false; state.lastConnectError = error.message;
+    state.connected = false;
+    state.lastConnectError = error.message;
     logger.error("[ProviderWS] connection error", { error: error.message });
   });
   return socket;
 }
 
 function subscribeMarkets(ids) {
-  const fresh = [...new Set((ids || []).map(String).map((id) => id.trim()).filter(Boolean))]
-    .filter((id) => !subscribedMarketIds.has(id));
+  const fresh = [
+    ...new Set(
+      (ids || [])
+        .map(String)
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ].filter((id) => !subscribedMarketIds.has(id));
   fresh.forEach((id) => subscribedMarketIds.add(id));
   if (!fresh.length) return [];
   const current = connectSocket();
@@ -240,8 +326,14 @@ function subscribeMarkets(ids) {
 }
 
 function unsubscribeMarkets(ids) {
-  const removed = [...new Set((ids || []).map(String).map((id) => id.trim()).filter(Boolean))]
-    .filter((id) => subscribedMarketIds.delete(id));
+  const removed = [
+    ...new Set(
+      (ids || [])
+        .map(String)
+        .map((id) => id.trim())
+        .filter(Boolean),
+    ),
+  ].filter((id) => subscribedMarketIds.delete(id));
   if (!removed.length) return [];
   if (socket?.connected) socket.emit("unsubscribe", removed);
   return removed;
@@ -249,7 +341,10 @@ function unsubscribeMarkets(ids) {
 
 async function stopSocket() {
   state.connectionRequested = false;
-  if (socket) { socket.disconnect(); socket = undefined; }
+  if (socket) {
+    socket.disconnect();
+    socket = undefined;
+  }
   await Promise.allSettled([...eventWriteChains.values()]);
 }
 
@@ -257,10 +352,32 @@ function getSocketStatus() {
   return { ...state, subscribedCount: subscribedMarketIds.size };
 }
 
-module.exports = { connectSocket, subscribeMarkets, unsubscribeMarkets, stopSocket, getSocketStatus,
+module.exports = {
+  connectSocket,
+  subscribeMarkets,
+  unsubscribeMarkets,
+  stopSocket,
+  getSocketStatus,
   getSubscribedMarketIds: () => [...subscribedMarketIds],
-  collectOddsTicks, collectScores, messageShape, logRawSocketPayload, logSocketTiming,
-  getRawSocketPayloads, payloadContainsMarket, isResultTick, enqueueEventTicks,
-  setTickPublisher: (publisher) => { tickPublisher = typeof publisher === "function" ? publisher : () => {}; },
-  setRawTickPublisher: (publisher) => { rawTickPublisher = typeof publisher === "function" ? publisher : () => {}; },
-  setResultHandler: (handler) => { resultHandler = typeof handler === "function" ? handler : async () => {}; } };
+  collectOddsTicks,
+  collectScores,
+  messageShape,
+  logRawSocketPayload,
+  logSocketTiming,
+  getRawSocketPayloads,
+  payloadContainsMarket,
+  isResultTick,
+  enqueueEventTicks,
+  setTickPublisher: (publisher) => {
+    tickPublisher = typeof publisher === "function" ? publisher : () => {};
+  },
+  setScorePublisher: (publisher) => {
+    scorePublisher = typeof publisher === "function" ? publisher : () => {};
+  },
+  setRawTickPublisher: (publisher) => {
+    rawTickPublisher = typeof publisher === "function" ? publisher : () => {};
+  },
+  setResultHandler: (handler) => {
+    resultHandler = typeof handler === "function" ? handler : async () => {};
+  },
+};

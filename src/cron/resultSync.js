@@ -9,18 +9,27 @@ const cronConfig = require("../config/cron");
 
 let running = false;
 let exceptionalTableAvailable;
-const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
-  lastError: null, lastResult: null };
+const state = {
+  running: false,
+  lastStartedAt: null,
+  lastCompletedAt: null,
+  lastError: null,
+  lastResult: null,
+};
 
 function responseRows(response) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-  return rows.map((item) => ({
-    marketId: String(item?.marketId || "").trim(),
-    marketType: String(item?.marketType || "").trim().toLowerCase(),
-    result: item?.result == null ? null : String(item.result).trim(),
-    isTie: item?.isTie === true,
-    isAbandoned: item?.isAbandoned === true || String(item?.result || "").toLowerCase() === "abandoned",
-  })).filter((item) => item.marketId && item.result != null);
+  return rows
+    .map((item) => ({
+      marketId: String(item?.marketId || "").trim(),
+      marketType: String(item?.marketType || "")
+        .trim()
+        .toLowerCase(),
+      result: item?.result == null ? null : String(item.result).trim(),
+      isTie: item?.isTie === true,
+      isAbandoned: item?.isAbandoned === true || String(item?.result || "").toLowerCase() === "abandoned",
+    }))
+    .filter((item) => item.marketId && item.result != null);
 }
 
 function fancyResultValue(marketId, result) {
@@ -44,8 +53,10 @@ async function hasExceptionalTable(connection) {
 }
 
 async function loadCandidates() {
-  const sportIds = String(process.env.SPORT_IDS || "1,2,4").split(",")
-    .map((value) => Number(value.trim())).filter(Number.isFinite);
+  const sportIds = String(process.env.SPORT_IDS || "1,2,4")
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter(Number.isFinite);
   const placeholders = sportIds.map(() => "?").join(",");
   const limit = Math.max(1, Number(process.env.RESULT_MARKET_LIMIT || 2000));
   const [markets] = await getSourcePool().query(
@@ -53,7 +64,8 @@ async function loadCandidates() {
      FROM t_market m
      WHERE m.isactive=? AND m.sportid IN (${placeholders})
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
-     ORDER BY m.id DESC LIMIT ?`, [true, ...sportIds, limit],
+     ORDER BY m.id DESC LIMIT ?`,
+    [true, ...sportIds, limit],
   );
   const [fancies] = await getSourcePool().query(
     `SELECT f.fancyid AS marketid, f.name AS marketname, f.oddstype,
@@ -63,7 +75,8 @@ async function loadCandidates() {
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
-     ORDER BY f.id DESC LIMIT ?`, [true, ...sportIds, limit],
+     ORDER BY f.id DESC LIMIT ?`,
+    [true, ...sportIds, limit],
   );
   return { markets, fancies };
 }
@@ -76,13 +89,24 @@ async function persistExceptional(connection, market, result) {
        (date,marketid,marketname,matchid,matchname,result,sportid,sportname,status,declared_by)
        SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
          (SELECT 1 FROM t_matchabondendtie WHERE marketid=? LIMIT 1)`,
-      [new Date().toISOString(), market.marketid, market.marketname, market.eventid,
-        market.matchname, label, market.sportid, String(market.sportid) === "4" ? "Cricket" : null,
-        true, "API", market.marketid],
+      [
+        new Date().toISOString(),
+        market.marketid,
+        market.marketname,
+        market.eventid,
+        market.matchname,
+        label,
+        market.sportid,
+        String(market.sportid) === "4" ? "Cricket" : null,
+        true,
+        "API",
+        market.marketid,
+      ],
     );
   } else {
     logger.warn("[ResultSync] exceptional result table is absent; market deactivated without result row", {
-      marketId: market.marketid, result: label,
+      marketId: market.marketid,
+      result: label,
     });
   }
   await connection.execute(
@@ -97,7 +121,8 @@ async function persistMarketResult(connection, market, result) {
   const selectionId = Number(result.result);
   if (!Number.isInteger(selectionId)) {
     logger.warn("[ResultSync] ignoring non-numeric market winner", {
-      marketId: market.marketid, result: result.result,
+      marketId: market.marketid,
+      result: result.result,
     });
     return false;
   }
@@ -107,7 +132,8 @@ async function persistMarketResult(connection, market, result) {
   );
   if (!selections.length) {
     logger.warn("[ResultSync] winner selection metadata is missing", {
-      marketId: market.marketid, selectionId,
+      marketId: market.marketid,
+      selectionId,
     });
     return false;
   }
@@ -117,10 +143,27 @@ async function persistMarketResult(connection, market, result) {
        resultstatus,resultstatuscron,selectionid,selectionname,sportid,sportname,status,type,declared_by)
      SELECT NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
        (SELECT 1 FROM t_matchresult WHERE marketid=? AND selectionid=? LIMIT 1)`,
-    [false, false, market.marketid, market.marketname, market.marketname, market.eventid,
-      market.matchname, selectionId, "OPEN", false, selectionId, selections[0].runner_name,
-      market.sportid, String(market.sportid) === "4" ? "Cricket" : null, true,
-      market.marketname, "API", market.marketid, selectionId],
+    [
+      false,
+      false,
+      market.marketid,
+      market.marketname,
+      market.marketname,
+      market.eventid,
+      market.matchname,
+      selectionId,
+      "OPEN",
+      false,
+      selectionId,
+      selections[0].runner_name,
+      market.sportid,
+      String(market.sportid) === "4" ? "Cricket" : null,
+      true,
+      market.marketname,
+      "API",
+      market.marketid,
+      selectionId,
+    ],
   );
   return true;
 }
@@ -144,9 +187,23 @@ async function persistFancyResult(connection, fancy, result) {
        result,resultdeclareby,sportid,sportname,resultstatuscron,resultstatus)
      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
        (SELECT 1 FROM t_fancyresult WHERE fancyid=? LIMIT 1)`,
-    [new Date().toISOString(), fancy.marketid, fancy.marketname, fancy.oddstype,
-      false, false, fancy.eventid, fancy.matchname, value, "API", fancy.sportid,
-      String(fancy.sportid) === "4" ? "CRICKET" : null, false, "OPEN", fancy.marketid],
+    [
+      new Date().toISOString(),
+      fancy.marketid,
+      fancy.marketname,
+      fancy.oddstype,
+      false,
+      false,
+      fancy.eventid,
+      fancy.matchname,
+      value,
+      "API",
+      fancy.sportid,
+      String(fancy.sportid) === "4" ? "CRICKET" : null,
+      false,
+      "OPEN",
+      fancy.marketid,
+    ],
   );
   await connection.execute(
     "UPDATE t_matchfancy SET result=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
@@ -158,7 +215,8 @@ async function persistFancyResult(connection, fancy, result) {
 async function applyResults(results, candidates) {
   const regularById = new Map(candidates.markets.map((market) => [String(market.marketid), market]));
   const fancyById = new Map(candidates.fancies.map((market) => [String(market.marketid), market]));
-  const settled = []; const changedEventIds = new Set();
+  const settled = [];
+  const changedEventIds = new Set();
   for (const result of results) {
     const market = regularById.get(result.marketId) || fancyById.get(result.marketId);
     if (!market) continue;
@@ -169,23 +227,33 @@ async function applyResults(results, candidates) {
       saved = fancyById.has(result.marketId)
         ? await persistFancyResult(connection, market, result)
         : await persistMarketResult(connection, market, result);
-      if (!saved) { await connection.rollback(); continue; }
+      if (!saved) {
+        await connection.rollback();
+        continue;
+      }
       await connection.commit();
     } catch (error) {
       await connection.rollback();
-      logger.error("[ResultSync] result persistence failed", { marketId: result.marketId, error: error.message });
-    } finally { connection.release(); }
+      logger.error("[ResultSync] result persistence failed", {
+        marketId: result.marketId,
+        error: error.message,
+      });
+    } finally {
+      connection.release();
+    }
     if (!saved) continue;
-    try { await redis.removeMarket(market.eventid, result.marketId); }
-    catch (error) {
+    try {
+      await redis.removeMarket(market.eventid, result.marketId);
+    } catch (error) {
       logger.error("[ResultSync] Redis cleanup failed", { marketId: result.marketId, error: error.message });
     }
     changedEventIds.add(String(market.eventid));
     settled.push(result.marketId);
   }
   for (const eventId of changedEventIds) {
-    try { await frontendSocket.publishEventSnapshot(eventId); }
-    catch (error) {
+    try {
+      await frontendSocket.publishEventSnapshot(eventId);
+    } catch (error) {
       logger.error("[ResultSync] frontend snapshot publish failed", { eventId, error: error.message });
     }
   }
@@ -195,38 +263,69 @@ async function applyResults(results, candidates) {
 
 async function syncResults() {
   if (running) return { skipped: true, reason: "already-running" };
-  running = true; state.running = true; state.lastStartedAt = new Date().toISOString(); state.lastError = null;
+  running = true;
+  state.running = true;
+  state.lastStartedAt = new Date().toISOString();
+  state.lastError = null;
   try {
     const candidates = await loadCandidates();
     const all = [...candidates.markets, ...candidates.fancies];
     const batchSize = Math.max(1, Number(process.env.RESULT_BATCH_SIZE || 100));
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
-    const results = []; let calls = 0;
+    const results = [];
+    let calls = 0;
     for (let index = 0; index < all.length && calls < maxCalls; index += batchSize) {
       const mids = all.slice(index, index + batchSize).map((market) => market.marketid);
-      const response = await provider.results({ mids }); calls += 1;
+      const response = await provider.results({ mids });
+      calls += 1;
       results.push(...responseRows(response));
     }
     const settled = await applyResults(results, candidates);
-    const output = { skipped: false, candidates: all.length, regular: candidates.markets.length,
-      fancies: candidates.fancies.length, calls, results: results.length,
-      settled: settled.length, settledMarketIds: settled };
-    state.lastResult = output; state.lastCompletedAt = new Date().toISOString();
-    logger.info("[ResultSync] completed", output); return output;
+    const output = {
+      skipped: false,
+      candidates: all.length,
+      regular: candidates.markets.length,
+      fancies: candidates.fancies.length,
+      calls,
+      results: results.length,
+      settled: settled.length,
+      settledMarketIds: settled,
+    };
+    state.lastResult = output;
+    state.lastCompletedAt = new Date().toISOString();
+    logger.info("[ResultSync] completed", output);
+    return output;
   } catch (error) {
-    state.lastError = error.message; state.lastCompletedAt = new Date().toISOString();
-    logger.error("[ResultSync] failed", { error: error.message }); throw error;
-  } finally { running = false; state.running = false; }
+    state.lastError = error.message;
+    state.lastCompletedAt = new Date().toISOString();
+    logger.error("[ResultSync] failed", { error: error.message });
+    throw error;
+  } finally {
+    running = false;
+    state.running = false;
+  }
 }
 
 function startResultSync() {
   const { expression } = cronConfig.result;
   const task = cron.schedule(expression, () => void syncResults().catch(() => {}));
-  logger.info("[ResultSync] scheduled", { expression }); return task;
+  logger.info("[ResultSync] scheduled", { expression });
+  return task;
 }
 
-function getResultSyncStatus() { return { ...state }; }
+function getResultSyncStatus() {
+  return { ...state };
+}
 
-module.exports = { responseRows, fancyResultValue, loadCandidates, applyResults, syncResults,
-  startResultSync, getResultSyncStatus, persistMarketResult, persistFancyResult,
-  persistExceptional };
+module.exports = {
+  responseRows,
+  fancyResultValue,
+  loadCandidates,
+  applyResults,
+  syncResults,
+  startResultSync,
+  getResultSyncStatus,
+  persistMarketResult,
+  persistFancyResult,
+  persistExceptional,
+};

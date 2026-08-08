@@ -9,18 +9,31 @@ function disableCaching(res) {
 
 async function list(req, res, next) {
   try {
-    const result = await redis.inspectTicks({ eventId: req.query.eventId, marketId: req.query.marketId,
-      limit: req.query.limit, includePayload: req.query.includePayload === "true" });
+    const result = await redis.inspectTicks({
+      eventId: req.query.eventId,
+      marketId: req.query.marketId,
+      limit: req.query.limit,
+      includePayload: req.query.includePayload === "true",
+    });
     res.json({ status: "ok", data: result });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 }
 
 async function market(req, res, next) {
   try {
-    const result = await redis.inspectTicks({ marketId: req.params.marketId, limit: 20, includePayload: true });
-    if (!result.items.length) return res.status(404).json({ status: "error", message: "Market data not found in Redis" });
+    const result = await redis.inspectTicks({
+      marketId: req.params.marketId,
+      limit: 20,
+      includePayload: true,
+    });
+    if (!result.items.length)
+      return res.status(404).json({ status: "error", message: "Market data not found in Redis" });
     res.json({ status: "ok", data: result.items[0] });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 }
 
 async function eventSnapshot(req, res, next) {
@@ -32,7 +45,29 @@ async function eventSnapshot(req, res, next) {
     }
     const snapshot = await redis.getEventSnapshot(eventId);
     res.json(snapshot);
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function eventScore(req, res, next) {
+  try {
+    disableCaching(res);
+    const eventId = String(req.params.eventId || "").trim();
+    if (!/^\d+$/.test(eventId) || Number(eventId) <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "A positive numeric event ID is required", data: null });
+    }
+    const score = await redis.getScore(eventId);
+    res.json({
+      success: true,
+      message: "Data Fetch Successfully",
+      data: score || { eid: Number(eventId), data: "" },
+    });
+  } catch (error) {
+    next(error);
+  }
 }
 
 async function activeMatches(req, res, next) {
@@ -40,11 +75,15 @@ async function activeMatches(req, res, next) {
     disableCaching(res);
     const sportId = Number(req.params.sportId);
     if (!Number.isInteger(sportId) || sportId <= 0) {
-      return res.status(400).json({ status: false, message: "A positive numeric sport ID is required", data: [] });
+      return res
+        .status(400)
+        .json({ status: false, message: "A positive numeric sport ID is required", data: [] });
     }
     const data = await dashboard.activeMatches(sportId);
     res.json({ status: true, message: "Data Fetch Successfully", data });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 }
 
-module.exports = { list, market, eventSnapshot, activeMatches };
+module.exports = { list, market, eventSnapshot, eventScore, activeMatches };

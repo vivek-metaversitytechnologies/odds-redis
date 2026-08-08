@@ -59,6 +59,7 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - `GET /api/events/:id`
 - `POST /api/source/events/:eventId/unsubscribe` - temporarily unsubscribe every market for an event
 - `GET /betfair_api/fancy/:eventId` - public frontend-ready Redis snapshot (legacy-compatible shape)
+- `GET /betfair_api/fancy/score/:eventId` - latest provider HTML scorecard for an event
 - `GET /betfair_api/active_match/:sportId` - public active-event dashboard list (legacy-compatible shape)
 
 Run tests with `npm test`.
@@ -66,7 +67,21 @@ Run tests with `npm test`.
 For development with automatic restarts, run `npm run dev`.
 
 Frontends load their initial snapshot from the API, then join the Socket.IO room with
-`subscribe:event` and receive update-only `tick` messages.
+`subscribe:event` and receive update-only `tick` and `score` messages. The subscription
+acknowledgement includes both the latest odds `snapshot` and latest `score`.
+
+Market discovery uses a fast primary pass on `MARKET_DISCOVERY_CRON` and a full typed-family
+pass every `MARKET_FULL_DISCOVERY_MS` (default: 30000). Unchanged definitions are not rewritten.
+Empty runner responses are cached for `RUNNER_MISS_CACHE_MS` (default: 300000).
+
+Apply all pending database migrations using the service environment:
+
+```bash
+npm run db:migrate
+```
+
+The runner uses a database lock, records checksums in `service_migrations`, and safely
+skips migrations already applied by an earlier deployment.
 
 ## Deployed server
 

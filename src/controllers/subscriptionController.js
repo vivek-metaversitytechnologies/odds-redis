@@ -5,8 +5,10 @@ const { getMarketSyncStatus } = require("../cron/marketSync");
 
 async function listSubscriptions(req, res, next) {
   try {
-    const sportIds = String(process.env.SPORT_IDS || "1,2,4").split(",")
-      .map((value) => Number(value.trim())).filter(Number.isFinite);
+    const sportIds = String(process.env.SPORT_IDS || "1,2,4")
+      .split(",")
+      .map((value) => Number(value.trim()))
+      .filter(Number.isFinite);
     const placeholders = sportIds.map(() => "?").join(",");
     const [regular] = await getSourcePool().query(
       `SELECT id,marketid,marketname,eventid,matchname,sportid FROM t_market
@@ -31,18 +33,41 @@ async function listSubscriptions(req, res, next) {
     const skipped = new Set(retryStatus.marketIds || []);
     const completed = new Set(retryStatus.completedMarketIds || []);
     const data = rows.map((market) => {
-      const marketId = String(market.marketid || ""); const activity = redis.getTickActivity(marketId);
+      const marketId = String(market.marketid || "");
+      const activity = redis.getTickActivity(marketId);
       const ageMs = activity ? Date.now() - new Date(activity.lastUpdatedAt).getTime() : null;
-      const providerState = completed.has(marketId) ? "completed"
-        : subscribed.has(marketId) ? "subscribed" : skipped.has(marketId) ? "skipped" : "pending";
-      const freshness = activity ? ageMs <= 60000 ? "healthy" : ageMs <= 300000 ? "delayed" : "stale" : "waiting";
-      return { id: market.id, marketId, marketName: market.marketname, eventId: String(market.eventid || ""),
-        eventName: market.matchname, sportId: market.sportid, providerState,
-        receiving: Boolean(activity), freshness, lastTickAt: activity?.lastUpdatedAt || null,
-        tickCount: activity?.tickCount || 0 };
+      const providerState = completed.has(marketId)
+        ? "completed"
+        : subscribed.has(marketId)
+          ? "subscribed"
+          : skipped.has(marketId)
+            ? "skipped"
+            : "pending";
+      const freshness = activity
+        ? ageMs <= 60000
+          ? "healthy"
+          : ageMs <= 300000
+            ? "delayed"
+            : "stale"
+        : "waiting";
+      return {
+        id: market.id,
+        marketId,
+        marketName: market.marketname,
+        eventId: String(market.eventid || ""),
+        eventName: market.matchname,
+        sportId: market.sportid,
+        providerState,
+        receiving: Boolean(activity),
+        freshness,
+        lastTickAt: activity?.lastUpdatedAt || null,
+        tickCount: activity?.tickCount || 0,
+      };
     });
     res.json({ status: "ok", data, meta: { total: data.length, socket: websocket.getSocketStatus() } });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 }
 
 module.exports = { listSubscriptions };

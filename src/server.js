@@ -38,16 +38,20 @@ async function startServer() {
   const marketDiscoveryCronTask = startMarketDiscoverySync();
   const resultCronTask = startResultSync();
   if (cronConfig.competition.runOnStart) {
-    syncCompetitions().then(() => {
-      if (cronConfig.event.runOnStart) return syncEvents();
-      return null;
-    }).catch(() => {});
+    syncCompetitions()
+      .then(() => {
+        if (cronConfig.event.runOnStart) return syncEvents();
+        return null;
+      })
+      .catch(() => {});
   } else if (cronConfig.event.runOnStart) {
     syncEvents().catch(() => {});
   }
   const cronTask = startMarketSync();
   if (cronConfig.marketSubscription.runOnStart) {
-    syncMarketSubscriptions().catch((error) => logger.error("Initial market sync failed", { error: error.message }));
+    syncMarketSubscriptions().catch((error) =>
+      logger.error("Initial market sync failed", { error: error.message }),
+    );
   }
   if (cronConfig.result.runOnStart) {
     syncResults().catch((error) => logger.error("Initial result sync failed", { error: error.message }));

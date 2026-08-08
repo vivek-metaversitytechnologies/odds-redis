@@ -17,14 +17,16 @@ function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.disable("etag");
-  app.use(helmet({
-    contentSecurityPolicy: {
-      directives: {
-        // TLS is terminated by Nginx. Forcing upgrades here breaks direct-port admin assets.
-        "upgrade-insecure-requests": null,
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          // TLS is terminated by Nginx. Forcing upgrades here breaks direct-port admin assets.
+          "upgrade-insecure-requests": null,
+        },
       },
-    },
-  }));
+    }),
+  );
   app.use(express.json({ limit: "1mb" }));
   app.post("/admin/auth/login", (req, res) => {
     if (!process.env.ADMIN_PANEL_PASSWORD) {
@@ -37,9 +39,12 @@ function createApp() {
     return res.json({ status: "ok" });
   });
   app.post("/admin/auth/logout", (req, res) => {
-    adminAuth.clearSessionCookie(req, res); res.json({ status: "ok" });
+    adminAuth.clearSessionCookie(req, res);
+    res.json({ status: "ok" });
   });
-  app.get("/admin/auth/session", (req, res) => res.json({ status: "ok", authenticated: adminAuth.validSession(req) }));
+  app.get("/admin/auth/session", (req, res) =>
+    res.json({ status: "ok", authenticated: adminAuth.validSession(req) }),
+  );
   app.use("/admin", (req, res, next) => {
     if (req.path.startsWith("/login/") || req.path === "/tailwind.css") return next();
     return adminAuth.requireAdminPage(req, res, next);
@@ -60,25 +65,39 @@ function createApp() {
     if (req.method === "OPTIONS") return res.sendStatus(204);
     next();
   });
-  app.use(["/api/events/subscriptions", "/api/provider", "/api/source", "/api/logs", "/api/redis"],
-    adminAuth.requireAdminApi);
+  app.use(
+    ["/api/events/subscriptions", "/api/provider", "/api/source", "/api/logs", "/api/redis"],
+    adminAuth.requireAdminApi,
+  );
   app.get("/health", async (req, res) => {
     try {
       await checkSourceDbConnection();
-      res.json({ status: "ok", sourceDatabase: "connected",
-        redis: redis.getRedisStatus(), websocket: websocket.getSocketStatus() });
+      res.json({
+        status: "ok",
+        sourceDatabase: "connected",
+        redis: redis.getRedisStatus(),
+        websocket: websocket.getSocketStatus(),
+      });
     } catch (error) {
-      res.status(503).json({ status: "error", sourceDatabase: "disconnected",
-        redis: redis.getRedisStatus(), websocket: websocket.getSocketStatus(), message: error.message });
+      res.status(503).json({
+        status: "error",
+        sourceDatabase: "disconnected",
+        redis: redis.getRedisStatus(),
+        websocket: websocket.getSocketStatus(),
+        message: error.message,
+      });
     }
   });
   app.get("/db-time", async (req, res, next) => {
     try {
       const [rows] = await getSourcePool().query("SELECT NOW() AS currentTime");
       res.json({ status: "ok", data: rows[0] });
-    } catch (error) { next(error); }
+    } catch (error) {
+      next(error);
+    }
   });
   app.get("/api/socket/status", (req, res) => res.json({ status: "ok", data: websocket.getSocketStatus() }));
+  app.get("/betfair_api/fancy/score/:eventId", redisController.eventScore);
   app.get("/betfair_api/fancy/:eventId", redisController.eventSnapshot);
   app.get("/betfair_api/active_match/:sportId", redisController.activeMatches);
   app.use("/api/provider", providerRoutes);

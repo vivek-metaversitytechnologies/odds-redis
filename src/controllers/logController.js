@@ -6,7 +6,9 @@ async function list(req, res, next) {
     const source = ["all", "application", "provider"].includes(req.query.source) ? req.query.source : "all";
     const data = await logs.readLogs({ source, limit: req.query.limit });
     res.json({ status: "ok", data });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 }
 
 async function rawSocketMarket(req, res, next) {
@@ -17,13 +19,21 @@ async function rawSocketMarket(req, res, next) {
     }
     const liveRecords = websocket.getRawSocketPayloads(marketId, req.query.limit);
     if (liveRecords.length) {
-      return res.json({ status: "ok", data: {
-        marketId, records: liveRecords, file: "Live socket buffer", live: true,
-      } });
+      return res.json({
+        status: "ok",
+        data: {
+          marketId,
+          records: liveRecords,
+          file: "Live socket buffer",
+          live: true,
+        },
+      });
     }
     const data = await logs.readRawSocketLogs({ marketId, limit: req.query.limit });
     res.json({ status: "ok", data });
-  } catch (error) { next(error); }
+  } catch (error) {
+    next(error);
+  }
 }
 
 module.exports = { list, rawSocketMarket };

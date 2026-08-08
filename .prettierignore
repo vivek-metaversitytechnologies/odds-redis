@@ -1,0 +1,5 @@
+node_modules
+logs
+public/admin/tailwind.css
+package-lock.json
+.env*

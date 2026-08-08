@@ -7,20 +7,29 @@ const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
-
-const FANCY_MARKET_TYPES = new Set([
-  "session", "khado", "odd-even", "cricket-casino", "ball-by-ball", "other-market", "meter",
-]);
-const REGULAR_MARKET_TYPES = ["bookmaker", "tied-match", "match-odd", "winner-market",
-  "TOSS", "super-over", "goals", "line-market", "completed-match"];
-const FANCY_MARKET_REQUESTS = ["session", "khado", "odd-even", "cricket-casino", "ball-by-ball"]
-  .map((type) => [type]);
-const MARKET_TYPES = [...FANCY_MARKET_TYPES, ...REGULAR_MARKET_TYPES];
-const DISCOVERABLE_MARKET_TYPES = new Set(MARKET_TYPES.map((type) => String(type).toLowerCase()));
+const { integer, csvIntegers } = require("../config/env");
+const { setBounded } = require("../utils/boundedMap");
+const {
+  FANCY_MARKET_TYPES,
+  REGULAR_MARKET_TYPES,
+  FANCY_MARKET_REQUESTS,
+  MARKET_TYPES,
+  DISCOVERABLE_MARKET_TYPES,
+} = require("../config/marketTypes");
 let running = false;
-const state = { running: false, lastStartedAt: null, lastCompletedAt: null,
-  lastError: null, lastResult: null };
-const DB_WRITE_BATCH_SIZE = Math.max(50, Number(process.env.MARKET_DB_WRITE_BATCH_SIZE || 500));
+let rerunRequested = false;
+const runnerMisses = new Map();
+const discoveryFingerprints = new Map();
+let lastFullDiscoveryAt = 0;
+const state = {
+  running: false,
+  lastStartedAt: null,
+  lastCompletedAt: null,
+  lastError: null,
+  lastResult: null,
+};
+const DB_WRITE_BATCH_SIZE = integer("MARKET_DB_WRITE_BATCH_SIZE", 500, { min: 50, max: 5000 });
+const DISCOVERY_CACHE_LIMIT = integer("MARKET_DISCOVERY_CACHE_LIMIT", 50000, { min: 1000 });
 
 function chunks(items, size = DB_WRITE_BATCH_SIZE) {
   const result = [];
@@ -28,36 +37,67 @@ function chunks(items, size = DB_WRITE_BATCH_SIZE) {
   return result;
 }
 
+function marketFingerprint(market) {
+  return JSON.stringify([
+    market.eventId,
+    market.sportId,
+    market.marketName,
+    market.marketType,
+    market.matchName,
+    market.openDate,
+    market.inPlay,
+    market.gameOver,
+    market.isActive,
+    market.betDelay,
+    market.displayMessage,
+    market.seriesId,
+  ]);
+}
+
 function marketRows(response, eventsById) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-  return rows.map((item) => {
-    const event = eventsById.get(String(item?.eventId));
-    const marketId = String(item?.id || "").trim();
-    const inferredBookmaker2 = /-BM2$/i.test(marketId);
-    const marketType = String(item?.type || (inferredBookmaker2 ? "bookmaker" : "unknown")).toLowerCase();
-    const bookmaker = marketType === "bookmaker";
-    const fancy = FANCY_MARKET_TYPES.has(marketType);
-    const zeroCommission = bookmaker && ["bookmaker 0%comm", "0%comm"]
-      .includes(String(item?.name || "").toLowerCase());
-    const providedName = String(item?.name || "").trim();
-    const displayMessage = item?.inPlayFilter == null
-      ? null : String(item.inPlayFilter).trim().slice(0, 255) || null;
-    const marketName = zeroCommission ? "Bookmaker"
-      : providedName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
-    return {
-      marketId, eventId: Number(item?.eventId),
-      sportId: Number(item?.sportId), marketName,
-      marketType,
-      matchName: event?.eventName || null, openDate: event?.openDate || null,
-      inPlay: Boolean(event?.inPlay), gameOver: Boolean(item?.gameOver), isActive: item?.isActive !== false,
-      betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3, minBet: 100,
-      maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
-      displayMessage,
-      seriesId: event?.seriesId ?? null,
-    };
-  }).filter((item) => redisStore.validMarketIdentifier(item.marketId) && Number.isInteger(item.eventId)
-    && Number.isInteger(item.sportId) && item.marketName
-    && (DISCOVERABLE_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)));
+  return rows
+    .map((item) => {
+      const event = eventsById.get(String(item?.eventId));
+      const marketId = String(item?.id || "").trim();
+      const inferredBookmaker2 = /-BM2$/i.test(marketId);
+      const marketType = String(item?.type || (inferredBookmaker2 ? "bookmaker" : "unknown")).toLowerCase();
+      const bookmaker = marketType === "bookmaker";
+      const fancy = FANCY_MARKET_TYPES.has(marketType);
+      const zeroCommission =
+        bookmaker && ["bookmaker 0%comm", "0%comm"].includes(String(item?.name || "").toLowerCase());
+      const providedName = String(item?.name || "").trim();
+      const displayMessage =
+        item?.inPlayFilter == null ? null : String(item.inPlayFilter).trim().slice(0, 255) || null;
+      const marketName = zeroCommission
+        ? "Bookmaker"
+        : providedName || (inferredBookmaker2 ? "Bookmaker2" : `Market ${marketId}`);
+      return {
+        marketId,
+        eventId: Number(item?.eventId),
+        sportId: Number(item?.sportId),
+        marketName,
+        marketType,
+        matchName: event?.eventName || null,
+        openDate: event?.openDate || null,
+        inPlay: Boolean(event?.inPlay),
+        gameOver: Boolean(item?.gameOver),
+        isActive: item?.isActive !== false,
+        betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3,
+        minBet: 100,
+        maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
+        displayMessage,
+        seriesId: event?.seriesId ?? null,
+      };
+    })
+    .filter(
+      (item) =>
+        redisStore.validMarketIdentifier(item.marketId) &&
+        Number.isInteger(item.eventId) &&
+        Number.isInteger(item.sportId) &&
+        item.marketName &&
+        (DISCOVERABLE_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)),
+    );
 }
 
 // The vendor can return contradictory states for the same market between the
@@ -87,32 +127,58 @@ function mergeDiscoveredMarkets(markets) {
 
 function oddsType(marketId) {
   const id = String(marketId).toUpperCase();
-  if (id.includes("F2")) return "F2"; if (id.includes("OE")) return "OE";
+  if (id.includes("F2")) return "F2";
+  if (id.includes("OE")) return "OE";
   if (id.includes("KD")) return "KD";
-  if (id.includes("F3")) return "F3"; if (id.includes("BB")) return "BB";
-  if (id.includes("CC")) return "CC"; return "UNKNOWN";
+  if (id.includes("F3")) return "F3";
+  if (id.includes("BB")) return "BB";
+  if (id.includes("CC")) return "CC";
+  return "UNKNOWN";
 }
 
 async function upsertFancies(fancies) {
   if (!fancies.length) return { inserted: 0, updated: 0, fancyIds: [] };
-  const connection = await getSourcePool().getConnection(); let inserted = 0; let updated = 0;
+  const connection = await getSourcePool().getConnection();
+  let inserted = 0;
+  let updated = 0;
   try {
     await connection.beginTransaction();
     const ids = fancies.map((fancy) => fancy.marketId);
     const [existingRows] = await connection.query(
-      `SELECT fancyid FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`, ids,
+      `SELECT fancyid FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      ids,
     );
     const existing = new Set(existingRows.map((row) => String(row.fancyid)));
-    const writable = fancies.filter((fancy) => existing.has(fancy.marketId)
-      || (fancy.isActive && !fancy.gameOver));
+    const writable = fancies.filter(
+      (fancy) => existing.has(fancy.marketId) || (fancy.isActive && !fancy.gameOver),
+    );
     inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
     updated = writable.length - inserted;
     for (const batch of chunks(writable)) {
       const values = batch.map((fancy) => [
-        fancy.marketId, fancy.marketName, oddsType(fancy.marketId), "OPEN", 100000, 0, 100,
-        100000, fancy.eventId, false, fancy.isActive && !fancy.gameOver,
-        fancy.marketType, true, true, "", fancy.displayMessage, new Date(),
-        fancy.matchName, fancy.sportId, "RS", 1, fancy.inPlay, 100000,
+        fancy.marketId,
+        fancy.marketName,
+        oddsType(fancy.marketId),
+        "OPEN",
+        100000,
+        0,
+        100,
+        100000,
+        fancy.eventId,
+        false,
+        fancy.isActive && !fancy.gameOver,
+        fancy.marketType,
+        true,
+        true,
+        "",
+        fancy.displayMessage,
+        new Date(),
+        fancy.matchName,
+        fancy.sportId,
+        "RS",
+        1,
+        fancy.inPlay,
+        100000,
       ]);
       await connection.query(
         `INSERT INTO t_matchfancy
@@ -128,24 +194,33 @@ async function upsertFancies(fancies) {
     }
     // Migrate only IDs positively identified as provider session markets in this response.
     await connection.query(`DELETE FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids);
-    await connection.commit(); return { inserted, updated, fancyIds: ids };
-  } catch (error) { await connection.rollback(); throw error; }
-  finally { connection.release(); }
+    await connection.commit();
+    return { inserted, updated, fancyIds: ids };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function upsertMarkets(markets) {
   if (!markets.length) return { inserted: 0, updated: 0, marketIds: [], deactivatedMarketIds: [] };
-  const connection = await getSourcePool().getConnection(); let inserted = 0; let updated = 0;
+  const connection = await getSourcePool().getConnection();
+  let inserted = 0;
+  let updated = 0;
   const deactivatedMarketIds = [];
   try {
     await connection.beginTransaction();
     const ids = markets.map((market) => market.marketId);
     const [existingRows] = await connection.query(
-      `SELECT marketid,isactive FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids,
+      `SELECT marketid,isactive FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`,
+      ids,
     );
     const existing = new Map(existingRows.map((row) => [String(row.marketid), Number(row.isactive) === 1]));
-    const writable = markets.filter((market) => existing.has(market.marketId)
-      || (market.isActive && !market.gameOver));
+    const writable = markets.filter(
+      (market) => existing.has(market.marketId) || (market.isActive && !market.gameOver),
+    );
     inserted = writable.filter((market) => !existing.has(market.marketId)).length;
     updated = writable.length - inserted;
     for (const market of writable) {
@@ -155,10 +230,30 @@ async function upsertMarkets(markets) {
     }
     for (const batch of chunks(writable)) {
       const values = batch.map((market) => [
-        market.marketId, market.sportId, market.eventId, market.marketName, market.matchName,
-        true, market.isActive && !market.gameOver, new Date(), new Date(), market.openDate,
-        market.minBet, market.maxBet, market.betDelay, market.inPlay, 1, 500, false,
-        market.displayMessage, false, false, 0, 1000000, false, market.seriesId,
+        market.marketId,
+        market.sportId,
+        market.eventId,
+        market.marketName,
+        market.matchName,
+        true,
+        market.isActive && !market.gameOver,
+        new Date(),
+        new Date(),
+        market.openDate,
+        market.minBet,
+        market.maxBet,
+        market.betDelay,
+        market.inPlay,
+        1,
+        500,
+        false,
+        market.displayMessage,
+        false,
+        false,
+        0,
+        1000000,
+        false,
+        market.seriesId,
       ]);
       await connection.query(
         `INSERT INTO t_market
@@ -173,11 +268,21 @@ async function upsertMarkets(markets) {
         [values],
       );
     }
-    await connection.commit(); return { inserted, updated,
-      marketIds: markets.filter((market) => market.isActive && !market.gameOver).map((market) => market.marketId),
-      deactivatedMarketIds };
-  } catch (error) { await connection.rollback(); throw error; }
-  finally { connection.release(); }
+    await connection.commit();
+    return {
+      inserted,
+      updated,
+      marketIds: markets
+        .filter((market) => market.isActive && !market.gameOver)
+        .map((market) => market.marketId),
+      deactivatedMarketIds,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 function bookmaker2BaseMarketId(marketId) {
@@ -190,11 +295,15 @@ function runnerSourceMarketId(marketId) {
 }
 
 function runnerLookupMarketIds(marketIds) {
-  return [...new Set((marketIds || []).flatMap((marketId) => {
-    const normalized = String(marketId);
-    const baseMarketId = bookmaker2BaseMarketId(normalized);
-    return baseMarketId ? [normalized, baseMarketId] : [normalized];
-  }))];
+  return [
+    ...new Set(
+      (marketIds || []).flatMap((marketId) => {
+        const normalized = String(marketId);
+        const baseMarketId = bookmaker2BaseMarketId(normalized);
+        return baseMarketId ? [normalized, baseMarketId] : [normalized];
+      }),
+    ),
+  ];
 }
 
 function enforceBookmaker2Eligibility(markets) {
@@ -221,52 +330,80 @@ async function marketsMissingRunners(marketIds) {
     lookupIds,
   );
   const present = new Set(rows.map((row) => String(row.marketid)));
+  const now = Date.now();
+  for (const [marketId, expiresAt] of runnerMisses) if (expiresAt <= now) runnerMisses.delete(marketId);
   return marketIds.filter((marketId) => {
     const normalized = String(marketId);
     const baseMarketId = bookmaker2BaseMarketId(normalized);
-    return !present.has(normalized) && !(baseMarketId && present.has(baseMarketId));
+    return (
+      !runnerMisses.has(normalized) &&
+      !present.has(normalized) &&
+      !(baseMarketId && present.has(baseMarketId))
+    );
   });
 }
 
 async function fetchAndStoreRunners(marketIds) {
   const missing = await marketsMissingRunners(marketIds);
-  const responses = await Promise.allSettled(missing.map(async (marketId) => ({
-    marketId, response: await provider.runners(runnerSourceMarketId(marketId)),
-  })));
+  const responses = await Promise.allSettled(
+    missing.map(async (marketId) => ({
+      marketId,
+      response: await provider.runners(runnerSourceMarketId(marketId)),
+    })),
+  );
   const runners = responses.flatMap((result) => {
     if (result.status !== "fulfilled") return [];
     const { marketId, response } = result.value;
     const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-    return rows.map((runner) => ({ marketId,
-      selectionId: Number(runner?.runnerId ?? runner?.selectionId),
-      runnerName: String(runner?.name ?? runner?.nation ?? "").trim(),
-    })).filter((runner) => Number.isInteger(runner.selectionId) && runner.runnerName);
+    return rows
+      .map((runner) => ({
+        marketId,
+        selectionId: Number(runner?.runnerId ?? runner?.selectionId),
+        runnerName: String(runner?.name ?? runner?.nation ?? "").trim(),
+      }))
+      .filter((runner) => Number.isInteger(runner.selectionId) && runner.runnerName);
   });
+  const missTtlMs = integer("RUNNER_MISS_CACHE_MS", 300000, { min: 10000 });
+  for (const result of responses) {
+    if (result.status !== "fulfilled") continue;
+    const { marketId, response } = result.value;
+    const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+    if (!rows.length) runnerMisses.set(String(marketId), Date.now() + missTtlMs);
+    else runnerMisses.delete(String(marketId));
+  }
   if (runners.length) {
     const connection = await getSourcePool().getConnection();
     try {
       await connection.beginTransaction();
-      for (const runner of runners) {
-        const [existing] = await connection.execute(
-          "SELECT id FROM t_selectionid WHERE marketid=? AND selectionid=? LIMIT 1",
-          [runner.marketId, runner.selectionId],
+      for (const batch of chunks(runners)) {
+        const values = batch.map((runner) => [
+          new Date(),
+          runner.marketId,
+          runner.runnerName,
+          runner.selectionId,
+          false,
+        ]);
+        await connection.query(
+          `INSERT INTO t_selectionid
+             (createdon,marketid,runner_name,selectionid,is_redis_updated) VALUES ?
+           ON DUPLICATE KEY UPDATE runner_name=VALUES(runner_name)`,
+          [values],
         );
-        if (existing.length) {
-          await connection.execute("UPDATE t_selectionid SET runner_name=? WHERE id=?",
-            [runner.runnerName, existing[0].id]);
-        } else {
-          await connection.execute(
-            "INSERT INTO t_selectionid (createdon,marketid,runner_name,selectionid,is_redis_updated) VALUES (NOW(),?,?,?,?)",
-            [runner.marketId, runner.runnerName, runner.selectionId, false],
-          );
-        }
       }
       await connection.commit();
-    } catch (error) { await connection.rollback(); throw error; }
-    finally { connection.release(); }
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   }
-  return { requestedMarkets: missing.length, storedRunners: runners.length,
-    failedMarkets: responses.filter((result) => result.status === "rejected").length };
+  return {
+    requestedMarkets: missing.length,
+    storedRunners: runners.length,
+    storedMarketIds: [...new Set(runners.map((runner) => String(runner.marketId)))],
+    failedMarkets: responses.filter((result) => result.status === "rejected").length,
+  };
 }
 
 async function regularMarketsWithRunners(markets) {
@@ -275,7 +412,8 @@ async function regularMarketsWithRunners(markets) {
   const lookupIds = runnerLookupMarketIds(ids);
   const [rows] = await getSourcePool().query(
     `SELECT marketid,selectionid,runner_name FROM t_selectionid
-      WHERE marketid IN (${lookupIds.map(() => "?").join(",")}) ORDER BY id ASC`, lookupIds,
+      WHERE marketid IN (${lookupIds.map(() => "?").join(",")}) ORDER BY id ASC`,
+    lookupIds,
   );
   const byMarket = new Map();
   for (const row of rows) {
@@ -287,56 +425,94 @@ async function regularMarketsWithRunners(markets) {
     const marketId = String(market.marketId);
     const exactRunners = byMarket.get(marketId) || [];
     const baseMarketId = bookmaker2BaseMarketId(marketId);
-    return { ...market, runners: exactRunners.length
-      ? exactRunners : baseMarketId ? byMarket.get(baseMarketId) || [] : [] };
+    return {
+      ...market,
+      runners: exactRunners.length ? exactRunners : baseMarketId ? byMarket.get(baseMarketId) || [] : [],
+    };
   });
 }
 
 async function seedTossMarkets(markets) {
-  const tossMarkets = (markets || []).filter((market) =>
-    String(market.marketName || "").trim().toUpperCase() === "TOSS"
-      && market.isActive && !market.gameOver);
-  const results = await Promise.allSettled(tossMarkets.map(async (market) => {
-    const response = await provider.runners(market.marketId);
-    const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-    if (!rows.length) return false;
-    return redisStore.writeTick({ eid: market.eventId, mid: market.marketId, s: true,
-      r: rows.map((runner) => ({ rid: runner.runnerId ?? runner.selectionId,
-        na: runner.name ?? runner.nation, back: runner.back, lay: runner.lay,
-        b1: runner.b1, l1: runner.l1, bs1: runner.br1, ls1: runner.lr1, sb: runner.sb })) });
-  }));
-  return { requested: tossMarkets.length,
+  const tossMarkets = (markets || []).filter(
+    (market) =>
+      String(market.marketName || "")
+        .trim()
+        .toUpperCase() === "TOSS" &&
+      market.isActive &&
+      !market.gameOver,
+  );
+  const results = await Promise.allSettled(
+    tossMarkets.map(async (market) => {
+      const response = await provider.runners(market.marketId);
+      const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+      if (!rows.length) return false;
+      return redisStore.writeTick({
+        eid: market.eventId,
+        mid: market.marketId,
+        s: true,
+        r: rows.map((runner) => ({
+          rid: runner.runnerId ?? runner.selectionId,
+          na: runner.name ?? runner.nation,
+          back: runner.back,
+          lay: runner.lay,
+          b1: runner.b1,
+          l1: runner.l1,
+          bs1: runner.br1,
+          ls1: runner.lr1,
+          sb: runner.sb,
+        })),
+      });
+    }),
+  );
+  return {
+    requested: tossMarkets.length,
     seeded: results.filter((result) => result.status === "fulfilled" && result.value).length,
-    failed: results.filter((result) => result.status === "rejected").length };
+    failed: results.filter((result) => result.status === "rejected").length,
+  };
 }
 
 function inactiveLineMarkets(markets) {
-  return (markets || []).filter((market) => market.marketType === "line-market"
-    && (!market.isActive || market.gameOver));
+  return (markets || []).filter(
+    (market) => market.marketType === "line-market" && (!market.isActive || market.gameOver),
+  );
 }
 
 async function reconcileInactiveLineMarkets(markets) {
   const inactive = inactiveLineMarkets(markets);
   if (!inactive.length) return { checked: 0, deactivated: 0, removed: 0 };
   const persisted = await upsertMarkets(inactive);
-  redisStore.invalidateMarkets([...inactive.map((market) => market.marketId),
-    ...persisted.deactivatedMarketIds]);
+  redisStore.invalidateMarkets([
+    ...inactive.map((market) => market.marketId),
+    ...persisted.deactivatedMarketIds,
+  ]);
   const redisDefinitions = await redisStore.reconcileRegularDefinitions(inactive);
   if (persisted.deactivatedMarketIds.length) {
     await unsubscribeEventMarkets(persisted.deactivatedMarketIds);
   }
-  await Promise.allSettled((redisDefinitions.changedEventIds || [])
-    .map((eventId) => publishEventSnapshot(eventId)));
-  return { checked: inactive.length, deactivated: persisted.deactivatedMarketIds.length,
-    removed: redisDefinitions.removed };
+  await Promise.allSettled(
+    (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
+  );
+  return {
+    checked: inactive.length,
+    deactivated: persisted.deactivatedMarketIds.length,
+    removed: redisDefinitions.removed,
+  };
 }
 
 async function syncMarketDiscovery(events) {
-  if (running) return { skipped: true, reason: "already-running" };
-  running = true; state.running = true; state.lastStartedAt = new Date().toISOString(); state.lastError = null;
+  if (running) {
+    rerunRequested = true;
+    return { skipped: true, reason: "already-running", rerunQueued: true };
+  }
+  running = true;
+  state.running = true;
+  state.lastStartedAt = new Date().toISOString();
+  state.lastError = null;
   try {
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
-    const eventIds = [...eventsById.keys()].map(Number); const batchSize = 50; const discovered = [];
+    const eventIds = [...eventsById.keys()].map(Number);
+    const batchSize = 50;
+    const discovered = [];
     const eventBatches = chunks(eventIds, batchSize);
 
     // First pass: one unfiltered request per event batch. Inactive line markets are
@@ -349,63 +525,112 @@ async function syncMarketDiscovery(events) {
 
     // Second pass: fetch typed fallbacks needed for families the vendor can omit from
     // the unfiltered response. These no longer delay line-market deactivation.
-    const typedResponses = await Promise.all(eventBatches.map(async (eids) => {
-      // The vendor omits some advanced markets (notably odd-even) when every type is
-      // requested together. Fetch each fancy family independently, matching its API behavior.
-      // Omitting `type` returns undocumented families such as other-market/F3,
-      // meter/MT, line-market and BM2. Keep the explicit fancy calls as a fallback
-      // because the vendor has previously omitted odd-even from combined responses.
-      const requests = [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
-      return Promise.all(requests.map((type) => provider.markets({ eids, type })));
-    }));
+    const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 30000, { min: 5000 });
+    const fullDiscovery = Date.now() - lastFullDiscoveryAt >= fullIntervalMs;
+    const typedResponses = fullDiscovery
+      ? await Promise.all(
+          eventBatches.map(async (eids) => {
+            // The vendor omits some advanced markets (notably odd-even) when every type is
+            // requested together. Fetch each fancy family independently, matching its API behavior.
+            // Omitting `type` returns undocumented families such as other-market/F3,
+            // meter/MT, line-market and BM2. Keep the explicit fancy calls as a fallback
+            // because the vendor has previously omitted odd-even from combined responses.
+            const requests = [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
+            return Promise.all(requests.map((type) => provider.markets({ eids, type })));
+          }),
+        )
+      : [];
     for (const responses of typedResponses) {
       for (const response of responses) discovered.push(...marketRows(response, eventsById));
     }
     const unique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(discovered));
     const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
     const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
-    const persisted = await upsertMarkets(regularMarkets);
+    const changed = unique.filter(
+      (market) => discoveryFingerprints.get(market.marketId) !== marketFingerprint(market),
+    );
+    const changedIds = new Set(changed.map((market) => market.marketId));
+    const persisted = await upsertMarkets(regularMarkets.filter((market) => changedIds.has(market.marketId)));
     redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
-    const fancyPersisted = await upsertFancies(fancies);
+    const fancyPersisted = await upsertFancies(fancies.filter((market) => changedIds.has(market.marketId)));
     redisStore.invalidateMarkets(fancyPersisted.fancyIds);
-    const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
-    const runnerResult = await fetchAndStoreRunners(persisted.marketIds);
+    const changedFancies = fancies.filter((market) => changedIds.has(market.marketId));
+    const redisDefinitions = await redisStore.reconcileFancyDefinitions(changedFancies);
+    const activeRegularIds = regularMarkets
+      .filter((market) => market.isActive && !market.gameOver)
+      .map((market) => market.marketId);
+    const runnerResult = await fetchAndStoreRunners(activeRegularIds);
+    const redisRegularIds = new Set([...changedIds, ...(runnerResult.storedMarketIds || [])]);
+    const redisRegularMarkets = regularMarkets.filter((market) => redisRegularIds.has(market.marketId));
     const regularDefinitions = await redisStore.reconcileRegularDefinitions(
-      await regularMarketsWithRunners(regularMarkets),
+      await regularMarketsWithRunners(redisRegularMarkets),
     );
     if (persisted.deactivatedMarketIds.length) {
       await unsubscribeEventMarkets(persisted.deactivatedMarketIds);
     }
-    const changedEventIds = [...new Set([
-      ...(redisDefinitions.changedEventIds || []),
-      ...(regularDefinitions.changedEventIds || []),
-    ])];
+    const changedEventIds = [
+      ...new Set([
+        ...(redisDefinitions.changedEventIds || []),
+        ...(regularDefinitions.changedEventIds || []),
+      ]),
+    ];
     await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
     const tossDefinitions = await seedTossMarkets(regularMarkets);
     const subscriptionResult = await syncMarketSubscriptions();
-    const subscription = { total: subscriptionResult.total, requested: subscriptionResult.requested,
+    const subscription = {
+      total: subscriptionResult.total,
+      requested: subscriptionResult.requested,
       newlySubscribed: subscriptionResult.newlySubscribed,
       providerSkipped: subscriptionResult.providerSkipped,
-      active: Array.isArray(subscriptionResult.activeMarketIds) ? subscriptionResult.activeMarketIds.length : 0 };
+      active: Array.isArray(subscriptionResult.activeMarketIds)
+        ? subscriptionResult.activeMarketIds.length
+        : 0,
+    };
     const activeFancies = fancies.filter((fancy) => fancy.isActive && !fancy.gameOver).length;
-    const result = { skipped: false, events: eventIds.length, markets: regularMarkets.length,
-      fancies: activeFancies, sessionRecords: fancies.length,
-      inserted: persisted.inserted, updated: persisted.updated,
+    for (const market of unique)
+      setBounded(discoveryFingerprints, market.marketId, marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
+    if (fullDiscovery) lastFullDiscoveryAt = Date.now();
+    const result = {
+      skipped: false,
+      events: eventIds.length,
+      markets: regularMarkets.length,
+      fancies: activeFancies,
+      sessionRecords: fancies.length,
+      fullDiscovery,
+      changedDefinitions: changed.length,
+      inserted: persisted.inserted,
+      updated: persisted.updated,
       deactivated: persisted.deactivatedMarketIds.length,
-      fancyInserted: fancyPersisted.inserted, fancyUpdated: fancyPersisted.updated,
-      fastLineReconciliation, redisDefinitions, regularDefinitions,
-      tossDefinitions, runners: runnerResult, subscription };
-    state.lastResult = result; state.lastCompletedAt = new Date().toISOString();
-    logger.info("[MarketDiscovery] completed", result); return result;
+      fancyInserted: fancyPersisted.inserted,
+      fancyUpdated: fancyPersisted.updated,
+      fastLineReconciliation,
+      redisDefinitions,
+      regularDefinitions,
+      tossDefinitions,
+      runners: runnerResult,
+      subscription,
+    };
+    state.lastResult = result;
+    state.lastCompletedAt = new Date().toISOString();
+    logger.info("[MarketDiscovery] completed", result);
+    return result;
   } catch (error) {
-    state.lastError = error.message; state.lastCompletedAt = new Date().toISOString();
-    logger.error("[MarketDiscovery] failed", { error: error.message }); throw error;
-  } finally { running = false; state.running = false; }
+    state.lastError = error.message;
+    state.lastCompletedAt = new Date().toISOString();
+    logger.error("[MarketDiscovery] failed", { error: error.message });
+    throw error;
+  } finally {
+    running = false;
+    state.running = false;
+    if (rerunRequested) {
+      rerunRequested = false;
+      setImmediate(() => void syncStoredEventMarkets().catch(() => {}));
+    }
+  }
 }
 
 async function fetchActiveEventsForMarketDiscovery() {
-  const sportIds = String(process.env.SPORT_IDS || "1,2,4").split(",")
-    .map((value) => Number(value.trim())).filter(Number.isFinite);
+  const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   if (!sportIds.length) return [];
   const [rows] = await getSourcePool().query(
     `SELECT eventid,eventname,sportid,seriesid,open_date,in_play
@@ -414,11 +639,16 @@ async function fetchActiveEventsForMarketDiscovery() {
       ORDER BY eventid ASC`,
     [true, ...sportIds],
   );
-  return rows.map((row) => ({
-    eventId: Number(row.eventid), eventName: String(row.eventname || "").trim(),
-    sportId: Number(row.sportid), seriesId: Number(row.seriesid),
-    openDate: row.open_date, inPlay: Boolean(row.in_play),
-  })).filter((event) => Number.isInteger(event.eventId) && event.eventName);
+  return rows
+    .map((row) => ({
+      eventId: Number(row.eventid),
+      eventName: String(row.eventname || "").trim(),
+      sportId: Number(row.sportid),
+      seriesId: Number(row.seriesid),
+      openDate: row.open_date,
+      inPlay: Boolean(row.in_play),
+    }))
+    .filter((event) => Number.isInteger(event.eventId) && event.eventName);
 }
 
 async function syncStoredEventMarkets() {
@@ -428,16 +658,38 @@ async function syncStoredEventMarkets() {
 
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
-  const task = cron.schedule(expression, () => void syncStoredEventMarkets().catch(() => {}));
+  const task = cron.schedule(expression, () => {
+    if (!running) void syncStoredEventMarkets().catch(() => {});
+  });
   logger.info("[MarketDiscovery] scheduled", { expression });
   return task;
 }
 
-function getMarketDiscoveryStatus() { return { ...state }; }
+function getMarketDiscoveryStatus() {
+  return { ...state };
+}
 
-module.exports = { MARKET_TYPES, REGULAR_MARKET_TYPES, FANCY_MARKET_TYPES, FANCY_MARKET_REQUESTS,
-  marketRows, mergeDiscoveredMarkets, oddsType, upsertMarkets, upsertFancies, fetchAndStoreRunners,
-  bookmaker2BaseMarketId, runnerSourceMarketId, runnerLookupMarketIds, enforceBookmaker2Eligibility,
-  regularMarketsWithRunners, seedTossMarkets, inactiveLineMarkets,
-  fetchActiveEventsForMarketDiscovery, syncMarketDiscovery, syncStoredEventMarkets,
-  startMarketDiscoverySync, getMarketDiscoveryStatus };
+module.exports = {
+  MARKET_TYPES,
+  REGULAR_MARKET_TYPES,
+  FANCY_MARKET_TYPES,
+  FANCY_MARKET_REQUESTS,
+  marketRows,
+  mergeDiscoveredMarkets,
+  oddsType,
+  upsertMarkets,
+  upsertFancies,
+  fetchAndStoreRunners,
+  bookmaker2BaseMarketId,
+  runnerSourceMarketId,
+  runnerLookupMarketIds,
+  enforceBookmaker2Eligibility,
+  regularMarketsWithRunners,
+  seedTossMarkets,
+  inactiveLineMarkets,
+  fetchActiveEventsForMarketDiscovery,
+  syncMarketDiscovery,
+  syncStoredEventMarkets,
+  startMarketDiscoverySync,
+  getMarketDiscoveryStatus,
+};

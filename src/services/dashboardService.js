@@ -27,12 +27,12 @@ function dashboardEntry(row, snapshot) {
   if (marketName.toLowerCase().includes("book")) {
     const bookmaker = Array.isArray(snapshot?.Bookmaker) ? snapshot.Bookmaker : [];
     if (!bookmaker.some((item) => String(item?.mid) === marketId)) return null;
-    return { ...common, team1Back: 0, team1Lay: 0, team2Back: 0, team2Lay: 0,
-      drawBack: 0, drawLay: 0 };
+    return { ...common, team1Back: 0, team1Lay: 0, team2Back: 0, team2Lay: 0, drawBack: 0, drawLay: 0 };
   }
 
-  const odds = (Array.isArray(snapshot?.Odds) ? snapshot.Odds : [])
-    .find((item) => String(item?.marketId) === marketId);
+  const odds = (Array.isArray(snapshot?.Odds) ? snapshot.Odds : []).find(
+    (item) => String(item?.marketId) === marketId,
+  );
   if (!odds) return null;
   const runners = Array.isArray(odds.runners) ? odds.runners : [];
   return {
@@ -75,10 +75,12 @@ async function activeMatches(sportId) {
     selected.push(row);
   }
   const snapshots = await redisStore.getEventSnapshots(selected.map((row) => row.eventid));
-  return selected.map((row) => dashboardEntry(row, snapshots.get(String(row.eventid))))
+  return selected
+    .map((row) => dashboardEntry(row, snapshots.get(String(row.eventid))))
     .filter(Boolean)
     .sort((left, right) => {
-      const leftTime = Date.parse(left.openDate); const rightTime = Date.parse(right.openDate);
+      const leftTime = Date.parse(left.openDate);
+      const rightTime = Date.parse(right.openDate);
       if (!Number.isFinite(leftTime) && !Number.isFinite(rightTime)) return 0;
       if (!Number.isFinite(leftTime)) return 1;
       if (!Number.isFinite(rightTime)) return -1;
