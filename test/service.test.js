@@ -87,6 +87,7 @@ test("bounded maps evict their oldest entry", () => {
 test("migration runner discovers ordered SQL files and produces stable checksums", () => {
   const files = migrationFiles(path.join(__dirname, "../scripts/migrations"));
   assert.deepEqual(files, [...files].sort());
+  assert.equal(files[0], "000_prepare_selection_runner_index.sql");
   assert.ok(files.includes("001_selection_runner_unique.sql"));
   assert.equal(checksum("SELECT 1"), checksum("SELECT 1"));
   assert.notEqual(checksum("SELECT 1"), checksum("SELECT 2"));

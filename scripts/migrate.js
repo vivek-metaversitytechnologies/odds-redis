@@ -63,6 +63,7 @@ async function migrate() {
         skipped += 1;
         continue;
       }
+      process.stdout.write(`Applying ${name}...\n`);
       await connection.query(sql);
       await connection.query("INSERT INTO service_migrations (name,checksum) VALUES (?,?)", [name, digest]);
       applied += 1;
