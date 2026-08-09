@@ -4,6 +4,9 @@ const { getSourcePool } = require("../config/sourceDb");
 const { supportedSportIds } = require("./competitionSync");
 const logger = require("../utils/logger");
 const { syncMarketDiscovery } = require("./marketDiscoverySync");
+const redis = require("../config/redis");
+const subscriptions = require("../services/marketSubscriptionService");
+const frontendSocket = require("../services/frontendSocketService");
 const cronConfig = require("../config/cron");
 const { utcToIstSql } = require("../utils/dateTime");
 
@@ -38,8 +41,7 @@ function eventRows(responses) {
         item.eventName &&
         sports.has(item.sportId) &&
         Number.isInteger(item.seriesId) &&
-        item.openDate &&
-        !item.gameOver,
+        item.openDate,
     );
 }
 
@@ -60,9 +62,18 @@ async function upsertEvents(events) {
       if (existing.has(event.eventId)) {
         await connection.execute(
           `UPDATE t_event SET eventname = ?, seriesid = ?, sportid = ?, open_date = ?,
-             in_play = IF(in_play = 1, 1, ?), updatedon = NOW()
+             in_play = ?, isactive = ?, status = ?, updatedon = NOW()
            WHERE eventid = ?`,
-          [event.eventName, event.seriesId, event.sportId, event.openDate, event.inPlay, event.eventId],
+          [
+            event.eventName,
+            event.seriesId,
+            event.sportId,
+            event.openDate,
+            event.gameOver ? false : event.inPlay,
+            !event.gameOver,
+            !event.gameOver,
+            event.eventId,
+          ],
         );
         updated += 1;
         continue;
@@ -78,12 +89,12 @@ async function upsertEvents(events) {
           event.eventId,
           event.eventName,
           event.openDate,
-          true,
-          true,
+          !event.gameOver,
+          !event.gameOver,
           false,
           false,
           true,
-          event.inPlay,
+          event.gameOver ? false : event.inPlay,
           true,
           true,
           true,
@@ -100,6 +111,61 @@ async function upsertEvents(events) {
   } finally {
     connection.release();
   }
+}
+
+async function retireCompletedEvents(events) {
+  const completed = events.filter((event) => event.gameOver);
+  if (!completed.length) return { events: 0, markets: 0 };
+  const eventIds = completed.map((event) => event.eventId);
+  const placeholders = eventIds.map(() => "?").join(",");
+  const connection = await getSourcePool().getConnection();
+  let marketIds = [];
+  try {
+    await connection.beginTransaction();
+    const [markets] = await connection.query(
+      `SELECT marketid FROM t_market WHERE eventid IN (${placeholders}) AND isactive = ?`,
+      [...eventIds, true],
+    );
+    const [fancies] = await connection.query(
+      `SELECT fancyid AS marketid FROM t_matchfancy WHERE eventid IN (${placeholders}) AND isactive = ?`,
+      [...eventIds, true],
+    );
+    marketIds = [...markets, ...fancies].map((row) => String(row.marketid));
+    await connection.query(
+      `UPDATE t_market SET isactive = ?, status = ?, issubscribed = ?, updatedon = NOW()
+       WHERE eventid IN (${placeholders})`,
+      [false, false, false, ...eventIds],
+    );
+    await connection.query(
+      `UPDATE t_matchfancy SET isactive = ?, isshow = ?, is_show = ?, issubscribed = ?,
+         status = ?, updatedon = NOW() WHERE eventid IN (${placeholders})`,
+      [false, false, false, false, "CLOSED", ...eventIds],
+    );
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  if (marketIds.length) {
+    try {
+      await subscriptions.unsubscribeEventMarkets(marketIds);
+    } catch (error) {
+      logger.warn("[EventSync] provider unsubscribe failed while retiring completed event", {
+        eventIds,
+        marketCount: marketIds.length,
+        error: error.message,
+      });
+    }
+  }
+  await Promise.allSettled(
+    eventIds.map(async (eventId) => {
+      await redis.removeEvent(eventId);
+      frontendSocket.publishEventRemoved(eventId, "completed");
+    }),
+  );
+  return { events: eventIds.length, markets: marketIds.length };
 }
 
 async function syncEvents() {
@@ -123,13 +189,15 @@ async function syncEvents() {
     );
     const events = eventRows(responses);
     const persisted = await upsertEvents(events);
-    const marketDiscovery = await syncMarketDiscovery(events);
+    const retired = await retireCompletedEvents(events);
+    const marketDiscovery = await syncMarketDiscovery(events.filter((event) => !event.gameOver));
     const result = {
       skipped: false,
       received,
       supported: events.length,
       sportIds,
       ...persisted,
+      retired,
       marketDiscovery,
     };
     state.lastResult = result;
@@ -158,4 +226,11 @@ function getEventSyncStatus() {
   return { ...state, sportIds: [...supportedSportIds()] };
 }
 
-module.exports = { eventRows, upsertEvents, syncEvents, startEventSync, getEventSyncStatus };
+module.exports = {
+  eventRows,
+  upsertEvents,
+  retireCompletedEvents,
+  syncEvents,
+  startEventSync,
+  getEventSyncStatus,
+};

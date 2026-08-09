@@ -1,5 +1,6 @@
 const { getSourcePool } = require("../config/sourceDb");
 const redisStore = require("../config/redis");
+const { integer } = require("../config/env");
 
 function firstPrice(runner, side) {
   const prices = runner?.ex?.[side];
@@ -49,6 +50,7 @@ function dashboardEntry(row, snapshot) {
 }
 
 async function activeMatches(sportId) {
+  const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const [rows] = await getSourcePool().query(
     `SELECT t.matchname, t.opendate, t.inplay, t.eventid, t.marketid, t.marketname,
       t.sportid, t.seriesid,
@@ -57,7 +59,10 @@ async function activeMatches(sportId) {
       EXISTS(SELECT 1 FROM t_market gm WHERE gm.eventid = t.eventid
         AND gm.isactive = TRUE AND gm.marketname LIKE '%Goal%') AS isGoal
     FROM t_market t
-    WHERE t.sportid = ? AND t.isactive = TRUE
+    INNER JOIN t_event e ON e.eventid = t.eventid
+    WHERE t.sportid = ? AND t.isactive = TRUE AND e.isactive = TRUE
+      AND e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR)
+      AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid = t.marketid)
       AND (t.marketname = 'Match Odds' OR t.marketname LIKE '%Bookmaker%'
         OR t.marketname LIKE '%Winner%')
     ORDER BY t.eventid ASC,

@@ -181,7 +181,7 @@ test("competition sync keeps only supported sports", () => {
   );
 });
 
-test("event sync keeps supported unfinished events", () => {
+test("event sync keeps supported events including completed lifecycle updates", () => {
   const rows = eventRows([
     {
       data: [
@@ -214,9 +214,10 @@ test("event sync keeps supported unfinished events", () => {
   ]);
   assert.deepEqual(
     rows.map((row) => row.eventId),
-    [10],
+    [10, 20],
   );
   assert.equal(rows[0].openDate, "2026-08-02 17:30:00");
+  assert.equal(rows[1].gameOver, true);
 });
 
 test("market discovery maps active unfinished markets with Java betting defaults", () => {

@@ -118,6 +118,16 @@ async function publishEventSnapshot(eventId) {
   return true;
 }
 
+function publishEventRemoved(eventId, reason = "inactive") {
+  if (!io || !validEventId(eventId)) return false;
+  io.to(`event:${eventId}`).emit("event:removed", {
+    eventId: String(eventId),
+    reason,
+    removedAt: new Date().toISOString(),
+  });
+  return true;
+}
+
 async function closeFrontendSocket() {
   if (!io) return;
   const current = io;
@@ -128,4 +138,4 @@ async function closeFrontendSocket() {
   await new Promise((resolve) => current.close(resolve));
 }
 
-module.exports = { attachFrontendSocket, publishEventSnapshot, closeFrontendSocket };
+module.exports = { attachFrontendSocket, publishEventSnapshot, publishEventRemoved, closeFrontendSocket };

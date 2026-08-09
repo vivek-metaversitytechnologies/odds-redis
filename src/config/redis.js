@@ -889,6 +889,20 @@ async function removeMarket(eventId, marketId) {
   return true;
 }
 
+async function removeEvent(eventId) {
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return false;
+  const eventKey = String(eventId);
+  const keys = [
+    `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
+    `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
+  ];
+  await redis.del(keys);
+  eventPayloadCache.delete(eventKey);
+  eventPayloadRevisions.delete(eventKey);
+  return true;
+}
+
 async function closeRedis() {
   if (!client?.isOpen) return;
   const current = client;
@@ -910,6 +924,7 @@ module.exports = {
   writeScore,
   getScore,
   removeMarket,
+  removeEvent,
   getEventSnapshot,
   getEventSnapshots,
   inspectTicks,
