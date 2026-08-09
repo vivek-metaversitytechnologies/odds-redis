@@ -28,7 +28,7 @@ const {
   isResultTick,
 } = require("../src/services/websocketService");
 const { parseJsonObjects, containsMarketId } = require("../src/services/logReaderService");
-const { dashboardEntry } = require("../src/services/dashboardService");
+const { dashboardEntry, compareDashboardEntries } = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
 const { eventRows } = require("../src/cron/eventSync");
 const {
@@ -134,6 +134,7 @@ test("dashboard entries use first prices from the consolidated event snapshot", 
       seriesid: 7,
       isBookmaker: 1,
       isGoal: 0,
+      isOutright: 0,
     },
     {
       Odds: [
@@ -156,6 +157,7 @@ test("dashboard entries use first prices from the consolidated event snapshot", 
     marketId: "1.2",
     bm: true,
     GM: false,
+    outright: false,
     team1Back: 1.8,
     team1Lay: 1.82,
     team2Back: 2.1,
@@ -164,6 +166,19 @@ test("dashboard entries use first prices from the consolidated event snapshot", 
     drawLay: 0,
     li: 7,
   });
+});
+
+test("dashboard sorts outright winner markets before normal matches", () => {
+  const entries = [
+    { matchId: 1, outright: false, openDate: "2026-08-09 10:00:00" },
+    { matchId: 2, outright: true, openDate: "2026-08-10 17:30:00" },
+    { matchId: 3, outright: true, openDate: "2026-08-10 10:00:00" },
+  ];
+  entries.sort(compareDashboardEntries);
+  assert.deepEqual(
+    entries.map((entry) => entry.matchId),
+    [3, 2, 1],
+  );
 });
 
 test("competition sync keeps only supported sports", () => {

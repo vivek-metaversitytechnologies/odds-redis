@@ -23,6 +23,7 @@ function dashboardEntry(row, snapshot) {
     marketId,
     bm: Boolean(row.isBookmaker),
     GM: Boolean(row.isGoal),
+    outright: Boolean(row.isOutright),
   };
 
   if (marketName.toLowerCase().includes("book")) {
@@ -49,6 +50,16 @@ function dashboardEntry(row, snapshot) {
   };
 }
 
+function compareDashboardEntries(left, right) {
+  if (left.outright !== right.outright) return left.outright ? -1 : 1;
+  const leftTime = Date.parse(left.openDate);
+  const rightTime = Date.parse(right.openDate);
+  if (!Number.isFinite(leftTime) && !Number.isFinite(rightTime)) return 0;
+  if (!Number.isFinite(leftTime)) return 1;
+  if (!Number.isFinite(rightTime)) return -1;
+  return leftTime - rightTime;
+}
+
 async function activeMatches(sportId) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const [rows] = await getSourcePool().query(
@@ -57,7 +68,12 @@ async function activeMatches(sportId) {
       EXISTS(SELECT 1 FROM t_market bm WHERE bm.eventid = t.eventid
         AND bm.isactive = TRUE AND bm.marketname LIKE '%Bookmaker%') AS isBookmaker,
       EXISTS(SELECT 1 FROM t_market gm WHERE gm.eventid = t.eventid
-        AND gm.isactive = TRUE AND gm.marketname LIKE '%Goal%') AS isGoal
+        AND gm.isactive = TRUE AND gm.marketname LIKE '%Goal%') AS isGoal,
+      (EXISTS(SELECT 1 FROM t_market wm WHERE wm.eventid = t.eventid
+         AND wm.isactive = TRUE
+         AND (wm.marketname = 'Winner' OR wm.marketname LIKE '%Winner Bookmaker%'))
+       AND NOT EXISTS(SELECT 1 FROM t_market mo WHERE mo.eventid = t.eventid
+         AND mo.isactive = TRUE AND mo.marketname = 'Match Odds')) AS isOutright
     FROM t_market t
     INNER JOIN t_event e ON e.eventid = t.eventid
     WHERE t.sportid = ? AND t.isactive = TRUE AND e.isactive = TRUE
@@ -83,14 +99,7 @@ async function activeMatches(sportId) {
   return selected
     .map((row) => dashboardEntry(row, snapshots.get(String(row.eventid))))
     .filter(Boolean)
-    .sort((left, right) => {
-      const leftTime = Date.parse(left.openDate);
-      const rightTime = Date.parse(right.openDate);
-      if (!Number.isFinite(leftTime) && !Number.isFinite(rightTime)) return 0;
-      if (!Number.isFinite(leftTime)) return 1;
-      if (!Number.isFinite(rightTime)) return -1;
-      return leftTime - rightTime;
-    });
+    .sort(compareDashboardEntries);
 }
 
-module.exports = { activeMatches, dashboardEntry, openDateValue };
+module.exports = { activeMatches, dashboardEntry, compareDashboardEntries, openDateValue };
