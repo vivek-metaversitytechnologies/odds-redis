@@ -701,15 +701,26 @@ function preserveRunnerNames(entries, previousEntries) {
   }
 }
 
-async function writeTick(item) {
-  if (!item || typeof item !== "object" || !item.eid || !item.mid) return false;
+async function writeTicks(items) {
+  const candidates = (items || []).filter(
+    (item) => item && typeof item === "object" && item.eid && item.mid,
+  );
+  if (!candidates.length) return { payload: false, accepted: [], rejected: candidates };
   const redis = await getRedisClient();
-  if (!redis?.isOpen) return false;
-  const market = await findMarket(String(item.mid));
-  if (!market) return false;
-  if (booleanOr(market.isactive, false) === false) return false;
-  const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${item.eid}`;
-  let payload = eventPayloadCache.get(String(item.eid));
+  if (!redis?.isOpen) return { payload: false, accepted: [], rejected: candidates };
+  const eventId = String(candidates[0].eid);
+  const sameEvent = candidates.filter((item) => String(item.eid) === eventId);
+  const rejected = candidates.filter((item) => String(item.eid) !== eventId);
+  const marketRows = await Promise.all(
+    sameEvent.map(async (item) => ({ item, market: await findMarket(String(item.mid)) })),
+  );
+  const acceptedRows = marketRows.filter(
+    ({ market }) => market && booleanOr(market.isactive, false) !== false,
+  );
+  rejected.push(...marketRows.filter(({ market }) => !market || !booleanOr(market.isactive, false)).map(({ item }) => item));
+  if (!acceptedRows.length) return { payload: false, accepted: [], rejected };
+  const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+  let payload = eventPayloadCache.get(eventId);
   if (!payload) {
     payload = emptyEventPayload();
     const current = await redis.get(key);
@@ -724,22 +735,33 @@ async function writeTick(item) {
       }
     }
   }
-  if (payloadGroup(item, market) === "Odds") await loadRunnerNames(item.mid);
-  const { group, entries } = transformedTick(item, market);
-  const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === String(item.mid));
-  if (group === "Odds") preserveRunnerNames(entries, previousEntries);
-  // A market can change grouping as discovery metadata improves; keep exactly one copy.
-  for (const payloadGroupName of PAYLOAD_GROUPS) {
-    payload[payloadGroupName] = payload[payloadGroupName].filter(
-      (entry) => entryMarketId(entry) !== String(item.mid),
-    );
+  await Promise.allSettled(
+    acceptedRows
+      .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
+      .map(({ item }) => loadRunnerNames(item.mid)),
+  );
+  for (const { item, market } of acceptedRows) {
+    const { group, entries } = transformedTick(item, market);
+    const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === String(item.mid));
+    if (group === "Odds") preserveRunnerNames(entries, previousEntries);
+    // A market can change grouping as discovery metadata improves; keep exactly one copy.
+    for (const payloadGroupName of PAYLOAD_GROUPS) {
+      payload[payloadGroupName] = payload[payloadGroupName].filter(
+        (entry) => entryMarketId(entry) !== String(item.mid),
+      );
+    }
+    if (!shouldRemoveFromPayload(group, item)) payload[group].push(...entries);
   }
-  if (!shouldRemoveFromPayload(group, item)) payload[group].push(...entries);
   await redis.set(key, JSON.stringify(payload));
-  setBounded(eventPayloadCache, String(item.eid), payload, CACHE_LIMIT);
-  eventPayloadRevisions.set(String(item.eid), (eventPayloadRevisions.get(String(item.eid)) || 0) + 1);
-  recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
-  return payload;
+  setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+  eventPayloadRevisions.set(eventId, (eventPayloadRevisions.get(eventId) || 0) + 1);
+  for (const { item } of acceptedRows) recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
+  return { payload, accepted: acceptedRows.map(({ item }) => item), rejected };
+}
+
+async function writeTick(item) {
+  const result = await writeTicks([item]);
+  return result.payload;
 }
 
 function invalidateMarkets(marketIds) {
@@ -921,6 +943,7 @@ function getRedisStatus() {
 module.exports = {
   getRedisClient,
   writeTick,
+  writeTicks,
   writeScore,
   getScore,
   removeMarket,

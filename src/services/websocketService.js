@@ -8,6 +8,8 @@ const { setBounded } = require("../utils/boundedMap");
 
 let socket;
 const eventWriteChains = new Map();
+const pendingEventTicks = new Map();
+const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 20, { min: 0, max: 250 });
 let tickPublisher = () => {};
 let scorePublisher = () => {};
 let rawTickPublisher = () => {};
@@ -153,19 +155,16 @@ function logSocketTiming(details) {
 }
 
 async function persist(items, receivedAtMs = Date.now()) {
-  const updatedEvents = new Map();
   const resultedMarketIds = new Set();
-  for (const item of items) {
-    const writeStartedAt = Date.now();
-    try {
-      const payload = await redisStore.writeTick(item);
-      if (payload) {
-        state.persistedTickCount += 1;
-        updatedEvents.set(String(item.eid), {
-          payload,
-          lastWriteCompletedAt: Date.now(),
-          marketId: String(item.mid),
-        });
+  const writeStartedAt = Date.now();
+  try {
+    const result = await redisStore.writeTicks(items);
+    const accepted = result.accepted || [];
+    state.persistedTickCount += accepted.length;
+    state.failedTickCount += (result.rejected || []).length;
+    if (result.payload && accepted.length) {
+      const lastWriteCompletedAt = Date.now();
+      for (const item of accepted) {
         const providerTimestamp = Number(item.t);
         logSocketTiming({
           eventId: String(item.eid),
@@ -176,30 +175,27 @@ async function persist(items, receivedAtMs = Date.now()) {
             ? Math.max(0, receivedAtMs - providerTimestamp)
             : null,
           queueDelayMs: writeStartedAt - receivedAtMs,
-          redisWriteMs: Date.now() - writeStartedAt,
+          redisWriteMs: lastWriteCompletedAt - writeStartedAt,
+          batchMarkets: accepted.length,
         });
         if (isResultTick(item)) resultedMarketIds.add(String(item.mid));
-      } else state.failedTickCount += 1;
-    } catch (error) {
-      state.failedTickCount += 1;
-      logger.error("[ProviderWS] Redis write failed", { error: error.message });
-    }
-  }
-  for (const [eventId, update] of updatedEvents) {
-    try {
+      }
+      const eventId = String(accepted[0].eid);
       const emitStartedAt = Date.now();
-      tickPublisher(eventId, update.payload);
+      tickPublisher(eventId, result.payload);
       logSocketTiming({
         eventId,
-        marketId: update.marketId,
+        marketId: String(accepted.at(-1).mid),
         stage: "frontend.emit",
         backendProcessingMs: emitStartedAt - receivedAtMs,
-        postRedisToEmitMs: emitStartedAt - update.lastWriteCompletedAt,
+        postRedisToEmitMs: emitStartedAt - lastWriteCompletedAt,
         emitCallMs: Date.now() - emitStartedAt,
+        batchMarkets: accepted.length,
       });
-    } catch (error) {
-      logger.error("[ProviderWS] persisted event publish failed", { eventId, error: error.message });
     }
+  } catch (error) {
+    state.failedTickCount += items.length;
+    logger.error("[ProviderWS] Redis batch write failed", { error: error.message, ticks: items.length });
   }
   if (resultedMarketIds.size) {
     try {
@@ -215,12 +211,44 @@ async function persist(items, receivedAtMs = Date.now()) {
 
 function enqueueEventTicks(eventId, items, receivedAtMs) {
   const key = String(eventId);
+  let pending = pendingEventTicks.get(key);
+  if (!pending) {
+    pending = { items: new Map(), receivedAtMs, waiters: [], timer: null, immediate: false };
+    pendingEventTicks.set(key, pending);
+  }
+  pending.receivedAtMs = Math.min(pending.receivedAtMs, receivedAtMs);
+  for (const item of items || []) {
+    const marketId = String(item.mid);
+    const current = pending.items.get(marketId);
+    // Settlement must never be replaced by a late non-result update in the same window.
+    if (!isResultTick(current) || isResultTick(item)) pending.items.set(marketId, item);
+  }
+  const resultTick = (items || []).some(isResultTick);
+  pending.immediate ||= resultTick;
+  const completion = new Promise((resolve, reject) => pending.waiters.push({ resolve, reject }));
+  if (pending.timer) clearTimeout(pending.timer);
+  pending.timer = setTimeout(() => flushPendingEvent(key), pending.immediate ? 0 : TICK_COALESCE_MS);
+  pending.timer.unref?.();
+  return completion;
+}
+
+function flushPendingEvent(key) {
+  const pending = pendingEventTicks.get(key);
+  if (!pending) return eventWriteChains.get(key) || Promise.resolve();
+  pendingEventTicks.delete(key);
+  if (pending.timer) clearTimeout(pending.timer);
   const previous = eventWriteChains.get(key) || Promise.resolve();
-  const next = previous.catch(() => {}).then(() => persist(items, receivedAtMs));
+  const next = previous
+    .catch(() => {})
+    .then(() => persist([...pending.items.values()], pending.receivedAtMs));
   eventWriteChains.set(key, next);
   const cleanup = () => {
     if (eventWriteChains.get(key) === next) eventWriteChains.delete(key);
   };
+  next.then(
+    (value) => pending.waiters.forEach(({ resolve }) => resolve(value)),
+    (error) => pending.waiters.forEach(({ reject }) => reject(error)),
+  );
   next.then(cleanup, cleanup);
   return next;
 }
@@ -345,11 +373,18 @@ async function stopSocket() {
     socket.disconnect();
     socket = undefined;
   }
+  await Promise.allSettled([...pendingEventTicks.keys()].map(flushPendingEvent));
   await Promise.allSettled([...eventWriteChains.values()]);
 }
 
 function getSocketStatus() {
-  return { ...state, subscribedCount: subscribedMarketIds.size };
+  return {
+    ...state,
+    subscribedCount: subscribedMarketIds.size,
+    pendingEventCount: pendingEventTicks.size,
+    pendingTickCount: [...pendingEventTicks.values()].reduce((total, pending) => total + pending.items.size, 0),
+    tickCoalesceMs: TICK_COALESCE_MS,
+  };
 }
 
 module.exports = {
