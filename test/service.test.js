@@ -37,6 +37,7 @@ const {
   FANCY_MARKET_TYPES,
   FANCY_MARKET_REQUESTS,
   marketRows,
+  isMarketSnapshotResponse,
   inferredMarketType,
   fallbackMarketName,
   mergeDiscoveredMarkets,
@@ -45,6 +46,7 @@ const {
   runnerLookupMarketIds,
   enforceBookmaker2Eligibility,
   inactiveLineMarkets,
+  missingLineMarketIds,
   oddsType,
 } = require("../src/cron/marketDiscoverySync");
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
@@ -581,6 +583,14 @@ test("advanced market families use separate vendor discovery requests", () => {
   assert.equal(REGULAR_MARKET_TYPES.includes("odd-even"), false);
 });
 
+test("only valid vendor market snapshots are authoritative for missing-market removal", () => {
+  assert.equal(isMarketSnapshotResponse([]), true);
+  assert.equal(isMarketSnapshotResponse({ status: true, data: [] }), true);
+  assert.equal(isMarketSnapshotResponse({ status: false, data: [] }), false);
+  assert.equal(isMarketSnapshotResponse(null), false);
+  assert.equal(isMarketSnapshotResponse("temporary upstream error"), false);
+});
+
 test("active vendor discovery wins over contradictory typed inactive records", () => {
   const base = {
     marketId: "4.1-F2",
@@ -612,6 +622,24 @@ test("vendor discovery deactivates a market when every response agrees", () => {
   ]);
   assert.equal(row.isActive, false);
   assert.equal(row.gameOver, true);
+});
+
+test("missing line markets require consecutive authoritative discovery passes", () => {
+  const counts = new Map();
+  const stored = [{ marketId: "1.2" }, { marketId: "1.3" }];
+  const vendor = [{ marketId: "1.3" }];
+  assert.deepEqual(missingLineMarketIds(stored, vendor, counts), []);
+  assert.deepEqual(missingLineMarketIds(stored, vendor, counts), ["1.2"]);
+  assert.equal(counts.has("1.3"), false);
+});
+
+test("a reappearing line market clears its missing-pass counter", () => {
+  const counts = new Map();
+  const stored = [{ marketId: "1.2" }];
+  assert.deepEqual(missingLineMarketIds(stored, [], counts), []);
+  assert.equal(counts.get("1.2"), 1);
+  assert.deepEqual(missingLineMarketIds(stored, [{ marketId: "1.2" }], counts), []);
+  assert.equal(counts.has("1.2"), false);
 });
 
 test("active fancy definitions create socket-updatable placeholder rows", () => {
@@ -735,6 +763,21 @@ test("standard odds ticks match the frontend Redis contract", () => {
   assert.equal(output.matchName, "India v Australia");
   assert.deepEqual(output.runners[0].ex.availableToBack, [{ price: 1.8, size: 250 }]);
   assert.deepEqual(output.runners[0].ex.availableToLay, [{ price: 1.82, size: 300 }]);
+});
+
+test("top-level socket suspension overrides open line-market and runner statuses", () => {
+  const output = oddsPayload(
+    {
+      eid: 99,
+      mid: "1.2",
+      s: "OPEN",
+      sb: "S",
+      r: [{ rid: 11, s: "ACTIVE", b1: 79, l1: 78 }],
+    },
+    { eventid: 99, marketname: "75 Balls Runs Line", isactive: 1 },
+  );
+  assert.equal(output.status, "SUSPENDED");
+  assert.equal(output.runners[0].status, "SUSPENDED");
 });
 
 test("odds runners use cached provider selection names", () => {

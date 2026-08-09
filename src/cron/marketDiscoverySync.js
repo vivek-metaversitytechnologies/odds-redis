@@ -19,6 +19,7 @@ const {
 let running = false;
 let rerunRequested = false;
 const runnerMisses = new Map();
+const missingLineMarketPasses = new Map();
 const discoveryFingerprints = new Map();
 let lastFullDiscoveryAt = 0;
 const state = {
@@ -30,6 +31,7 @@ const state = {
 };
 const DB_WRITE_BATCH_SIZE = integer("MARKET_DB_WRITE_BATCH_SIZE", 500, { min: 50, max: 5000 });
 const DISCOVERY_CACHE_LIMIT = integer("MARKET_DISCOVERY_CACHE_LIMIT", 50000, { min: 1000 });
+const MISSING_LINE_MARKET_PASSES = integer("MARKET_MISSING_LINE_PASSES", 2, { min: 1, max: 20 });
 
 function chunks(items, size = DB_WRITE_BATCH_SIZE) {
   const result = [];
@@ -135,6 +137,12 @@ function marketRows(response, eventsById) {
         item.marketName &&
         (DISCOVERABLE_MARKET_TYPES.has(item.marketType) || (item.isActive && !item.gameOver)),
     );
+}
+
+function isMarketSnapshotResponse(response) {
+  return Boolean(
+    Array.isArray(response) || (response && response.status !== false && Array.isArray(response.data)),
+  );
 }
 
 // The vendor can return contradictory states for the same market between the
@@ -536,6 +544,63 @@ async function reconcileInactiveLineMarkets(markets) {
   };
 }
 
+function missingLineMarketIds(storedMarkets, vendorMarkets, missCounts = missingLineMarketPasses) {
+  const present = new Set((vendorMarkets || []).map((market) => String(market.marketId)));
+  const storedIds = new Set((storedMarkets || []).map((market) => String(market.marketId)));
+  const deactivated = [];
+
+  for (const marketId of present) missCounts.delete(marketId);
+  for (const market of storedMarkets || []) {
+    const marketId = String(market.marketId);
+    if (present.has(marketId)) continue;
+    const misses = (missCounts.get(marketId) || 0) + 1;
+    missCounts.set(marketId, misses);
+    if (misses >= MISSING_LINE_MARKET_PASSES) deactivated.push(marketId);
+  }
+  // Do not retain counters for events/markets outside the current reconciliation scope.
+  for (const marketId of missCounts.keys()) {
+    if (!storedIds.has(marketId) && !present.has(marketId)) missCounts.delete(marketId);
+  }
+  return deactivated;
+}
+
+async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {
+  if (!eventIds.length) return { checked: 0, missing: 0, deactivated: 0, removed: 0 };
+  const [rows] = await getSourcePool().query(
+    `SELECT marketid AS marketId, sportid AS sportId, eventid AS eventId,
+            marketname AS marketName, matchname AS matchName, opendate AS openDate,
+            inplay AS inPlay, betdelay AS betDelay, minbet AS minBet, maxbet AS maxBet,
+            display_message AS displayMessage, seriesid AS seriesId
+       FROM t_market
+      WHERE isactive=? AND eventid IN (${eventIds.map(() => "?").join(",")})
+        AND LOWER(marketname) LIKE ?`,
+    [true, ...eventIds, "%line%"],
+  );
+  const stored = rows.map((row) => ({
+    ...row,
+    marketId: String(row.marketId),
+    eventId: Number(row.eventId),
+    sportId: Number(row.sportId),
+    marketType: "line-market",
+    inPlay: Boolean(row.inPlay),
+    isActive: true,
+    gameOver: false,
+  }));
+  const ids = new Set(missingLineMarketIds(stored, vendorMarkets));
+  const inactive = stored
+    .filter((market) => ids.has(market.marketId))
+    .map((market) => ({ ...market, isActive: false }));
+  if (!inactive.length) {
+    return { checked: stored.length, missing: [...missingLineMarketPasses.values()].filter(Boolean).length, deactivated: 0, removed: 0 };
+  }
+  const result = await reconcileInactiveLineMarkets(inactive);
+  for (const market of inactive) {
+    missingLineMarketPasses.delete(market.marketId);
+    discoveryFingerprints.delete(market.marketId);
+  }
+  return { checked: stored.length, missing: inactive.length, ...result };
+}
+
 async function syncMarketDiscovery(events) {
   if (running) {
     rerunRequested = true;
@@ -559,6 +624,16 @@ async function syncMarketDiscovery(events) {
     const primaryRows = primaryResponses.flatMap((response) => marketRows(response, eventsById));
     discovered.push(...primaryRows);
     const fastLineReconciliation = await reconcileInactiveLineMarkets(primaryRows);
+    // Reconcile only batches with a successful, structurally valid response. A timeout,
+    // error response, or malformed body must never be interpreted as an empty market list.
+    const validPrimaryEventIds = eventBatches.flatMap((eids, index) =>
+      isMarketSnapshotResponse(primaryResponses[index]) ? eids : [],
+    );
+    const validPrimaryEventIdSet = new Set(validPrimaryEventIds.map(Number));
+    const missingLineReconciliation = await reconcileMissingLineMarkets(
+      validPrimaryEventIds,
+      primaryRows.filter((market) => validPrimaryEventIdSet.has(market.eventId)),
+    );
 
     // Second pass: fetch typed fallbacks needed for families the vendor can omit from
     // the unfiltered response. These no longer delay line-market deactivation.
@@ -641,6 +716,7 @@ async function syncMarketDiscovery(events) {
       fancyInserted: fancyPersisted.inserted,
       fancyUpdated: fancyPersisted.updated,
       fastLineReconciliation,
+      missingLineReconciliation,
       redisDefinitions,
       regularDefinitions,
       tossDefinitions,
@@ -712,6 +788,7 @@ module.exports = {
   FANCY_MARKET_TYPES,
   FANCY_MARKET_REQUESTS,
   marketRows,
+  isMarketSnapshotResponse,
   inferredMarketType,
   fallbackMarketName,
   mergeDiscoveredMarkets,
@@ -726,6 +803,8 @@ module.exports = {
   regularMarketsWithRunners,
   seedTossMarkets,
   inactiveLineMarkets,
+  missingLineMarketIds,
+  reconcileMissingLineMarkets,
   fetchActiveEventsForMarketDiscovery,
   syncMarketDiscovery,
   syncStoredEventMarkets,

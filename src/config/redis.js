@@ -259,7 +259,7 @@ function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item
   return {
     matchName: marketMatchName(item, market),
     marketId: String(item.mid),
-    status: item.s ?? item.status ?? "",
+    status: status(item.sb ?? item.s ?? item.status),
     inplay: booleanOr(item.ip ?? market.inPlay, false),
     eventTime: market.opendate ?? null,
     lastMatchTime: item.tm ?? null,
@@ -274,7 +274,7 @@ function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item
     runners: runners.map((runner) => ({
       selectionId: runner?.rid ?? runner?.selectionId ?? null,
       handicap: numberOr(runner?.hc ?? runner?.handicap, 0),
-      status: runner?.s ?? runner?.status ?? "ACTIVE",
+      status: status(item.sb ?? runner?.s ?? runner?.status ?? "ACTIVE"),
       lastPriceTraded: numberOr(runner?.ltp ?? runner?.lastPriceTraded, 0),
       totalMatched: numberOr(runner?.tv ?? runner?.totalMatched, 0),
       adjustmentFactor: numberOr(runner?.af ?? runner?.adjustmentFactor, 0),

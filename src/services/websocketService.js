@@ -226,9 +226,16 @@ function enqueueEventTicks(eventId, items, receivedAtMs) {
   const resultTick = (items || []).some(isResultTick);
   pending.immediate ||= resultTick;
   const completion = new Promise((resolve, reject) => pending.waiters.push({ resolve, reject }));
-  if (pending.timer) clearTimeout(pending.timer);
-  pending.timer = setTimeout(() => flushPendingEvent(key), pending.immediate ? 0 : TICK_COALESCE_MS);
-  pending.timer.unref?.();
+  if (pending.immediate) {
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => flushPendingEvent(key), 0);
+    pending.timer.unref?.();
+  } else if (!pending.timer) {
+    // This is a fixed window from the first tick, not a debounce. Restarting the
+    // timer for every update can starve a busy event indefinitely.
+    pending.timer = setTimeout(() => flushPendingEvent(key), TICK_COALESCE_MS);
+    pending.timer.unref?.();
+  }
   return completion;
 }
 
