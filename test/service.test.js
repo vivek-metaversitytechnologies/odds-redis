@@ -523,13 +523,12 @@ test("unnamed BM2 markets remain available for socket population", () => {
   assert.equal(row.maxBet, 25000);
 });
 
-test("BM2 discovery inherits runner metadata from its base market", () => {
+test("BM2 discovery fetches and stores runner metadata under its exact market ID", () => {
   assert.equal(bookmaker2BaseMarketId("1.260815092-BM2"), "1.260815092");
   assert.equal(bookmaker2BaseMarketId("4.1-BM"), null);
-  assert.equal(runnerSourceMarketId("1.260815092-BM2"), "1.260815092");
+  assert.equal(runnerSourceMarketId("1.260815092-BM2"), "1.260815092-BM2");
   assert.deepEqual(runnerLookupMarketIds(["1.260815092-BM2", "4.1-BM"]), [
     "1.260815092-BM2",
-    "1.260815092",
     "4.1-BM",
   ]);
   const seeded = regularDefinitionEntries(

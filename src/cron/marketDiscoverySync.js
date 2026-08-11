@@ -336,19 +336,11 @@ function bookmaker2BaseMarketId(marketId) {
 }
 
 function runnerSourceMarketId(marketId) {
-  return bookmaker2BaseMarketId(marketId) || String(marketId);
+  return String(marketId);
 }
 
 function runnerLookupMarketIds(marketIds) {
-  return [
-    ...new Set(
-      (marketIds || []).flatMap((marketId) => {
-        const normalized = String(marketId);
-        const baseMarketId = bookmaker2BaseMarketId(normalized);
-        return baseMarketId ? [normalized, baseMarketId] : [normalized];
-      }),
-    ),
-  ];
+  return [...new Set((marketIds || []).map(String))];
 }
 
 function enforceBookmaker2Eligibility(markets) {
@@ -379,12 +371,7 @@ async function marketsMissingRunners(marketIds) {
   for (const [marketId, expiresAt] of runnerMisses) if (expiresAt <= now) runnerMisses.delete(marketId);
   return marketIds.filter((marketId) => {
     const normalized = String(marketId);
-    const baseMarketId = bookmaker2BaseMarketId(normalized);
-    return (
-      !runnerMisses.has(normalized) &&
-      !present.has(normalized) &&
-      !(baseMarketId && present.has(baseMarketId))
-    );
+    return !runnerMisses.has(normalized) && !present.has(normalized);
   });
 }
 
@@ -468,11 +455,9 @@ async function regularMarketsWithRunners(markets) {
   }
   return markets.map((market) => {
     const marketId = String(market.marketId);
-    const exactRunners = byMarket.get(marketId) || [];
-    const baseMarketId = bookmaker2BaseMarketId(marketId);
     return {
       ...market,
-      runners: exactRunners.length ? exactRunners : baseMarketId ? byMarket.get(baseMarketId) || [] : [],
+      runners: byMarket.get(marketId) || [],
     };
   });
 }

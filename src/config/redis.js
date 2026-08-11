@@ -610,8 +610,7 @@ async function reconcileRegularDefinitions(markets) {
         continue;
       }
       if (payloadHasMarket(payload, market.marketId)) {
-        // Discovery initially has no metadata for BM2 itself. Replace the single
-        // synthetic "Bookmaker2" row once base-market runner names are available.
+        // Replace the placeholder once runner names for this exact BM2 market are available.
         const marketId = String(market.marketId);
         const currentEntries = payload.Bookmaker.filter((entry) => entryMarketId(entry) === marketId);
         const syntheticBookmaker2 =
