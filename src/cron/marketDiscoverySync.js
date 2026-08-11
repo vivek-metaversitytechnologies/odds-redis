@@ -18,6 +18,7 @@ const {
 } = require("../config/marketTypes");
 let running = false;
 let rerunRequested = false;
+let liveCleanupRunning = false;
 const runnerMisses = new Map();
 const missingLineMarketPasses = new Map();
 const discoveryFingerprints = new Map();
@@ -60,7 +61,7 @@ function inferredMarketType(marketId, providedType) {
   const explicit = String(providedType || "")
     .trim()
     .toLowerCase();
-  if (explicit) return explicit;
+  if (explicit) return explicit === "bookmaker2" ? "bookmaker" : explicit;
   const id = String(marketId || "")
     .trim()
     .toUpperCase();
@@ -749,6 +750,69 @@ async function fetchActiveEventsForMarketDiscovery() {
     .filter((event) => Number.isInteger(event.eventId) && event.eventName);
 }
 
+async function fetchLiveEventsForMarketCleanup() {
+  const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
+  if (!sportIds.length) return [];
+  const responses = await Promise.all(sportIds.map((si) => provider.events({ si, today: 1 })));
+  return responses
+    .flatMap((response) =>
+      Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [],
+    )
+    .filter((event) => event?.inPlay === true && event?.gameOver !== true)
+    .map((event) => ({
+      eventId: Number(event?.eventId ?? event?.id),
+      eventName: String(event?.eventName ?? event?.name ?? "").trim(),
+      sportId: Number(event?.sportId),
+      seriesId: Number(event?.competitionId ?? event?.seriesId),
+      openDate: event?.startTime ?? event?.openDate ?? null,
+      inPlay: true,
+    }))
+    .filter((event) => Number.isInteger(event.eventId) && event.eventName);
+}
+
+async function syncLiveMarketCleanup() {
+  if (liveCleanupRunning) return { skipped: true, reason: "already-running" };
+  liveCleanupRunning = true;
+  try {
+    const events = await fetchLiveEventsForMarketCleanup();
+    if (!events.length) return { events: 0, inactive: 0, removed: 0 };
+    const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
+    const eventBatches = chunks(events.map((event) => event.eventId), 50);
+    const responses = await Promise.all(eventBatches.map((eids) => provider.markets({ eids })));
+    const vendorMarkets = responses.flatMap((response) => marketRows(response, eventsById));
+    const validEventIds = eventBatches.flatMap((eids, index) =>
+      isMarketSnapshotResponse(responses[index]) ? eids : [],
+    );
+    const missingLines = await reconcileMissingLineMarkets(validEventIds, vendorMarkets);
+    const inactive = vendorMarkets
+      .filter((market) => !market.isActive || market.gameOver);
+    if (!inactive.length) {
+      return { events: events.length, inactive: 0, removed: missingLines.removed, missingLines };
+    }
+    const unique = [...new Map(inactive.map((market) => [market.marketId, market])).values()];
+    const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
+    const regular = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
+    const [regularResult, fancyResult] = await Promise.all([upsertMarkets(regular), upsertFancies(fancies)]);
+    const removals = await Promise.all(
+      unique.map((market) => redisStore.removeMarket(market.eventId, market.marketId)),
+    );
+    const marketIds = unique.map((market) => market.marketId);
+    redisStore.invalidateMarkets(marketIds);
+    await unsubscribeEventMarkets(marketIds);
+    const changedEventIds = [...new Set(unique.map((market) => String(market.eventId)))];
+    await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
+    return {
+      events: events.length,
+      inactive: unique.length,
+      deactivated: regularResult.updated + fancyResult.updated,
+      removed: removals.filter(Boolean).length + missingLines.removed,
+      missingLines,
+    };
+  } finally {
+    liveCleanupRunning = false;
+  }
+}
+
 async function syncStoredEventMarkets() {
   const events = await fetchActiveEventsForMarketDiscovery();
   return syncMarketDiscovery(events);
@@ -756,11 +820,17 @@ async function syncStoredEventMarkets() {
 
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
-  const task = cron.schedule(expression, () => {
+  const discoveryTask = cron.schedule(expression, () => {
     if (!running) void syncStoredEventMarkets().catch(() => {});
   });
+  const cleanupTask = cron.schedule(cronConfig.liveMarketCleanup.expression, () => {
+    void syncLiveMarketCleanup().catch((error) =>
+      logger.error("[LiveMarketCleanup] failed", { error: error.message }),
+    );
+  });
   logger.info("[MarketDiscovery] scheduled", { expression });
-  return task;
+  logger.info("[LiveMarketCleanup] scheduled", { expression: cronConfig.liveMarketCleanup.expression });
+  return { stop: () => { discoveryTask.stop(); cleanupTask.stop(); } };
 }
 
 function getMarketDiscoveryStatus() {
@@ -791,6 +861,8 @@ module.exports = {
   missingLineMarketIds,
   reconcileMissingLineMarkets,
   fetchActiveEventsForMarketDiscovery,
+  fetchLiveEventsForMarketCleanup,
+  syncLiveMarketCleanup,
   syncMarketDiscovery,
   syncStoredEventMarkets,
   startMarketDiscoverySync,

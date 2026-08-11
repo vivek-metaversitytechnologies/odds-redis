@@ -278,6 +278,7 @@ test("market discovery infers fancy families from vendor suffixes", () => {
   assert.equal(inferredMarketType("4.1-OE", null), "odd-even");
   assert.equal(inferredMarketType("4.1-F2", null), "session");
   assert.equal(inferredMarketType("4.1-BM2", null), "bookmaker");
+  assert.equal(inferredMarketType("4.1-BM2", "bookmaker2"), "bookmaker");
 });
 
 test("unnamed fancy markets use their Redis section name", () => {
