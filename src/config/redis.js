@@ -70,6 +70,18 @@ function validMarketIdentifier(value) {
   return Boolean(normalized) && !["undefined", "null", "nan"].includes(normalized);
 }
 
+function moveTiedMatchLast(payload) {
+  if (!Array.isArray(payload?.Odds)) return payload;
+  const tied = [];
+  const other = [];
+  for (const market of payload.Odds) {
+    if (String(market?.Name ?? market?.name ?? "").trim().toLowerCase() === "tied match") tied.push(market);
+    else other.push(market);
+  }
+  payload.Odds = [...other, ...tied];
+  return payload;
+}
+
 function normalizeEventPayload(payload) {
   const normalized = emptyEventPayload();
   for (const group of PAYLOAD_GROUPS) {
@@ -105,7 +117,7 @@ function normalizeEventPayload(payload) {
     }
   }
   normalized.Fancy3 = [];
-  return normalized;
+  return moveTiedMatchLast(normalized);
 }
 
 function redisUrl() {
@@ -451,6 +463,7 @@ async function reconcileFancyDefinitions(markets) {
       }
     }
     if (changed) {
+      moveTiedMatchLast(payload);
       if ((eventPayloadRevisions.get(eventId) || 0) !== startingRevisions.get(eventId)) continue;
       writes.push([key, JSON.stringify(payload)]);
       setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
@@ -632,6 +645,7 @@ async function reconcileRegularDefinitions(markets) {
       changed = true;
     }
     if (changed) {
+      moveTiedMatchLast(payload);
       if ((eventPayloadRevisions.get(eventId) || 0) !== startingRevisions.get(eventId)) continue;
       writes.push([key, JSON.stringify(payload)]);
       setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
@@ -650,7 +664,22 @@ function entryMarketId(entry) {
   return String(entry.marketId ?? entry.mid ?? "");
 }
 
-function shouldRemoveFromPayload(group, item) {
+function isFullySuspendedToss(group, item, market = {}) {
+  if (group !== "Bookmaker") return false;
+  const marketName = String(market.marketname ?? item.na ?? "").trim().toLowerCase();
+  if (marketName !== "toss") return false;
+  if (booleanOr(market.isactive ?? market.isActive, true) === false) return true;
+  const runners = Array.isArray(item.r) ? item.r : [];
+  return (
+    runners.length > 0 &&
+    runners.every((runner) =>
+      ["S", "SUSPENDED"].includes(String(runner?.sb ?? runner?.s ?? runner?.status ?? "").toUpperCase()),
+    )
+  );
+}
+
+function shouldRemoveFromPayload(group, item, market) {
+  if (isFullySuspendedToss(group, item, market)) return true;
   if (group === "Bookmaker") return booleanOr(item.go, false);
   if (group === "Odds") return false;
   return booleanOr(item.go, false) || !booleanOr(item.s, true);
@@ -714,10 +743,13 @@ async function writeTicks(items) {
   const marketRows = await Promise.all(
     sameEvent.map(async (item) => ({ item, market: await findMarket(String(item.mid)) })),
   );
-  const acceptedRows = marketRows.filter(
-    ({ market }) => market && booleanOr(market.isactive, false) !== false,
-  );
-  rejected.push(...marketRows.filter(({ market }) => !market || !booleanOr(market.isactive, false)).map(({ item }) => item));
+  const acceptedRows = marketRows.filter(({ item, market }) => {
+    if (!market) return false;
+    if (booleanOr(market.isactive ?? market.isActive, false) !== false) return true;
+    return isFullySuspendedToss(payloadGroup(item, market), item, market);
+  });
+  const acceptedItems = new Set(acceptedRows.map(({ item }) => item));
+  rejected.push(...marketRows.filter(({ item }) => !acceptedItems.has(item)).map(({ item }) => item));
   if (!acceptedRows.length) return { payload: false, accepted: [], rejected };
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
   let payload = eventPayloadCache.get(eventId);
@@ -750,8 +782,9 @@ async function writeTicks(items) {
         (entry) => entryMarketId(entry) !== String(item.mid),
       );
     }
-    if (!shouldRemoveFromPayload(group, item)) payload[group].push(...entries);
+    if (!shouldRemoveFromPayload(group, item, market)) payload[group].push(...entries);
   }
+  moveTiedMatchLast(payload);
   await redis.set(key, JSON.stringify(payload));
   setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
   eventPayloadRevisions.set(eventId, (eventPayloadRevisions.get(eventId) || 0) + 1);
@@ -965,6 +998,8 @@ module.exports = {
   primeRunnerNames,
   preserveRunnerNames,
   shouldRemoveFromPayload,
+  isFullySuspendedToss,
+  moveTiedMatchLast,
   fancyDefinitionEntry,
   reconcileFancyDefinitions,
   regularDefinitionEntries,

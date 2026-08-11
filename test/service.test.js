@@ -13,6 +13,8 @@ const {
   runnerPrices,
   preserveRunnerNames,
   shouldRemoveFromPayload,
+  isFullySuspendedToss,
+  moveTiedMatchLast,
   fancyDefinitionEntry,
   regularDefinitionEntries,
   normalizeEventPayload,
@@ -887,6 +889,15 @@ test("legacy line markets migrate from Odds to their separate group", () => {
   assert.deepEqual(payload.LineMarket, [market]);
 });
 
+test("Tied Match is always the final market in the Odds section", () => {
+  const tied = { marketId: "1.2", Name: "Tied Match" };
+  const matchOdds = { marketId: "1.1", Name: "Match Odds" };
+  const completed = { marketId: "1.3", Name: "Completed Match" };
+  const payload = moveTiedMatchLast({ Odds: [tied, matchOdds, completed] });
+  assert.deepEqual(payload.Odds, [matchOdds, completed, tied]);
+  assert.deepEqual(normalizeEventPayload({ Odds: [tied, matchOdds] }).Odds, [matchOdds, tied]);
+});
+
 test("legacy KD rows migrate from Fancy2 to Khado", () => {
   const row = { mid: "4.1-KD", nation: "Innings Khado" };
   const payload = normalizeEventPayload({ Fancy2: [row] });
@@ -987,6 +998,42 @@ test("unavailable fancy ticks are removed without treating them as result ticks"
   assert.equal(shouldRemoveFromPayload("Fancy2", { s: false, go: false }), true);
   assert.equal(shouldRemoveFromPayload("Fancy2", { s: true, go: false }), false);
   assert.equal(isResultTick({ mid: "4.1-F2", s: false, go: false }), false);
+});
+
+test("toss bookmaker markets are removed only after every runner is suspended", () => {
+  const market = { marketname: "TOSS" };
+  assert.equal(
+    isFullySuspendedToss(
+      "Bookmaker",
+      { r: [{ sb: "S" }, { status: "SUSPENDED" }] },
+      market,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRemoveFromPayload("Bookmaker", { go: false, r: [{ sb: "S" }, { sb: "S" }] }, market),
+    true,
+  );
+  assert.equal(
+    shouldRemoveFromPayload("Bookmaker", { go: false, r: [{ sb: "S" }, { sb: "" }] }, market),
+    false,
+  );
+  assert.equal(
+    shouldRemoveFromPayload(
+      "Bookmaker",
+      { go: false, r: [{ sb: "S" }, { sb: "S" }] },
+      { marketname: "BOOKMAKER" },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRemoveFromPayload(
+      "Bookmaker",
+      { go: false, r: [{ sb: "" }, { sb: "" }] },
+      { marketname: "TOSS", isActive: false },
+    ),
+    true,
+  );
 });
 
 test("provider settlement rows retain winner and exceptional result semantics", () => {
