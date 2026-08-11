@@ -3,7 +3,6 @@ const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
 const { supportedSportIds } = require("./competitionSync");
 const logger = require("../utils/logger");
-const { syncMarketDiscovery } = require("./marketDiscoverySync");
 const redis = require("../config/redis");
 const subscriptions = require("../services/marketSubscriptionService");
 const frontendSocket = require("../services/frontendSocketService");
@@ -176,7 +175,12 @@ async function syncEvents() {
   state.lastError = null;
   try {
     const sportIds = [...supportedSportIds()];
-    const responses = await Promise.all(sportIds.map((si) => provider.events({ si, today: 1 })));
+    const responseResults = await Promise.allSettled(
+      sportIds.map((si) => provider.events({ si, today: 1 })),
+    );
+    const responses = responseResults
+      .filter((result) => result.status === "fulfilled")
+      .map((result) => result.value);
     const received = responses.reduce(
       (total, response) =>
         total +
@@ -190,7 +194,6 @@ async function syncEvents() {
     const events = eventRows(responses);
     const persisted = await upsertEvents(events);
     const retired = await retireCompletedEvents(events);
-    const marketDiscovery = await syncMarketDiscovery(events.filter((event) => !event.gameOver));
     const result = {
       skipped: false,
       received,
@@ -198,7 +201,7 @@ async function syncEvents() {
       sportIds,
       ...persisted,
       retired,
-      marketDiscovery,
+      failedSports: responseResults.filter((item) => item.status === "rejected").length,
     };
     state.lastResult = result;
     state.lastCompletedAt = new Date().toISOString();

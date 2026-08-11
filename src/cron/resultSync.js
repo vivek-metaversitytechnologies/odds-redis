@@ -272,21 +272,22 @@ async function syncResults() {
     const all = [...candidates.markets, ...candidates.fancies];
     const batchSize = Math.max(1, Number(process.env.RESULT_BATCH_SIZE || 100));
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
-    const results = [];
-    let calls = 0;
-    for (let index = 0; index < all.length && calls < maxCalls; index += batchSize) {
-      const mids = all.slice(index, index + batchSize).map((market) => market.marketid);
-      const response = await provider.results({ mids });
-      calls += 1;
-      results.push(...responseRows(response));
+    const batches = [];
+    for (let index = 0; index < all.length && batches.length < maxCalls; index += batchSize) {
+      batches.push(all.slice(index, index + batchSize).map((market) => market.marketid));
     }
+    const responses = await Promise.allSettled(batches.map((mids) => provider.results({ mids })));
+    const results = responses.flatMap((response) =>
+      response.status === "fulfilled" ? responseRows(response.value) : [],
+    );
     const settled = await applyResults(results, candidates);
     const output = {
       skipped: false,
       candidates: all.length,
       regular: candidates.markets.length,
       fancies: candidates.fancies.length,
-      calls,
+      calls: batches.length,
+      failedCalls: responses.filter((response) => response.status === "rejected").length,
       results: results.length,
       settled: settled.length,
       settledMarketIds: settled,

@@ -68,24 +68,36 @@ async function syncMarketSubscriptions() {
       (id) => !socketSubscriptions.has(id) && !subscriptions.isMarketSuppressed(id),
     );
     const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+    const batches = [];
+    for (let index = 0; index < pending.length; index += batchSize) {
+      batches.push(pending.slice(index, index + batchSize));
+    }
+    batches.forEach((batch, index) => record("batch.started", { batch: index + 1, size: batch.length }));
+    const batchResults = await Promise.allSettled(
+      batches.map((batch) => subscriptions.subscribeMarkets(batch)),
+    );
     const accepted = [];
     const skipped = [];
-    for (let index = 0; index < pending.length; index += batchSize) {
-      const batch = pending.slice(index, index + batchSize);
-      record("batch.started", { batch: Math.floor(index / batchSize) + 1, size: batch.length });
-      const result = await subscriptions.subscribeMarkets(batch);
+    batchResults.forEach((outcome, index) => {
+      const batch = batches[index];
+      if (outcome.status === "rejected") {
+        skipped.push(...batch);
+        record("batch.failed", { batch: index + 1, size: batch.length, error: outcome.reason?.message });
+        return;
+      }
+      const result = outcome.value;
       const subscribedIds = Array.isArray(result.subscribed) ? result.subscribed : [];
       const skippedIds = Array.isArray(result.skipped) ? result.skipped : [];
       subscribedIds.forEach((id) => activeMarketIds.add(id));
       accepted.push(...subscribedIds);
       skipped.push(...skippedIds);
       record("batch.completed", {
-        batch: Math.floor(index / batchSize) + 1,
+        batch: index + 1,
         requested: batch.length,
         subscribed: subscribedIds.length,
         skipped: skippedIds.length,
       });
-    }
+    });
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
     const result = {
       skipped: false,

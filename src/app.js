@@ -12,6 +12,12 @@ const redisRoutes = require("./routes/redisRoutes");
 const redisController = require("./controllers/redisController");
 const { notFound, errorHandler } = require("./middleware/errorHandler");
 const adminAuth = require("./middleware/adminAuth");
+const { getCompetitionSyncStatus } = require("./cron/competitionSync");
+const { getEventSyncStatus } = require("./cron/eventSync");
+const { getMarketDiscoveryStatus } = require("./cron/marketDiscoverySync");
+const { getMarketSyncStatus } = require("./cron/marketSync");
+const { getResultSyncStatus } = require("./cron/resultSync");
+const { providerLimiter } = require("./services/providerApi");
 
 function createApp() {
   const app = express();
@@ -77,6 +83,14 @@ function createApp() {
         sourceDatabase: "connected",
         redis: redis.getRedisStatus(),
         websocket: websocket.getSocketStatus(),
+        pipelines: {
+          competition: getCompetitionSyncStatus(),
+          events: getEventSyncStatus(),
+          discovery: getMarketDiscoveryStatus(),
+          subscriptions: getMarketSyncStatus(),
+          results: getResultSyncStatus(),
+          providerQueue: providerLimiter.counts(),
+        },
       });
     } catch (error) {
       res.status(503).json({
@@ -84,6 +98,14 @@ function createApp() {
         sourceDatabase: "disconnected",
         redis: redis.getRedisStatus(),
         websocket: websocket.getSocketStatus(),
+        pipelines: {
+          competition: getCompetitionSyncStatus(),
+          events: getEventSyncStatus(),
+          discovery: getMarketDiscoveryStatus(),
+          subscriptions: getMarketSyncStatus(),
+          results: getResultSyncStatus(),
+          providerQueue: providerLimiter.counts(),
+        },
         message: error.message,
       });
     }
