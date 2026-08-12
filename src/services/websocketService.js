@@ -9,7 +9,7 @@ const { setBounded } = require("../utils/boundedMap");
 let socket;
 const eventWriteChains = new Map();
 const pendingEventTicks = new Map();
-const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 20, { min: 0, max: 250 });
+const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 10, { min: 0, max: 250 });
 let tickPublisher = () => {};
 let scorePublisher = () => {};
 let rawTickPublisher = () => {};
@@ -390,6 +390,7 @@ function getSocketStatus() {
     subscribedCount: subscribedMarketIds.size,
     pendingEventCount: pendingEventTicks.size,
     pendingTickCount: [...pendingEventTicks.values()].reduce((total, pending) => total + pending.items.size, 0),
+    activeEventWriteCount: eventWriteChains.size,
     tickCoalesceMs: TICK_COALESCE_MS,
   };
 }

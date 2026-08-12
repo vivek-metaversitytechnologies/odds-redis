@@ -6,7 +6,7 @@ const maxRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 15000, 
 const configuredMinTime = integer("PROVIDER_MIN_TIME_MS", 0, { min: 0 });
 const rateLimitMinTime = Math.ceil(60000 / maxRequestsPerMinute);
 const providerLimiter = new Bottleneck({
-  maxConcurrent: integer("PROVIDER_MAX_CONCURRENT", 10, { min: 1, max: 100 }),
+  maxConcurrent: integer("PROVIDER_MAX_CONCURRENT", 64, { min: 1, max: 100 }),
   minTime: Math.max(configuredMinTime, rateLimitMinTime),
 });
 

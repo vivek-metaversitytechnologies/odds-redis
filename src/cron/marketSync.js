@@ -67,7 +67,7 @@ async function syncMarketSubscriptions() {
     const pending = discovered.filter(
       (id) => !socketSubscriptions.has(id) && !subscriptions.isMarketSuppressed(id),
     );
-    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 100, { min: 1, max: 100 });
     const batches = [];
     for (let index = 0; index < pending.length; index += batchSize) {
       batches.push(pending.slice(index, index + batchSize));
