@@ -314,6 +314,7 @@ function fancyPayload(item, market) {
     .toUpperCase()
     .includes("-CC");
   const casinoRate = cricketCasino ? numberOr(runner.ra ?? item.ra) : null;
+  const difference = numberOr(item.d ?? item.di ?? item.srno ?? runner.d ?? runner.di ?? runner.srno);
   return {
     mid: String(item.mid),
     sid: String(runner.rid ?? item.mid),
@@ -326,7 +327,11 @@ function fancyPayload(item, market) {
     ls1: numberOr(runner.ls ?? runner.ls1 ?? item.lr ?? item.ls ?? item.ls1, cricketCasino ? null : 0),
     gstatus: status(runner.sb ?? item.sb),
     rem: runner.rem ?? item.rem ?? item.res ?? "",
-    srno: String(item.srno ?? item.di ?? runner.srno ?? ""),
+    // Khado's 8/29-style badge arrives as top-level `d`.
+    srno: difference == null ? "" : String(difference),
+    difference,
+    d: difference,
+    di: difference,
     gameover: booleanOr(item.go, false),
     s: booleanOr(item.s, true),
     maxBet: numberOr(market.maxbet),

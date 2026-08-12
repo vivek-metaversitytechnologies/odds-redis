@@ -977,9 +977,27 @@ test("top-level provider fancy fields map to frontend prices and sizes", () => {
   assert.equal(output.ls1, 120);
   assert.equal(output.rem, "Ball Running");
   assert.equal(output.srno, "6");
+  assert.equal(output.difference, 6);
+  assert.equal(output.d, 6);
+  assert.equal(output.di, 6);
   assert.equal(output.isActive, false);
   assert.equal(output.isShow, true);
   assert.equal(payloadGroup({ mid: "4.1-CC" }, {}), "CricketCasino");
+});
+
+test("Khado maps vendor d to the visible badge and bet payload fields", () => {
+  const eight = fancyPayload(
+    { mid: "4.1-KD", na: "6 Over Run Khado SKNP Adv", b: 45, br: 100, d: 8, s: true },
+    { marketname: "6 Over Run Khado SKNP Adv", markettype: "khado", isactive: 1 },
+  );
+  const twentyNine = fancyPayload(
+    { mid: "4.2-KD", na: "20 Over Run Khado SKNP Adv", b: 155, br: 100, d: 29, s: true },
+    { marketname: "20 Over Run Khado SKNP Adv", markettype: "khado", isactive: 1 },
+  );
+  assert.deepEqual(
+    [eight.srno, eight.difference, eight.d, eight.di, twentyNine.srno, twentyNine.difference],
+    ["8", 8, 8, 8, "29", 29],
+  );
 });
 
 test("cricket casino rate maps to the visible back price", () => {
