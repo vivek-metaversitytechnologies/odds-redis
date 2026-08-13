@@ -9,7 +9,9 @@ const { setBounded } = require("../utils/boundedMap");
 let socket;
 const eventWriteChains = new Map();
 const pendingEventTicks = new Map();
-const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 10, { min: 0, max: 250 });
+// Production favours latency over write coalescing. Set a positive value only when
+// Redis/network pressure makes batching more valuable than immediate delivery.
+const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 0, { min: 0, max: 250 });
 let tickPublisher = () => {};
 let scorePublisher = () => {};
 let rawTickPublisher = () => {};
@@ -129,7 +131,7 @@ function logShape(classification, value) {
 }
 
 function logRawSocketPayload(data) {
-  if (String(process.env.PROVIDER_LOG_SOCKET_PAYLOADS || "true").toLowerCase() !== "true") return;
+  if (String(process.env.PROVIDER_LOG_SOCKET_PAYLOADS || "false").toLowerCase() !== "true") return;
   rawSocketActivity.unshift({ timestamp: new Date().toISOString(), payload: data });
   rawSocketActivity.splice(500);
   writeProviderLog("provider.socket.raw", { payload: data });
@@ -150,7 +152,7 @@ function getRawSocketPayloads(marketId, limit = 20) {
 }
 
 function logSocketTiming(details) {
-  if (String(process.env.PROVIDER_LOG_SOCKET_TIMINGS || "true").toLowerCase() !== "true") return;
+  if (String(process.env.PROVIDER_LOG_SOCKET_TIMINGS || "false").toLowerCase() !== "true") return;
   writeProviderLog("provider.socket.timing", details);
 }
 

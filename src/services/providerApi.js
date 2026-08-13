@@ -2,11 +2,11 @@ const { writeProviderLog } = require("../utils/providerFileLogger");
 const Bottleneck = require("bottleneck");
 const { integer } = require("../config/env");
 
-const maxRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 15000, { min: 1 });
+const maxRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 30000, { min: 1 });
 const configuredMinTime = integer("PROVIDER_MIN_TIME_MS", 0, { min: 0 });
 const rateLimitMinTime = Math.ceil(60000 / maxRequestsPerMinute);
 const providerLimiter = new Bottleneck({
-  maxConcurrent: integer("PROVIDER_MAX_CONCURRENT", 64, { min: 1, max: 100 }),
+  maxConcurrent: integer("PROVIDER_MAX_CONCURRENT", 100, { min: 1, max: 100 }),
   minTime: Math.max(configuredMinTime, rateLimitMinTime),
 });
 

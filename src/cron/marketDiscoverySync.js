@@ -599,7 +599,10 @@ async function syncMarketDiscovery(events) {
   try {
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const eventIds = [...eventsById.keys()].map(Number);
-    const batchSize = 50;
+    // Smaller batches create more independent vendor calls, allowing the provider
+    // limiter to use the available CPU/network concurrency and reducing the amount
+    // of data delayed behind one slow response.
+    const batchSize = integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
     const discovered = [];
     const eventBatches = chunks(eventIds, batchSize);
 
@@ -647,7 +650,7 @@ async function syncMarketDiscovery(events) {
 
     // Second pass: fetch typed fallbacks needed for families the vendor can omit from
     // the unfiltered response. These no longer delay line-market deactivation.
-    const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 30000, { min: 5000 });
+    const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 5000, { min: 1000 });
     const fullDiscovery = Date.now() - lastFullDiscoveryAt >= fullIntervalMs;
     const typedSettled = fullDiscovery
       ? await Promise.allSettled(
@@ -814,7 +817,8 @@ async function syncLiveMarketCleanup() {
     const events = await fetchLiveEventsForMarketCleanup();
     if (!events.length) return { events: 0, inactive: 0, removed: 0 };
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
-    const eventBatches = chunks(events.map((event) => event.eventId), 50);
+    const eventBatchSize = integer("LIVE_MARKET_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
+    const eventBatches = chunks(events.map((event) => event.eventId), eventBatchSize);
     const settled = await Promise.allSettled(eventBatches.map((eids) => provider.markets({ eids })));
     const responses = settled.map((result) => (result.status === "fulfilled" ? result.value : null));
     const vendorMarkets = responses.flatMap((response) => marketRows(response, eventsById));
