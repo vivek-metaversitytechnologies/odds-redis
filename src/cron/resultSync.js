@@ -32,10 +32,15 @@ function responseRows(response) {
     .filter((item) => item.marketId && item.result != null);
 }
 
-function fancyResultValue(marketId, result) {
+function fancyResultValue(marketId, result, marketType) {
   const id = String(marketId).toUpperCase();
   if (id.includes("-OE") || id.includes("-F3")) return String(result).toLowerCase() === "back" ? 1 : 0;
-  if (id.includes("-F2") || id.includes("-BB") || id.includes("-CC")) {
+  if (
+    id.includes("-F2") ||
+    id.includes("-BB") ||
+    id.includes("-CC") ||
+    String(marketType).toLowerCase() === "line-market"
+  ) {
     const value = Number.parseInt(result, 10);
     return Number.isInteger(value) ? value : null;
   }
@@ -68,7 +73,7 @@ async function loadCandidates() {
     [true, ...sportIds, limit],
   );
   const [fancies] = await getSourcePool().query(
-    `SELECT f.fancyid AS marketid, f.name AS marketname, f.oddstype,
+    `SELECT f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
@@ -176,7 +181,7 @@ async function persistFancyResult(connection, fancy, result) {
     );
     return true;
   }
-  const value = fancyResultValue(fancy.marketid, result.result);
+  const value = fancyResultValue(fancy.marketid, result.result, fancy.mtype);
   if (value == null) {
     logger.warn("[ResultSync] invalid fancy result", { marketId: fancy.marketid, result: result.result });
     return false;

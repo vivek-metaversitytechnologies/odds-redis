@@ -50,6 +50,7 @@ const {
   inactiveLineMarkets,
   missingLineMarketIds,
   oddsType,
+  storedInFancyTable,
 } = require("../src/cron/marketDiscoverySync");
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
 const { integer, boolean, csvIntegers } = require("../src/config/env");
@@ -474,6 +475,9 @@ test("undocumented vendor families are classified instead of dropped", () => {
   assert.equal(FANCY_MARKET_TYPES.has("other-market"), true);
   assert.equal(FANCY_MARKET_TYPES.has("meter"), true);
   assert.equal(REGULAR_MARKET_TYPES.includes("line-market"), true);
+  assert.equal(storedInFancyTable({ marketType: "line-market" }), true);
+  assert.equal(storedInFancyTable({ marketType: "match-odd" }), false);
+  assert.equal(oddsType("1.261062382"), "LINE");
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
   const rows = marketRows(
     {
@@ -1079,6 +1083,7 @@ test("fancy settlement values follow the Java-compatible contract", () => {
   assert.equal(fancyResultValue("4.1-OE", "Back"), 1);
   assert.equal(fancyResultValue("4.1-OE", "Lay"), 0);
   assert.equal(fancyResultValue("4.1-F3", "back"), 1);
+  assert.equal(fancyResultValue("1.261062382", "15316", "line-market"), 15316);
   assert.equal(fancyResultValue("4.1-F2", "Abandoned"), null);
 });
 

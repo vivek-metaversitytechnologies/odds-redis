@@ -179,11 +179,17 @@ function oddsType(marketId) {
   if (id.includes("F3")) return "F3";
   if (id.includes("BB")) return "BB";
   if (id.includes("CC")) return "CC";
+  if (!id.includes("-") || id.startsWith("1.")) return "LINE";
   return "UNKNOWN";
 }
 
+function storedInFancyTable(market) {
+  return FANCY_MARKET_TYPES.has(market?.marketType) || market?.marketType === "line-market";
+}
+
 async function upsertFancies(fancies) {
-  if (!fancies.length) return { inserted: 0, updated: 0, fancyIds: [] };
+  if (!fancies.length)
+    return { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
   const connection = await getSourcePool().getConnection();
   let inserted = 0;
   let updated = 0;
@@ -191,57 +197,79 @@ async function upsertFancies(fancies) {
     await connection.beginTransaction();
     const ids = fancies.map((fancy) => fancy.marketId);
     const [existingRows] = await connection.query(
-      `SELECT fancyid FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      `SELECT fancyid,isactive FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
-    const existing = new Set(existingRows.map((row) => String(row.fancyid)));
+    const existing = new Map(
+      existingRows.map((row) => [String(row.fancyid), Number(row.isactive) === 1]),
+    );
     const writable = fancies.filter(
-      (fancy) => existing.has(fancy.marketId) || (fancy.isActive && !fancy.gameOver),
+      (fancy) =>
+        existing.has(fancy.marketId) ||
+        (fancy.isActive && !fancy.gameOver) ||
+        fancy.marketType === "line-market",
     );
     inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
     updated = writable.length - inserted;
     for (const batch of chunks(writable)) {
-      const values = batch.map((fancy) => [
-        fancy.marketId,
-        fancy.marketName,
-        oddsType(fancy.marketId),
-        "OPEN",
-        100000,
-        0,
-        100,
-        100000,
-        fancy.eventId,
-        false,
-        fancy.isActive && !fancy.gameOver,
-        fancy.marketType,
-        true,
-        true,
-        "",
-        fancy.displayMessage,
-        new Date(),
-        fancy.matchName,
-        fancy.sportId,
-        "RS",
-        1,
-        fancy.inPlay,
-        100000,
-      ]);
+      const values = batch.map((fancy) => {
+        const active = fancy.isActive && !fancy.gameOver;
+        return [
+          fancy.marketId,
+          fancy.marketName,
+          oddsType(fancy.marketId),
+          active ? "OPEN" : "SUSPENDED",
+          fancy.maxBet,
+          fancy.betDelay,
+          fancy.minBet,
+          fancy.maxBet,
+          fancy.eventId,
+          false,
+          active,
+          fancy.marketType,
+          active,
+          active,
+          "",
+          fancy.displayMessage,
+          new Date(),
+          fancy.matchName,
+          fancy.sportId,
+          "RS",
+          1,
+          fancy.inPlay,
+          fancy.maxBet,
+        ];
+      });
       await connection.query(
         `INSERT INTO t_matchfancy
           (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
            issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
            sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
          ON DUPLICATE KEY UPDATE name=VALUES(name),oddstype=VALUES(oddstype),eventid=VALUES(eventid),
-           isactive=VALUES(isactive),isshow=VALUES(isshow),is_show=VALUES(is_show),
+           status=VALUES(status),isactive=VALUES(isactive),isshow=VALUES(isshow),is_show=VALUES(is_show),
            matchname=VALUES(matchname),sportid=VALUES(sportid),mtype=VALUES(mtype),
-           remarks=VALUES(remarks),updatedon=NOW()`,
+           betdelay=VALUES(betdelay),minbet=VALUES(minbet),maxbet=VALUES(maxbet),
+           maxliabilityper_market=VALUES(maxliabilityper_market),
+           maxliabilityperbet=VALUES(maxliabilityperbet),remarks=VALUES(remarks),updatedon=NOW()`,
         [values],
       );
     }
     // Migrate only IDs positively identified as provider session markets in this response.
     await connection.query(`DELETE FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids);
     await connection.commit();
-    return { inserted, updated, fancyIds: ids };
+    return {
+      inserted,
+      updated,
+      fancyIds: ids,
+      deactivatedFancyIds: writable
+        .filter(
+          (fancy) =>
+            (!fancy.isActive || fancy.gameOver) &&
+            (existing.get(fancy.marketId) ||
+              (!existing.has(fancy.marketId) && fancy.marketType === "line-market")),
+        )
+        .map((fancy) => fancy.marketId),
+    };
   } catch (error) {
     await connection.rollback();
     throw error;
@@ -511,21 +539,22 @@ function inactiveLineMarkets(markets) {
 async function reconcileInactiveLineMarkets(markets) {
   const inactive = inactiveLineMarkets(markets);
   if (!inactive.length) return { checked: 0, deactivated: 0, removed: 0 };
-  const persisted = await upsertMarkets(inactive);
+  const persisted = await upsertFancies(inactive);
   redisStore.invalidateMarkets([
     ...inactive.map((market) => market.marketId),
-    ...persisted.deactivatedMarketIds,
+    ...persisted.fancyIds,
   ]);
   const redisDefinitions = await redisStore.reconcileRegularDefinitions(inactive);
-  if (persisted.deactivatedMarketIds.length) {
-    await unsubscribeEventMarkets(persisted.deactivatedMarketIds);
+  const deactivatedMarketIds = persisted.deactivatedFancyIds;
+  if (deactivatedMarketIds.length) {
+    await unsubscribeEventMarkets(deactivatedMarketIds);
   }
   await Promise.allSettled(
     (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
   );
   return {
     checked: inactive.length,
-    deactivated: persisted.deactivatedMarketIds.length,
+    deactivated: deactivatedMarketIds.length,
     removed: redisDefinitions.removed,
   };
 }
@@ -553,14 +582,15 @@ function missingLineMarketIds(storedMarkets, vendorMarkets, missCounts = missing
 async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {
   if (!eventIds.length) return { checked: 0, missing: 0, deactivated: 0, removed: 0 };
   const [rows] = await getSourcePool().query(
-    `SELECT marketid AS marketId, sportid AS sportId, eventid AS eventId,
-            marketname AS marketName, matchname AS matchName, opendate AS openDate,
-            inplay AS inPlay, betdelay AS betDelay, minbet AS minBet, maxbet AS maxBet,
-            display_message AS displayMessage, seriesid AS seriesId
-       FROM t_market
-      WHERE isactive=? AND eventid IN (${eventIds.map(() => "?").join(",")})
-        AND LOWER(marketname) LIKE ?`,
-    [true, ...eventIds, "%line%"],
+    `SELECT f.fancyid AS marketId, COALESCE(f.sportid,e.sportid) AS sportId,
+            f.eventid AS eventId, f.name AS marketName,
+            COALESCE(f.matchname,e.eventname) AS matchName, e.open_date AS openDate,
+            f.isplay AS inPlay, f.betdelay AS betDelay, f.minbet AS minBet,
+            f.maxbet AS maxBet, f.remarks AS displayMessage, e.seriesid AS seriesId
+       FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
+      WHERE f.isactive=? AND f.eventid IN (${eventIds.map(() => "?").join(",")})
+        AND f.mtype=?`,
+    [true, ...eventIds, "line-market"],
   );
   const stored = rows.map((row) => ({
     ...row,
@@ -621,10 +651,11 @@ async function syncMarketDiscovery(events) {
     // hydration are independent stages and must not prevent core markets from appearing.
     const primaryUnique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(primaryRows));
     const primaryRegular = primaryUnique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
-    const primaryFancies = primaryUnique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
+    const primaryStoredRegular = primaryUnique.filter((market) => !storedInFancyTable(market));
+    const primaryStoredFancies = primaryUnique.filter(storedInFancyTable);
     const [primaryPersisted, primaryFancyPersisted] = await Promise.all([
-      upsertMarkets(primaryRegular),
-      upsertFancies(primaryFancies),
+      upsertMarkets(primaryStoredRegular),
+      upsertFancies(primaryStoredFancies),
     ]);
     redisStore.invalidateMarkets([
       ...primaryPersisted.marketIds,
@@ -671,9 +702,10 @@ async function syncMarketDiscovery(events) {
       (market) => discoveryFingerprints.get(market.marketId) !== marketFingerprint(market),
     );
     const changedIds = new Set(changed.map((market) => market.marketId));
-    const persisted = await upsertMarkets(regularMarkets.filter((market) => changedIds.has(market.marketId)));
+    const changedMarkets = unique.filter((market) => changedIds.has(market.marketId));
+    const persisted = await upsertMarkets(changedMarkets.filter((market) => !storedInFancyTable(market)));
     redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
-    const fancyPersisted = await upsertFancies(fancies.filter((market) => changedIds.has(market.marketId)));
+    const fancyPersisted = await upsertFancies(changedMarkets.filter(storedInFancyTable));
     redisStore.invalidateMarkets(fancyPersisted.fancyIds);
     const changedFancies = fancies.filter((market) => changedIds.has(market.marketId));
     const redisDefinitions = await redisStore.reconcileFancyDefinitions(changedFancies);
@@ -832,8 +864,8 @@ async function syncLiveMarketCleanup() {
       return { events: events.length, inactive: 0, removed: missingLines.removed, missingLines };
     }
     const unique = [...new Map(inactive.map((market) => [market.marketId, market])).values()];
-    const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
-    const regular = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
+    const fancies = unique.filter(storedInFancyTable);
+    const regular = unique.filter((market) => !storedInFancyTable(market));
     const [regularResult, fancyResult] = await Promise.all([upsertMarkets(regular), upsertFancies(fancies)]);
     const removals = await Promise.all(
       unique.map((market) => redisStore.removeMarket(market.eventId, market.marketId)),
@@ -891,6 +923,7 @@ module.exports = {
   fallbackMarketName,
   mergeDiscoveredMarkets,
   oddsType,
+  storedInFancyTable,
   upsertMarkets,
   upsertFancies,
   fetchAndStoreRunners,
