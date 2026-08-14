@@ -111,12 +111,17 @@ function normalizeEventPayload(payload) {
     }
   }
   normalized.Fancy2 = normalized.Fancy2.filter((entry) => !/-MT$/i.test(entryMarketId(entry)));
-  for (const entry of normalized.Fancy3) {
-    if (!normalized.OtherMarket.some((item) => entryMarketId(item) === entryMarketId(entry))) {
-      normalized.OtherMarket.push(entry);
+  // Older builds stored vendor -F3 markets under OtherMarket. Keep genuine
+  // OtherMarket rows in place, but migrate -F3 rows into their API contract group.
+  const legacyFancy3 = normalized.OtherMarket.filter((entry) => /-F3$/i.test(entryMarketId(entry)));
+  for (const entry of legacyFancy3) {
+    if (!normalized.Fancy3.some((item) => entryMarketId(item) === entryMarketId(entry))) {
+      normalized.Fancy3.push(entry);
     }
   }
-  normalized.Fancy3 = [];
+  normalized.OtherMarket = normalized.OtherMarket.filter(
+    (entry) => !/-F3$/i.test(entryMarketId(entry)),
+  );
   return moveTiedMatchLast(normalized);
 }
 
@@ -357,7 +362,8 @@ function payloadGroup(item, market) {
   // so their persisted market name is the stable discriminator available on socket ticks.
   if (/\bline\b/.test(name)) return "LineMarket";
   if (id.includes("OE") || name.includes("odd even")) return "OddEven";
-  if (id.includes("F3") || name.includes("other market")) return "OtherMarket";
+  if (id.endsWith("-F3")) return "Fancy3";
+  if (name.includes("other market")) return "OtherMarket";
   if (id.includes("BB") || name.includes("ball by ball")) return "BallByBall";
   if (id.includes("-CC") || id.includes("CASINO") || name.includes("casino")) return "CricketCasino";
   if (marketType === "khado" || id.includes("KD") || name.includes("khado")) return "Khado";

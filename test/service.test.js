@@ -845,7 +845,7 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
   );
   assert.equal(payloadGroup({ mid: "4.1-F2" }, {}), "Fancy2");
   assert.equal(payloadGroup({ mid: "4.1-OE" }, {}), "OddEven");
-  assert.equal(payloadGroup({ mid: "4.1-F3" }, {}), "OtherMarket");
+  assert.equal(payloadGroup({ mid: "4.1-F3" }, {}), "Fancy3");
   assert.equal(payloadGroup({ mid: "4.1-KD" }, {}), "Khado");
   assert.equal(payloadGroup({ mid: "4.1-MT" }, {}), "Meter");
   assert.equal(payloadGroup({ mid: "4.1" }, { mtype: "meter" }), "Meter");
@@ -876,10 +876,13 @@ test("ball-by-ball socket ticks retain the numbered discovery name", () => {
   assert.equal(output.nation, "29 Ball Run SB");
 });
 
-test("legacy Fancy3 Redis rows migrate to OtherMarket", () => {
-  const payload = normalizeEventPayload({ Fancy3: [{ mid: "4.1-F3", nation: "Caught Out" }] });
-  assert.equal(payload.Fancy3.length, 0);
-  assert.equal(payload.OtherMarket[0].mid, "4.1-F3");
+test("legacy F3 Redis rows migrate from OtherMarket to Fancy3", () => {
+  const other = { mid: "4.2-OM", nation: "Genuine Other Market" };
+  const payload = normalizeEventPayload({
+    OtherMarket: [{ mid: "4.1-F3", nation: "Caught Out" }, other],
+  });
+  assert.equal(payload.Fancy3[0].mid, "4.1-F3");
+  assert.deepEqual(payload.OtherMarket, [other]);
 });
 
 test("legacy line markets migrate from Odds to their separate group", () => {
