@@ -7,6 +7,7 @@ const { startCompetitionSync, syncCompetitions } = require("./cron/competitionSy
 const { startEventSync, syncEvents } = require("./cron/eventSync");
 const { startMarketDiscoverySync } = require("./cron/marketDiscoverySync");
 const { startResultSync, syncResults } = require("./cron/resultSync");
+const { startRedisEventCleanup } = require("./cron/redisEventCleanup");
 const websocket = require("./services/websocketService");
 const subscriptions = require("./services/marketSubscriptionService");
 const frontendSocket = require("./services/frontendSocketService");
@@ -37,6 +38,7 @@ async function startServer() {
   const eventCronTask = startEventSync();
   const marketDiscoveryCronTask = startMarketDiscoverySync();
   const resultCronTask = startResultSync();
+  const redisEventCleanupCronTask = startRedisEventCleanup();
   if (cronConfig.competition.runOnStart) {
     syncCompetitions()
       .then(() => {
@@ -67,6 +69,7 @@ async function startServer() {
       eventCronTask.stop();
       marketDiscoveryCronTask.stop();
       resultCronTask.stop();
+      redisEventCleanupCronTask.stop();
       await subscriptions.stopSkippedRetries();
       websocket.setResultHandler(null);
       await frontendSocket.closeFrontendSocket();

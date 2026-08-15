@@ -19,6 +19,10 @@ module.exports = Object.freeze({
   liveMarketCleanup: Object.freeze({
     expression: process.env.LIVE_MARKET_CLEANUP_CRON || "* * * * * *",
   }),
+  redisEventCleanup: Object.freeze({
+    expression: process.env.REDIS_EVENT_CLEANUP_CRON || "0 */10 * * * *",
+    runOnStart: booleanEnv("RUN_REDIS_EVENT_CLEANUP_ON_START", false),
+  }),
   marketSubscription: Object.freeze({
     expression: process.env.MARKET_SYNC_CRON || "*/5 * * * * *",
     runOnStart: booleanEnv("RUN_MARKET_SYNC_ON_START"),

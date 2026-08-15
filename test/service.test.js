@@ -57,6 +57,7 @@ const { integer, boolean, csvIntegers } = require("../src/config/env");
 const { setBounded } = require("../src/utils/boundedMap");
 const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
+const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
 
 test("environment helpers reject invalid values and normalize lists", () => {
   const previous = {
@@ -90,6 +91,15 @@ test("bounded maps evict their oldest entry", () => {
       ["c", 3],
     ],
   );
+});
+
+test("Redis event cleanup extracts only numeric event IDs from configured key prefixes", () => {
+  const prefixes = ["Data-Rs:", "Score-Rs:"];
+  assert.equal(eventIdFromKey("Data-Rs:35913614", prefixes), "35913614");
+  assert.equal(eventIdFromKey("Score-Rs:35913614", prefixes), "35913614");
+  assert.equal(eventIdFromKey("Data-Rs:35913614:market", prefixes), null);
+  assert.equal(eventIdFromKey("Other:35913614", prefixes), null);
+  assert.equal(eventIdFromKey("Data-Rs:0", prefixes), null);
 });
 
 test("migration runner discovers ordered SQL files and produces stable checksums", () => {

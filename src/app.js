@@ -17,6 +17,7 @@ const { getEventSyncStatus } = require("./cron/eventSync");
 const { getMarketDiscoveryStatus } = require("./cron/marketDiscoverySync");
 const { getMarketSyncStatus } = require("./cron/marketSync");
 const { getResultSyncStatus } = require("./cron/resultSync");
+const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
 const { providerLimiter } = require("./services/providerApi");
 
 function createApp() {
@@ -89,6 +90,7 @@ function createApp() {
           discovery: getMarketDiscoveryStatus(),
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
+          redisEventCleanup: getRedisEventCleanupStatus(),
           providerQueue: providerLimiter.counts(),
         },
       });
@@ -104,6 +106,7 @@ function createApp() {
           discovery: getMarketDiscoveryStatus(),
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
+          redisEventCleanup: getRedisEventCleanupStatus(),
           providerQueue: providerLimiter.counts(),
         },
         message: error.message,
