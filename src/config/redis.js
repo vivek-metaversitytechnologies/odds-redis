@@ -457,7 +457,7 @@ async function reconcileFancyDefinitions(markets) {
     for (const { market, group } of definitions) {
       const marketId = String(market.marketId);
       const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
-      const active = market.isActive && !market.gameOver;
+      const active = market.gameOver !== true;
       if (active && index < 0) {
         payload[group].push(fancyDefinitionEntry(market));
         added += 1;
@@ -616,7 +616,7 @@ async function reconcileRegularDefinitions(markets) {
     }
     let changed = false;
     for (const market of definitions) {
-      const active = market.isActive && !market.gameOver;
+      const active = market.gameOver !== true;
       if (!active) {
         for (const group of PAYLOAD_GROUPS) {
           const filtered = payload[group].filter((entry) => entryMarketId(entry) !== String(market.marketId));
@@ -702,7 +702,9 @@ function shouldRemoveFromPayload(group, item, market) {
   if (isFullySuspendedToss(group, item, market)) return true;
   if (group === "Bookmaker") return booleanOr(item.go, false);
   if (group === "Odds") return false;
-  return booleanOr(item.go, false) || !booleanOr(item.s, true);
+  // Availability=false means suspended, not completed. Preserve the market and
+  // its suspended status until the provider confirms game over.
+  return booleanOr(item.go, false);
 }
 
 async function loadRunnerNames(marketId) {
