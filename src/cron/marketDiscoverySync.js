@@ -8,6 +8,7 @@ const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
 const { integer, csvIntegers } = require("../config/env");
+const { eventWindowSql } = require("../utils/eventWindow");
 const { setBounded } = require("../utils/boundedMap");
 const {
   FANCY_MARKET_TYPES,
@@ -22,7 +23,7 @@ let liveCleanupRunning = false;
 const runnerMisses = new Map();
 const missingLineMarketPasses = new Map();
 const discoveryFingerprints = new Map();
-let lastFullDiscoveryAt = 0;
+const lastFullDiscoveryAt = new Map();
 const state = {
   running: false,
   lastStartedAt: null,
@@ -188,8 +189,7 @@ function storedInFancyTable(market) {
 }
 
 async function upsertFancies(fancies) {
-  if (!fancies.length)
-    return { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
+  if (!fancies.length) return { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
   const connection = await getSourcePool().getConnection();
   let inserted = 0;
   let updated = 0;
@@ -200,9 +200,7 @@ async function upsertFancies(fancies) {
       `SELECT fancyid,isactive FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
-    const existing = new Map(
-      existingRows.map((row) => [String(row.fancyid), Number(row.isactive) === 1]),
-    );
+    const existing = new Map(existingRows.map((row) => [String(row.fancyid), Number(row.isactive) === 1]));
     const writable = fancies.filter(
       (fancy) =>
         existing.has(fancy.marketId) ||
@@ -540,10 +538,7 @@ async function reconcileInactiveLineMarkets(markets) {
   const inactive = inactiveLineMarkets(markets);
   if (!inactive.length) return { checked: 0, deactivated: 0, removed: 0 };
   const persisted = await upsertFancies(inactive);
-  redisStore.invalidateMarkets([
-    ...inactive.map((market) => market.marketId),
-    ...persisted.fancyIds,
-  ]);
+  redisStore.invalidateMarkets([...inactive.map((market) => market.marketId), ...persisted.fancyIds]);
   const redisDefinitions = await redisStore.reconcileRegularDefinitions(inactive);
   const deactivatedMarketIds = persisted.deactivatedFancyIds;
   if (deactivatedMarketIds.length) {
@@ -607,7 +602,12 @@ async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {
     .filter((market) => ids.has(market.marketId))
     .map((market) => ({ ...market, isActive: false }));
   if (!inactive.length) {
-    return { checked: stored.length, missing: [...missingLineMarketPasses.values()].filter(Boolean).length, deactivated: 0, removed: 0 };
+    return {
+      checked: stored.length,
+      missing: [...missingLineMarketPasses.values()].filter(Boolean).length,
+      deactivated: 0,
+      removed: 0,
+    };
   }
   const result = await reconcileInactiveLineMarkets(inactive);
   for (const market of inactive) {
@@ -617,7 +617,7 @@ async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {
   return { checked: stored.length, missing: inactive.length, ...result };
 }
 
-async function syncMarketDiscovery(events) {
+async function syncMarketDiscovery(events, lane = "active") {
   if (running) {
     rerunRequested = true;
     return { skipped: true, reason: "already-running", rerunQueued: true };
@@ -639,9 +639,7 @@ async function syncMarketDiscovery(events) {
     // First pass: one unfiltered request per event batch. Inactive line markets are
     // reconciled immediately instead of waiting for every fancy family and thousands
     // of database upserts in the full discovery pass.
-    const primarySettled = await Promise.allSettled(
-      eventBatches.map((eids) => provider.markets({ eids })),
-    );
+    const primarySettled = await Promise.allSettled(eventBatches.map((eids) => provider.markets({ eids })));
     const primaryResponses = primarySettled.map((result) =>
       result.status === "fulfilled" ? result.value : null,
     );
@@ -663,9 +661,7 @@ async function syncMarketDiscovery(events) {
       ...primaryFancyPersisted.fancyIds,
     ]);
     const primaryRunnerPromise = fetchAndStoreRunners(
-      primaryRegular
-        .filter((market) => market.isActive && !market.gameOver)
-        .map((market) => market.marketId),
+      primaryRegular.filter((market) => market.isActive && !market.gameOver).map((market) => market.marketId),
     );
     const fastLineReconciliation = await reconcileInactiveLineMarkets(primaryRows);
     // Reconcile only batches with a successful, structurally valid response. A timeout,
@@ -682,13 +678,11 @@ async function syncMarketDiscovery(events) {
     // Second pass: fetch typed fallbacks needed for families the vendor can omit from
     // the unfiltered response. These no longer delay line-market deactivation.
     const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 5000, { min: 1000 });
-    const fullDiscovery = Date.now() - lastFullDiscoveryAt >= fullIntervalMs;
+    const fullDiscovery = Date.now() - (lastFullDiscoveryAt.get(lane) || 0) >= fullIntervalMs;
     const typedSettled = fullDiscovery
       ? await Promise.allSettled(
           eventBatches.flatMap((eids) =>
-            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map((type) =>
-              provider.markets({ eids, type }),
-            ),
+            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map((type) => provider.markets({ eids, type })),
           ),
         )
       : [];
@@ -717,14 +711,10 @@ async function syncMarketDiscovery(events) {
     const primaryRunnerResult = await primaryRunnerPromise;
     const remainingRunnerResult = await fetchAndStoreRunners(activeRegularIds);
     const runnerResult = {
-      requestedMarkets:
-        primaryRunnerResult.requestedMarkets + remainingRunnerResult.requestedMarkets,
+      requestedMarkets: primaryRunnerResult.requestedMarkets + remainingRunnerResult.requestedMarkets,
       storedRunners: primaryRunnerResult.storedRunners + remainingRunnerResult.storedRunners,
       storedMarketIds: [
-        ...new Set([
-          ...primaryRunnerResult.storedMarketIds,
-          ...remainingRunnerResult.storedMarketIds,
-        ]),
+        ...new Set([...primaryRunnerResult.storedMarketIds, ...remainingRunnerResult.storedMarketIds]),
       ],
       failedMarkets: primaryRunnerResult.failedMarkets + remainingRunnerResult.failedMarkets,
     };
@@ -744,7 +734,10 @@ async function syncMarketDiscovery(events) {
     ];
     await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
     const tossDefinitions = await seedTossMarkets(regularMarkets);
-    const subscriptionResult = await syncMarketSubscriptions();
+    const subscriptionResult =
+      lane === "active"
+        ? await syncMarketSubscriptions("active")
+        : { total: 0, requested: 0, newlySubscribed: 0, providerSkipped: 0, activeMarketIds: [] };
     const subscription = {
       total: subscriptionResult.total,
       requested: subscriptionResult.requested,
@@ -757,9 +750,10 @@ async function syncMarketDiscovery(events) {
     const activeFancies = fancies.filter((fancy) => fancy.isActive && !fancy.gameOver).length;
     for (const market of unique)
       setBounded(discoveryFingerprints, market.marketId, marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
-    if (fullDiscovery) lastFullDiscoveryAt = Date.now();
+    if (fullDiscovery) lastFullDiscoveryAt.set(lane, Date.now());
     const result = {
       skipped: false,
+      lane,
       events: eventIds.length,
       markets: regularMarkets.length,
       fancies: activeFancies,
@@ -800,13 +794,14 @@ async function syncMarketDiscovery(events) {
   }
 }
 
-async function fetchActiveEventsForMarketDiscovery() {
+async function fetchActiveEventsForMarketDiscovery(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   if (!sportIds.length) return [];
   const [rows] = await getSourcePool().query(
     `SELECT eventid,eventname,sportid,seriesid,open_date,in_play
        FROM t_event
       WHERE isactive=? AND sportid IN (${sportIds.map(() => "?").join(",")})
+        AND ${eventWindowSql("t_event", lane)}
       ORDER BY eventid ASC`,
     [true, ...sportIds],
   );
@@ -852,7 +847,10 @@ async function syncLiveMarketCleanup() {
     if (!events.length) return { events: 0, inactive: 0, removed: 0 };
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const eventBatchSize = integer("LIVE_MARKET_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
-    const eventBatches = chunks(events.map((event) => event.eventId), eventBatchSize);
+    const eventBatches = chunks(
+      events.map((event) => event.eventId),
+      eventBatchSize,
+    );
     const settled = await Promise.allSettled(eventBatches.map((eids) => provider.markets({ eids })));
     const responses = settled.map((result) => (result.status === "fulfilled" ? result.value : null));
     const vendorMarkets = responses.flatMap((response) => marketRows(response, eventsById));
@@ -860,8 +858,7 @@ async function syncLiveMarketCleanup() {
       isMarketSnapshotResponse(responses[index]) ? eids : [],
     );
     const missingLines = await reconcileMissingLineMarkets(validEventIds, vendorMarkets);
-    const inactive = vendorMarkets
-      .filter((market) => !market.isActive || market.gameOver);
+    const inactive = vendorMarkets.filter((market) => !market.isActive || market.gameOver);
     if (!inactive.length) {
       return { events: events.length, inactive: 0, removed: missingLines.removed, missingLines };
     }
@@ -889,15 +886,18 @@ async function syncLiveMarketCleanup() {
   }
 }
 
-async function syncStoredEventMarkets() {
-  const events = await fetchActiveEventsForMarketDiscovery();
-  return syncMarketDiscovery(events);
+async function syncStoredEventMarkets(lane = "active") {
+  const events = await fetchActiveEventsForMarketDiscovery(lane);
+  return syncMarketDiscovery(events, lane);
 }
 
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
   const discoveryTask = cron.schedule(expression, () => {
-    if (!running) void syncStoredEventMarkets().catch(() => {});
+    if (!running) void syncStoredEventMarkets("active").catch(() => {});
+  });
+  const futureTask = cron.schedule(cronConfig.futureMarketDiscovery.expression, () => {
+    if (!running) void syncStoredEventMarkets("future").catch(() => {});
   });
   const cleanupTask = cron.schedule(cronConfig.liveMarketCleanup.expression, () => {
     void syncLiveMarketCleanup().catch((error) =>
@@ -906,8 +906,17 @@ function startMarketDiscoverySync() {
   });
   logger.info("[MarketDiscovery] scheduled", { expression });
   logger.info("[LiveMarketCleanup] scheduled", { expression: cronConfig.liveMarketCleanup.expression });
-  setImmediate(() => void syncStoredEventMarkets().catch(() => {}));
-  return { stop: () => { discoveryTask.stop(); cleanupTask.stop(); } };
+  logger.info("[MarketDiscovery] future lane scheduled", {
+    expression: cronConfig.futureMarketDiscovery.expression,
+  });
+  setImmediate(() => void syncStoredEventMarkets("active").catch(() => {}));
+  return {
+    stop: () => {
+      discoveryTask.stop();
+      futureTask.stop();
+      cleanupTask.stop();
+    },
+  };
 }
 
 function getMarketDiscoveryStatus() {

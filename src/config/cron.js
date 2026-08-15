@@ -16,6 +16,9 @@ module.exports = Object.freeze({
   marketDiscovery: Object.freeze({
     expression: process.env.MARKET_DISCOVERY_CRON || "*/5 * * * * *",
   }),
+  futureMarketDiscovery: Object.freeze({
+    expression: process.env.FUTURE_MARKET_DISCOVERY_CRON || "0 */10 * * * *",
+  }),
   liveMarketCleanup: Object.freeze({
     expression: process.env.LIVE_MARKET_CLEANUP_CRON || "* * * * * *",
   }),

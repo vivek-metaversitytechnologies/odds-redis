@@ -49,7 +49,7 @@ async function startServer() {
   // block cron initialization, otherwise a slow provider leaves every worker idle.
   if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "false").toLowerCase() === "true") {
     setImmediate(() => {
-      fetchActiveMarkets()
+      fetchActiveMarkets("active")
         .then((markets) =>
           subscriptions.reconcileProviderSubscriptions(
             markets.map((market) => market.marketid).filter(Boolean),

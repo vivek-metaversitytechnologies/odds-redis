@@ -6,6 +6,7 @@ const subscriptions = require("../services/marketSubscriptionService");
 const frontendSocket = require("../services/frontendSocketService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
+const { eventWindowSql } = require("../utils/eventWindow");
 
 let running = false;
 let exceptionalTableAvailable;
@@ -66,8 +67,9 @@ async function loadCandidates() {
   const limit = Math.max(1, Number(process.env.RESULT_MARKET_LIMIT || 2000));
   const [markets] = await getSourcePool().query(
     `SELECT m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
-     FROM t_market m
+     FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive=? AND m.sportid IN (${placeholders})
+       AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ORDER BY m.id DESC LIMIT ?`,
     [true, ...sportIds, limit],
@@ -78,6 +80,7 @@ async function loadCandidates() {
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
+       AND ${eventWindowSql("e", "active")}
        AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
      ORDER BY f.id DESC LIMIT ?`,

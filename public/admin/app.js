@@ -24,6 +24,12 @@ function toast(message) {
   node.classList.add("show");
   setTimeout(() => node.classList.remove("show"), 2800);
 }
+function bytes(value) {
+  const amount = Number(value) || 0;
+  if (amount < 1024) return `${amount} B`;
+  if (amount < 1024 ** 2) return `${(amount / 1024).toFixed(1)} KB`;
+  return `${(amount / 1024 ** 2).toFixed(1)} MB`;
+}
 function pipelineErrors(pipelines = {}) {
   const labels = {
     competition: "Competition sync",
@@ -79,6 +85,22 @@ async function refresh() {
     $("#subscriptionCount").textContent = ws.subscribedCount ?? 0;
     $("#eventCount").textContent = new Set((redis.items || []).map((item) => item.eventId)).size;
     $("#lastTick").textContent = relative(ws.lastTickAt);
+    const traffic = ws.traffic || {};
+    const providerQueue = health.pipelines?.providerQueue || {};
+    $("#ingestedRate").textContent = `${traffic.ingestedTicksPerSecond || 0}/s`;
+    $("#ingestedBytes").textContent = `${traffic.ingestedTicks || 0} ticks · ${bytes(traffic.ingestedBytes)}`;
+    $("#pendingTicks").textContent = ws.pendingTickCount || 0;
+    $("#pendingEvents").textContent = `${ws.pendingEventCount || 0} queued events`;
+    $("#processingEvents").textContent = ws.activeEventWriteCount || 0;
+    $("#persistedRate").textContent = `${traffic.persistedTicksPerSecond || 0}/s`;
+    $("#persistedBytes").textContent =
+      `${traffic.persistedTicks || 0} ticks · ${bytes(traffic.persistedBytes)}`;
+    $("#forwardedRate").textContent = `${traffic.forwardedEventsPerSecond || 0}/s`;
+    $("#forwardedBytes").textContent =
+      `${traffic.forwardedEvents || 0} events · ${bytes(traffic.forwardedBytes)}`;
+    $("#providerQueued").textContent = providerQueue.QUEUED || 0;
+    $("#providerRunning").textContent =
+      `${providerQueue.RUNNING || 0} running · ${providerQueue.EXECUTING || 0} executing`;
     $("#updatedAt").textContent = `Updated ${new Date().toLocaleTimeString()} · Refreshes every 15 seconds`;
   } catch (error) {
     $("#overallState").className = "dashboard-alert error";

@@ -1,1 +1,109 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Odds Admin · Overview</title><link rel="stylesheet" href="/admin/tailwind.css"></head><body class="admin-shell"><aside class="sidebar"><a class="sidebar-brand" href="/admin/"><span>SE</span><div><strong>Odds Admin</strong><small>Operations</small></div></a><nav><a class="active" href="/admin/"><span>01</span>Overview</a><a href="/admin/competitions/"><span>02</span>Competitions</a><a href="/admin/events/"><span>03</span>Events</a><a href="/admin/markets/"><span>04</span>Markets</a><a href="/admin/subscriptions/"><span>05</span>Subscriptions</a><a href="/admin/results/"><span>06</span>Results</a><a href="/admin/redis/"><span>07</span>Redis</a><a href="/admin/logs/"><span>08</span>Logs</a></nav><div class="sidebar-foot"><i id="sideStatus"></i><span id="sideStatusText">Checking services</span></div></aside><div class="admin-content"><header class="admin-header"><div><p>Provider operations</p><h1>Overview</h1></div><div class="header-actions"><label class="admin-key"><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"></label><button id="refresh" class="button primary">Refresh</button></div></header><main class="dashboard-main"><section id="overallState" class="dashboard-alert waiting"><span class="state-dot"></span><div><strong id="overallTitle">Checking system health</strong><p id="overallDetail">Connecting to MySQL, Redis and provider stream.</p></div></section><section class="dashboard-metrics overview-numbers"><article><span>Competitions</span><strong id="competitionCount">—</strong><small>Sports 1, 2 and 4</small></article><article><span>Events</span><strong id="providerEventCount">—</strong><small>Provider discovery</small></article><article><span>Active markets</span><strong id="marketCount">—</strong><small>Source database</small></article><article><span>Subscriptions</span><strong id="subscriptionCount">—</strong><small>Provider socket</small></article><article><span>Redis events</span><strong id="eventCount">—</strong><small>Frontend snapshots</small></article><article><span>Latest tick</span><strong id="lastTick">—</strong><small>Provider stream</small></article></section><p id="updatedAt" class="dashboard-updated">Not refreshed yet</p></main></div><div id="toast" class="toast"></div><script src="/admin/session.js" defer></script><script src="/admin/app.js" defer></script></body></html>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Odds Admin · Overview</title>
+    <link rel="stylesheet" href="/admin/tailwind.css" />
+  </head>
+  <body class="admin-shell">
+    <aside class="sidebar">
+      <a class="sidebar-brand" href="/admin/"
+        ><span>SE</span>
+        <div><strong>Odds Admin</strong><small>Operations</small></div></a
+      >
+      <nav>
+        <a class="active" href="/admin/"><span>01</span>Overview</a
+        ><a href="/admin/competitions/"><span>02</span>Competitions</a
+        ><a href="/admin/events/"><span>03</span>Events</a><a href="/admin/markets/"><span>04</span>Markets</a
+        ><a href="/admin/subscriptions/"><span>05</span>Subscriptions</a
+        ><a href="/admin/results/"><span>06</span>Results</a><a href="/admin/redis/"><span>07</span>Redis</a
+        ><a href="/admin/logs/"><span>08</span>Logs</a>
+      </nav>
+      <div class="sidebar-foot">
+        <i id="sideStatus"></i><span id="sideStatusText">Checking services</span>
+      </div>
+    </aside>
+    <div class="admin-content">
+      <header class="admin-header">
+        <div>
+          <p>Provider operations</p>
+          <h1>Overview</h1>
+        </div>
+        <div class="header-actions">
+          <label class="admin-key"
+            ><span>Admin key</span
+            ><input id="adminKey" type="password" autocomplete="off" placeholder="Optional" /></label
+          ><button id="refresh" class="button primary">Refresh</button>
+        </div>
+      </header>
+      <main class="dashboard-main">
+        <section id="overallState" class="dashboard-alert waiting">
+          <span class="state-dot"></span>
+          <div>
+            <strong id="overallTitle">Checking system health</strong>
+            <p id="overallDetail">Connecting to MySQL, Redis and provider stream.</p>
+          </div>
+        </section>
+        <section class="dashboard-metrics overview-numbers">
+          <article>
+            <span>Competitions</span><strong id="competitionCount">—</strong><small>Sports 1, 2 and 4</small>
+          </article>
+          <article>
+            <span>Events</span><strong id="providerEventCount">—</strong><small>Provider discovery</small>
+          </article>
+          <article>
+            <span>Active markets</span><strong id="marketCount">—</strong><small>Source database</small>
+          </article>
+          <article>
+            <span>Subscriptions</span><strong id="subscriptionCount">—</strong><small>Provider socket</small>
+          </article>
+          <article>
+            <span>Redis events</span><strong id="eventCount">—</strong><small>Frontend snapshots</small>
+          </article>
+          <article>
+            <span>Latest tick</span><strong id="lastTick">—</strong><small>Provider stream</small>
+          </article>
+        </section>
+        <section class="dashboard-card">
+          <div class="card-head">
+            <div>
+              <p class="section-label">Last 60 seconds</p>
+              <h2>Processing queues and traffic</h2>
+            </div>
+          </div>
+          <section class="dashboard-metrics overview-numbers">
+            <article>
+              <span>Ingested</span><strong id="ingestedRate">—</strong
+              ><small id="ingestedBytes">Provider ticks / bytes</small>
+            </article>
+            <article>
+              <span>Waiting</span><strong id="pendingTicks">—</strong
+              ><small id="pendingEvents">Queued ticks / events</small>
+            </article>
+            <article>
+              <span>Processing</span><strong id="processingEvents">—</strong
+              ><small>Active event writes</small>
+            </article>
+            <article>
+              <span>Persisted</span><strong id="persistedRate">—</strong
+              ><small id="persistedBytes">Redis ticks / bytes</small>
+            </article>
+            <article>
+              <span>Forwarded</span><strong id="forwardedRate">—</strong
+              ><small id="forwardedBytes">Frontend events / bytes</small>
+            </article>
+            <article>
+              <span>Provider HTTP queue</span><strong id="providerQueued">—</strong
+              ><small id="providerRunning">Queued / running requests</small>
+            </article>
+          </section>
+        </section>
+        <p id="updatedAt" class="dashboard-updated">Not refreshed yet</p>
+      </main>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script src="/admin/session.js" defer></script>
+    <script src="/admin/app.js" defer></script>
+  </body>
+</html>

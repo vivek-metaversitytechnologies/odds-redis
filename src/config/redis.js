@@ -77,7 +77,12 @@ function moveTiedMatchLast(payload) {
   const tied = [];
   const other = [];
   for (const market of payload.Odds) {
-    if (String(market?.Name ?? market?.name ?? "").trim().toLowerCase() === "tied match") tied.push(market);
+    if (
+      String(market?.Name ?? market?.name ?? "")
+        .trim()
+        .toLowerCase() === "tied match"
+    )
+      tied.push(market);
     else other.push(market);
   }
   payload.Odds = [...other, ...tied];
@@ -121,9 +126,7 @@ function normalizeEventPayload(payload) {
       normalized.Fancy3.push(entry);
     }
   }
-  normalized.OtherMarket = normalized.OtherMarket.filter(
-    (entry) => !/-F3$/i.test(entryMarketId(entry)),
-  );
+  normalized.OtherMarket = normalized.OtherMarket.filter((entry) => !/-F3$/i.test(entryMarketId(entry)));
   return moveTiedMatchLast(normalized);
 }
 
@@ -681,7 +684,9 @@ function entryMarketId(entry) {
 
 function isFullySuspendedToss(group, item, market = {}) {
   if (group !== "Bookmaker") return false;
-  const marketName = String(market.marketname ?? item.na ?? "").trim().toLowerCase();
+  const marketName = String(market.marketname ?? item.na ?? "")
+    .trim()
+    .toLowerCase();
   if (marketName !== "toss") return false;
   if (booleanOr(market.isactive ?? market.isActive, true) === false) return true;
   const runners = Array.isArray(item.r) ? item.r : [];
@@ -746,9 +751,7 @@ function preserveRunnerNames(entries, previousEntries) {
 }
 
 async function writeTicks(items) {
-  const candidates = (items || []).filter(
-    (item) => item && typeof item === "object" && item.eid && item.mid,
-  );
+  const candidates = (items || []).filter((item) => item && typeof item === "object" && item.eid && item.mid);
   if (!candidates.length) return { payload: false, accepted: [], rejected: candidates };
   const redis = await getRedisClient();
   if (!redis?.isOpen) return { payload: false, accepted: [], rejected: candidates };
@@ -807,7 +810,13 @@ async function writeTicks(items) {
   setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
   if (changed) eventPayloadRevisions.set(eventId, (eventPayloadRevisions.get(eventId) || 0) + 1);
   for (const { item } of acceptedRows) recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
-  return { payload, accepted: acceptedRows.map(({ item }) => item), rejected, changed };
+  return {
+    payload,
+    accepted: acceptedRows.map(({ item }) => item),
+    rejected,
+    changed,
+    persistedBytes: changed ? Buffer.byteLength(serialized) : 0,
+  };
 }
 
 async function writeTick(item) {

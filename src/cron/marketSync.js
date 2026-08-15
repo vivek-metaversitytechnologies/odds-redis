@@ -6,6 +6,7 @@ const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const { integer, csvIntegers } = require("../config/env");
+const { eventWindowSql } = require("../utils/eventWindow");
 
 const activeMarketIds = new Set();
 let running = false;
@@ -23,10 +24,12 @@ function record(type, details = {}) {
   syncState.recent = syncState.recent.slice(0, 50);
 }
 
-async function fetchActiveMarkets() {
+async function fetchActiveMarkets(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   const [rows] = await getSourcePool().query(
-    `SELECT m.* FROM t_market m WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
+    `SELECT m.* FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
+     WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
+       AND ${eventWindowSql("e", lane)}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ORDER BY sportid ASC, id DESC`,
     [true, ...sportIds],
@@ -37,6 +40,7 @@ async function fetchActiveMarkets() {
        e.open_date AS opendate, e.in_play AS inplay
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${sportIds.map(() => "?").join(",")})
+       AND ${eventWindowSql("e", lane)}
        AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
      ORDER BY sportid ASC, f.id DESC`,
@@ -45,7 +49,7 @@ async function fetchActiveMarkets() {
   return [...rows, ...fancyRows].map(Market.fromRow);
 }
 
-async function syncMarketSubscriptions() {
+async function syncMarketSubscriptions(lane = "active") {
   if (running) return { skipped: true, reason: "already-running" };
   running = true;
   syncState.running = true;
@@ -53,7 +57,7 @@ async function syncMarketSubscriptions() {
   syncState.lastError = null;
   record("sync.started");
   try {
-    const markets = await fetchActiveMarkets();
+    const markets = await fetchActiveMarkets(lane);
     record("source.loaded", { markets: markets.length });
     const discovered = [
       ...new Set(
@@ -101,6 +105,7 @@ async function syncMarketSubscriptions() {
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
     const result = {
       skipped: false,
+      lane,
       total: markets.length,
       requested: pending.length,
       newlySubscribed: accepted.length,

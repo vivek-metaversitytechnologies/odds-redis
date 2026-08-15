@@ -58,6 +58,7 @@ const { setBounded } = require("../src/utils/boundedMap");
 const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
+const { eventWindowSql } = require("../src/utils/eventWindow");
 
 test("environment helpers reject invalid values and normalize lists", () => {
   const previous = {
@@ -100,6 +101,14 @@ test("Redis event cleanup extracts only numeric event IDs from configured key pr
   assert.equal(eventIdFromKey("Data-Rs:35913614:market", prefixes), null);
   assert.equal(eventIdFromKey("Other:35913614", prefixes), null);
   assert.equal(eventIdFromKey("Data-Rs:0", prefixes), null);
+});
+
+test("event workload lanes use mutually exclusive start-time predicates", () => {
+  assert.match(eventWindowSql("e", "active"), /open_date <= DATE_ADD/);
+  assert.match(eventWindowSql("e", "active"), /in_play/);
+  assert.match(eventWindowSql("e", "future"), /open_date > DATE_ADD/);
+  assert.match(eventWindowSql("e", "future"), /in_play,0\)=0/);
+  assert.equal(eventWindowSql("e", "all"), "1=1");
 });
 
 test("migration runner discovers ordered SQL files and produces stable checksums", () => {
@@ -542,10 +551,7 @@ test("BM2 discovery fetches and stores runner metadata under its exact market ID
   assert.equal(bookmaker2BaseMarketId("1.260815092-BM2"), "1.260815092");
   assert.equal(bookmaker2BaseMarketId("4.1-BM"), null);
   assert.equal(runnerSourceMarketId("1.260815092-BM2"), "1.260815092-BM2");
-  assert.deepEqual(runnerLookupMarketIds(["1.260815092-BM2", "4.1-BM"]), [
-    "1.260815092-BM2",
-    "4.1-BM",
-  ]);
+  assert.deepEqual(runnerLookupMarketIds(["1.260815092-BM2", "4.1-BM"]), ["1.260815092-BM2", "4.1-BM"]);
   const seeded = regularDefinitionEntries(
     {
       marketId: "1.260815092-BM2",
@@ -1038,11 +1044,7 @@ test("unavailable fancy ticks are removed without treating them as result ticks"
 test("toss bookmaker markets are removed only after every runner is suspended", () => {
   const market = { marketname: "TOSS" };
   assert.equal(
-    isFullySuspendedToss(
-      "Bookmaker",
-      { r: [{ sb: "S" }, { status: "SUSPENDED" }] },
-      market,
-    ),
+    isFullySuspendedToss("Bookmaker", { r: [{ sb: "S" }, { status: "SUSPENDED" }] }, market),
     true,
   );
   assert.equal(

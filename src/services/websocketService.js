@@ -19,6 +19,7 @@ const loggedShapes = new Set();
 const rawSocketActivity = [];
 const subscribedMarketIds = new Set();
 const scoreHashes = new Map();
+const trafficBuckets = new Map();
 const SCORE_HASH_LIMIT = integer("SCORE_HASH_CACHE_LIMIT", 50000, { min: 1000 });
 const state = {
   connectionRequested: false,
@@ -39,6 +40,51 @@ const state = {
   lastTickAt: null,
   lastTickSummary: null,
 };
+
+function recordTraffic(values) {
+  const second = Math.floor(Date.now() / 1000);
+  const bucket = trafficBuckets.get(second) || {
+    ingestedTicks: 0,
+    ingestedBytes: 0,
+    persistedTicks: 0,
+    persistedBytes: 0,
+    forwardedEvents: 0,
+    forwardedBytes: 0,
+  };
+  for (const [key, value] of Object.entries(values)) bucket[key] = (bucket[key] || 0) + value;
+  trafficBuckets.set(second, bucket);
+  for (const key of trafficBuckets.keys()) if (key < second - 59) trafficBuckets.delete(key);
+}
+
+function trafficStatus() {
+  const second = Math.floor(Date.now() / 1000);
+  for (const key of trafficBuckets.keys()) if (key < second - 59) trafficBuckets.delete(key);
+  const totals = [...trafficBuckets.values()].reduce(
+    (sum, bucket) => {
+      for (const key of Object.keys(sum)) sum[key] += bucket[key] || 0;
+      return sum;
+    },
+    {
+      ingestedTicks: 0,
+      ingestedBytes: 0,
+      persistedTicks: 0,
+      persistedBytes: 0,
+      forwardedEvents: 0,
+      forwardedBytes: 0,
+    },
+  );
+  return {
+    windowSeconds: 60,
+    ...totals,
+    ingestedTicksPerSecond: Number((totals.ingestedTicks / 60).toFixed(2)),
+    persistedTicksPerSecond: Number((totals.persistedTicks / 60).toFixed(2)),
+    forwardedEventsPerSecond: Number((totals.forwardedEvents / 60).toFixed(2)),
+  };
+}
+
+function byteSize(value) {
+  return Buffer.byteLength(JSON.stringify(value) || "");
+}
 
 function summarize(item) {
   if (!item || typeof item !== "object") return { type: typeof item };
@@ -102,6 +148,8 @@ async function persistScores(scores, receivedAtMs = Date.now()) {
         return false;
       }
       state.scorePersistedCount += 1;
+      const payloadBytes = byteSize(payload);
+      recordTraffic({ persistedBytes: payloadBytes, forwardedEvents: 1, forwardedBytes: payloadBytes });
       scorePublisher(String(payload.eid), payload, receivedAtMs);
       return true;
     } catch (error) {
@@ -166,6 +214,8 @@ async function persist(items, receivedAtMs = Date.now()) {
     else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;
     if (result.payload && accepted.length) {
+      if (result.changed)
+        recordTraffic({ persistedTicks: accepted.length, persistedBytes: result.persistedBytes || 0 });
       const lastWriteCompletedAt = Date.now();
       for (const item of accepted) {
         const providerTimestamp = Number(item.t);
@@ -187,6 +237,10 @@ async function persist(items, receivedAtMs = Date.now()) {
         const eventId = String(accepted[0].eid);
         const emitStartedAt = Date.now();
         tickPublisher(eventId, result.payload);
+        recordTraffic({
+          forwardedEvents: 1,
+          forwardedBytes: byteSize(result.payload),
+        });
         logSocketTiming({
           eventId,
           marketId: String(accepted.at(-1).mid),
@@ -301,6 +355,10 @@ function connectSocket() {
     const messages = Array.isArray(data) ? data : [data];
     state.socketMessageCount += messages.length;
     const oddsTicks = collectOddsTicks(data);
+    recordTraffic({
+      ingestedTicks: oddsTicks.length,
+      ingestedBytes: byteSize(data),
+    });
     const scores = messages.flatMap(collectScores);
     if (scores.length || oddsTicks.length) logRawSocketPayload(data);
     if (scores.length) {
@@ -394,9 +452,13 @@ function getSocketStatus() {
     ...state,
     subscribedCount: subscribedMarketIds.size,
     pendingEventCount: pendingEventTicks.size,
-    pendingTickCount: [...pendingEventTicks.values()].reduce((total, pending) => total + pending.items.size, 0),
+    pendingTickCount: [...pendingEventTicks.values()].reduce(
+      (total, pending) => total + pending.items.size,
+      0,
+    ),
     activeEventWriteCount: eventWriteChains.size,
     tickCoalesceMs: TICK_COALESCE_MS,
+    traffic: trafficStatus(),
   };
 }
 

@@ -73,6 +73,13 @@ acknowledgement includes both the latest odds `snapshot` and latest `score`.
 
 Market discovery uses a fast primary pass on `MARKET_DISCOVERY_CRON` and a full typed-family
 pass every `MARKET_FULL_DISCOVERY_MS` (default: 30000). Unchanged definitions are not rewritten.
+Events already in play or starting within `ACTIVE_EVENT_LEAD_MINUTES` (60 by default) use the
+fast discovery and subscription lane. Later events use definition-only discovery every 10 minutes
+through `FUTURE_MARKET_DISCOVERY_CRON`; they are subscribed when they cross into the active window.
+
+The `/health` WebSocket section reports current queued ticks/events and active writes plus a rolling
+60-second traffic window for provider ingestion, Redis persistence, and frontend forwarding counts
+and bytes. The same figures appear on the admin overview.
 
 `REDIS_EVENT_CLEANUP_CRON` (every 10 minutes by default) scans event snapshot and score keys and
 removes events that are no longer active in `t_event`. The cleanup is fail-safe: a source database
