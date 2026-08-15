@@ -45,25 +45,24 @@ async function startServer() {
     syncEvents().catch(() => {});
   }
   const cronTask = startMarketSync();
-  // Provider reconciliation can take minutes for thousands of markets. It must not
-  // block cron initialization, otherwise a slow provider leaves every worker idle.
-  if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "false").toLowerCase() === "true") {
+  // Keep startup non-blocking, but serialize provider cleanup and subscription.
+  // Running these concurrently can unsubscribe IDs that the initial sync just added.
+  const reconcileOnStart =
+    String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "false").toLowerCase() === "true";
+  if (reconcileOnStart || cronConfig.marketSubscription.runOnStart) {
     setImmediate(() => {
-      fetchActiveMarkets("active")
-        .then((markets) =>
-          subscriptions.reconcileProviderSubscriptions(
+      void (async () => {
+        if (reconcileOnStart) {
+          const markets = await fetchActiveMarkets("active");
+          await subscriptions.reconcileProviderSubscriptions(
             markets.map((market) => market.marketid).filter(Boolean),
-          ),
-        )
-        .catch((error) =>
-          logger.error("Startup subscription reconciliation failed", { error: error.message }),
-        );
+          );
+        }
+        if (cronConfig.marketSubscription.runOnStart) await syncMarketSubscriptions("active");
+      })().catch((error) =>
+        logger.error("Initial market subscription reconciliation failed", { error: error.message }),
+      );
     });
-  }
-  if (cronConfig.marketSubscription.runOnStart) {
-    syncMarketSubscriptions().catch((error) =>
-      logger.error("Initial market sync failed", { error: error.message }),
-    );
   }
   if (cronConfig.result.runOnStart) {
     syncResults().catch((error) => logger.error("Initial result sync failed", { error: error.message }));

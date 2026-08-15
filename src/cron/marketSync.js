@@ -24,6 +24,15 @@ function record(type, details = {}) {
   syncState.recent = syncState.recent.slice(0, 50);
 }
 
+function subscriptionDiff(desiredIds, subscribedIds, isSuppressed = () => false) {
+  const desired = new Set((desiredIds || []).map(String));
+  const subscribed = new Set((subscribedIds || []).map(String));
+  return {
+    pending: [...desired].filter((id) => !subscribed.has(id) && !isSuppressed(id)),
+    stale: [...subscribed].filter((id) => !desired.has(id)),
+  };
+}
+
 async function fetchActiveMarkets(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   const [rows] = await getSourcePool().query(
@@ -67,9 +76,20 @@ async function syncMarketSubscriptions(lane = "active") {
           .map(String),
       ),
     ];
-    const socketSubscriptions = new Set(websocket.getSubscribedMarketIds());
-    const pending = discovered.filter(
-      (id) => !socketSubscriptions.has(id) && !subscriptions.isMarketSuppressed(id),
+    const currentSubscriptions = websocket.getSubscribedMarketIds();
+    const initialDiff = subscriptionDiff(discovered, currentSubscriptions, subscriptions.isMarketSuppressed);
+    let unsubscribed = [];
+    if (initialDiff.stale.length) {
+      const staleResult = await subscriptions.unsubscribeEventMarkets(initialDiff.stale);
+      unsubscribed = staleResult.unsubscribed || [];
+      record("stale.unsubscribed", { markets: unsubscribed.length });
+    }
+    // Recompute after stale registrations are removed. This invariant makes every
+    // active-lane cycle repair markets that discovery found but startup missed.
+    const { pending } = subscriptionDiff(
+      discovered,
+      websocket.getSubscribedMarketIds(),
+      subscriptions.isMarketSuppressed,
     );
     const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 100, { min: 1, max: 100 });
     const batches = [];
@@ -77,37 +97,39 @@ async function syncMarketSubscriptions(lane = "active") {
       batches.push(pending.slice(index, index + batchSize));
     }
     batches.forEach((batch, index) => record("batch.started", { batch: index + 1, size: batch.length }));
-    const batchResults = await Promise.allSettled(
-      batches.map((batch) => subscriptions.subscribeMarkets(batch)),
-    );
     const accepted = [];
     const skipped = [];
-    batchResults.forEach((outcome, index) => {
+    // Keep provider registration batches ordered. Concurrent subscribe requests can
+    // overwrite one another on providers that replace registration state per request.
+    for (let index = 0; index < batches.length; index += 1) {
       const batch = batches[index];
-      if (outcome.status === "rejected") {
+      try {
+        const result = await subscriptions.subscribeMarkets(batch);
+        const subscribedIds = Array.isArray(result.subscribed) ? result.subscribed : [];
+        const skippedIds = Array.isArray(result.skipped) ? result.skipped : [];
+        subscribedIds.forEach((id) => activeMarketIds.add(id));
+        accepted.push(...subscribedIds);
+        skipped.push(...skippedIds);
+        record("batch.completed", {
+          batch: index + 1,
+          requested: batch.length,
+          subscribed: subscribedIds.length,
+          skipped: skippedIds.length,
+        });
+      } catch (error) {
         skipped.push(...batch);
-        record("batch.failed", { batch: index + 1, size: batch.length, error: outcome.reason?.message });
-        return;
+        record("batch.failed", { batch: index + 1, size: batch.length, error: error.message });
       }
-      const result = outcome.value;
-      const subscribedIds = Array.isArray(result.subscribed) ? result.subscribed : [];
-      const skippedIds = Array.isArray(result.skipped) ? result.skipped : [];
-      subscribedIds.forEach((id) => activeMarketIds.add(id));
-      accepted.push(...subscribedIds);
-      skipped.push(...skippedIds);
-      record("batch.completed", {
-        batch: index + 1,
-        requested: batch.length,
-        subscribed: subscribedIds.length,
-        skipped: skippedIds.length,
-      });
-    });
+    }
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
     const result = {
       skipped: false,
       lane,
       total: markets.length,
+      desired: discovered.length,
       requested: pending.length,
+      stale: initialDiff.stale.length,
+      unsubscribed: unsubscribed.length,
       newlySubscribed: accepted.length,
       providerSkipped: skipped.length,
       activeMarketIds: currentActiveMarketIds,
@@ -161,6 +183,7 @@ function startMarketSync() {
 
 module.exports = {
   fetchActiveMarkets,
+  subscriptionDiff,
   syncMarketSubscriptions,
   startMarketSync,
   getMarketSyncStatus,

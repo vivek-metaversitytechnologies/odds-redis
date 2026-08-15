@@ -60,6 +60,7 @@ const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
 const { eventWindowSql } = require("../src/utils/eventWindow");
+const { subscriptionDiff } = require("../src/cron/marketSync");
 
 test("environment helpers reject invalid values and normalize lists", () => {
   const previous = {
@@ -122,6 +123,17 @@ test("event workload lanes use mutually exclusive start-time predicates", () => 
   assert.match(eventWindowSql("e", "future"), /open_date > DATE_ADD/);
   assert.match(eventWindowSql("e", "future"), /in_play,0\)=0/);
   assert.equal(eventWindowSql("e", "all"), "1=1");
+});
+
+test("active subscription reconciliation finds missing and stale market IDs", () => {
+  assert.deepEqual(subscriptionDiff(["current", "missing"], ["current", "stale"]), {
+    pending: ["missing"],
+    stale: ["stale"],
+  });
+  assert.deepEqual(subscriptionDiff(["settled"], [], (id) => id === "settled"), {
+    pending: [],
+    stale: [],
+  });
 });
 
 test("migration runner discovers ordered SQL files and produces stable checksums", () => {
