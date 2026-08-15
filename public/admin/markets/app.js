@@ -21,11 +21,16 @@ function toast(message) {
   setTimeout(() => node.classList.remove("show"), 2800);
 }
 
-function sport(id) { return ({ 1: "Football", 2: "Tennis", 4: "Cricket" })[Number(id)] || id || "—"; }
-function date(value) { return value ? new Date(value).toLocaleString() : "—"; }
+function sport(id) {
+  return { 1: "Football", 2: "Tennis", 4: "Cricket" }[Number(id)] || id || "—";
+}
+function date(value) {
+  return value ? new Date(value).toLocaleString() : "—";
+}
 function yes(value) {
-  return value === true || value === 1 || value === "1"
-    || (Array.isArray(value?.data) && value.data[0] === 1);
+  return (
+    value === true || value === 1 || value === "1" || (Array.isArray(value?.data) && value.data[0] === 1)
+  );
 }
 function limits(row) {
   const min = Number(row.minbet);
@@ -44,28 +49,54 @@ function cell(text, className) {
 function renderRegular(row) {
   const tr = document.createElement("tr");
   const name = cell("", "primary-cell");
-  const strong = document.createElement("strong"); strong.textContent = row.marketname || "Unnamed market"; name.appendChild(strong);
-  const marketId = cell(""); const code = document.createElement("code"); code.textContent = row.marketid; marketId.appendChild(code);
-  tr.append(name, marketId, cell(row.matchname || row.eventid), cell(`${sport(row.sportid)} · ${row.sportid}`),
-    cell(limits(row)), cell(Number(row.betdelay ?? 0)), statusCell(yes(row.isactive) && yes(row.status)));
+  const strong = document.createElement("strong");
+  strong.textContent = row.marketname || "Unnamed market";
+  name.appendChild(strong);
+  const marketId = cell("");
+  const code = document.createElement("code");
+  code.textContent = row.marketid;
+  marketId.appendChild(code);
+  tr.append(
+    name,
+    marketId,
+    cell(row.matchname || row.eventid),
+    cell(`${sport(row.sportid)} · ${row.sportid}`),
+    cell(limits(row)),
+    cell(Number(row.betdelay ?? 0)),
+    statusCell(yes(row.isactive) && yes(row.status)),
+  );
   return tr;
 }
 
 function renderFancy(row) {
   const tr = document.createElement("tr");
   const name = cell("", "primary-cell");
-  const strong = document.createElement("strong"); strong.textContent = row.name || "Unnamed session"; name.appendChild(strong);
-  const marketId = cell(""); const code = document.createElement("code"); code.textContent = row.fancyid; marketId.appendChild(code);
-  tr.append(name, marketId, cell(row.matchname || row.eventid), cell(`${sport(row.sportid)} · ${row.sportid}`),
-    cell(row.oddstype || "—"), cell(limits(row)), statusCell(yes(row.isactive) && yes(row.isshow)));
+  const strong = document.createElement("strong");
+  strong.textContent = row.name || "Unnamed session";
+  name.appendChild(strong);
+  const marketId = cell("");
+  const code = document.createElement("code");
+  code.textContent = row.fancyid;
+  marketId.appendChild(code);
+  tr.append(
+    name,
+    marketId,
+    cell(row.matchname || row.eventid),
+    cell(`${sport(row.sportid)} · ${row.sportid}`),
+    cell(row.oddstype || "—"),
+    cell(limits(row)),
+    statusCell(yes(row.isactive) && yes(row.isshow)),
+  );
   return tr;
 }
 
 function statusCell(active) {
-  const td = cell(""); const badge = document.createElement("span");
+  const td = cell("");
+  const badge = document.createElement("span");
   badge.className = `status-badge${active ? "" : " inactive"}`;
   badge.textContent = active ? "Active" : "Inactive";
-  td.appendChild(badge); return td;
+  td.appendChild(badge);
+  return td;
 }
 
 function render() {
@@ -84,25 +115,28 @@ function render() {
   $("#tableHead").innerHTML = isRegular
     ? "<tr><th>Market</th><th>Market ID</th><th>Event</th><th>Sport</th><th>Min – Max</th><th>Delay</th><th>State</th></tr>"
     : "<tr><th>Session</th><th>Fancy ID</th><th>Event</th><th>Sport</th><th>Odds type</th><th>Min – Max</th><th>State</th></tr>";
-  const body = $("#rows"); body.innerHTML = "";
+  const body = $("#rows");
+  body.innerHTML = "";
   if (!shown.length) body.innerHTML = '<tr><td colspan="7" class="empty-row">No markets found.</td></tr>';
   shown.forEach((row) => body.appendChild(isRegular ? renderRegular(row) : renderFancy(row)));
-  $("#summary").textContent = matches.length > 300
-    ? `Showing 300 of ${matches.length}; use search to narrow results`
-    : `${matches.length} of ${source.length} markets shown`;
+  $("#summary").textContent =
+    matches.length > 300
+      ? `Showing 300 of ${matches.length}; use search to narrow results`
+      : `${matches.length} of ${source.length} markets shown`;
 }
 
-function renderHealth(discovery, subscription) {
+function renderHealth(discovery = {}, subscription, requestErrors = []) {
   const alert = $("#discoveryHealth");
   alert.className = "dashboard-alert";
-  if (discovery.running) {
+  const errors = [discovery.lastError, ...requestErrors].filter(Boolean);
+  if (errors.length) {
+    alert.classList.add("error");
+    $("#discoveryTitle").textContent = "Market data needs attention";
+    $("#discoveryDetail").textContent = errors.join(" · ");
+  } else if (discovery.running) {
     alert.classList.add("warning");
     $("#discoveryTitle").textContent = "Market discovery is running";
     $("#discoveryDetail").textContent = "Markets, runners and subscriptions are being synchronized.";
-  } else if (discovery.lastError) {
-    alert.classList.add("error");
-    $("#discoveryTitle").textContent = "Last market discovery failed";
-    $("#discoveryDetail").textContent = discovery.lastError;
   } else if (discovery.lastCompletedAt) {
     alert.classList.add("healthy");
     $("#discoveryTitle").textContent = "Market discovery is healthy";
@@ -115,48 +149,82 @@ function renderHealth(discovery, subscription) {
   $("#syncStatus").textContent = discovery.lastCompletedAt
     ? `Last discovered ${date(discovery.lastCompletedAt)} · Runs after event sync`
     : "Waiting for first discovery";
-  const active = subscription?.lastResult?.activeMarketIds?.length
-    ?? discovery?.lastResult?.subscription?.active ?? 0;
+  const active =
+    subscription?.lastResult?.activeMarketIds?.length ?? discovery?.lastResult?.subscription?.active ?? 0;
   $("#subscriptionCount").textContent = Number(active).toLocaleString();
 }
 
 async function load() {
-  const button = $("#refresh"); button.disabled = true;
-  try {
-    const [regular, fancy, discovery, subscription] = await Promise.all([
-      request("/api/source/markets"), request("/api/source/fancies"),
-      request("/api/source/markets/discovery"), request("/api/source/sync"),
-    ]);
-    state.regular = regular; state.fancy = fancy;
-    $("#regularCount").textContent = regular.length.toLocaleString();
-    $("#fancyCount").textContent = fancy.length.toLocaleString();
-    $("#regularTabCount").textContent = regular.length.toLocaleString();
-    $("#fancyTabCount").textContent = fancy.length.toLocaleString();
-    renderHealth(discovery, subscription); render();
-  } catch (error) { toast(error.message); }
-  finally { button.disabled = false; }
+  const button = $("#refresh");
+  button.disabled = true;
+  const paths = [
+    "/api/source/markets",
+    "/api/source/fancies",
+    "/api/source/markets/discovery",
+    "/api/source/sync",
+  ];
+  const [regular, fancy, discovery, subscription] = await Promise.allSettled(paths.map(request));
+  const requestErrors = [];
+  if (regular.status === "fulfilled") state.regular = regular.value;
+  else requestErrors.push(`Regular markets: ${regular.reason.message}`);
+  if (fancy.status === "fulfilled") state.fancy = fancy.value;
+  else requestErrors.push(`Fancy markets: ${fancy.reason.message}`);
+  if (discovery.status === "rejected") requestErrors.push(`Discovery status: ${discovery.reason.message}`);
+  if (subscription.status === "rejected")
+    requestErrors.push(`Subscription status: ${subscription.reason.message}`);
+  $("#regularCount").textContent = state.regular.length.toLocaleString();
+  $("#fancyCount").textContent = state.fancy.length.toLocaleString();
+  $("#regularTabCount").textContent = state.regular.length.toLocaleString();
+  $("#fancyTabCount").textContent = state.fancy.length.toLocaleString();
+  renderHealth(
+    discovery.status === "fulfilled" ? discovery.value : {},
+    subscription.status === "fulfilled" ? subscription.value : {},
+    requestErrors,
+  );
+  render();
+  if (requestErrors.length) toast(requestErrors[0]);
+  button.disabled = false;
 }
 
 async function sync() {
-  const button = $("#syncNow"); button.disabled = true; button.textContent = "Discovering…";
+  const button = $("#syncNow");
+  button.disabled = true;
+  button.textContent = "Discovering…";
   try {
     const result = await request("/api/source/events/sync", { method: "POST" });
     const markets = result?.result?.marketDiscovery?.markets ?? result?.result?.markets ?? 0;
-    toast(`Discovery complete · ${markets} regular markets`); await load();
-  } catch (error) { toast(error.message); }
-  finally { button.disabled = false; button.textContent = "Run discovery"; }
+    toast(`Discovery complete · ${markets} regular markets`);
+    await load();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Run discovery";
+  }
 }
 
 $("#adminKey").value = sessionStorage.getItem("se-admin-key") || "";
 $("#refresh").addEventListener("click", load);
 $("#syncNow").addEventListener("click", sync);
 $("#search").addEventListener("input", render);
-document.querySelectorAll("[data-kind]").forEach((button) => button.addEventListener("click", () => {
-  document.querySelectorAll("[data-kind]").forEach((item) => { item.classList.remove("active"); item.setAttribute("aria-selected", "false"); });
-  button.classList.add("active"); button.setAttribute("aria-selected", "true"); state.kind = button.dataset.kind; render();
-}));
-document.querySelectorAll("[data-sport]").forEach((button) => button.addEventListener("click", () => {
-  document.querySelectorAll("[data-sport]").forEach((item) => item.classList.remove("active"));
-  button.classList.add("active"); state.sport = button.dataset.sport; render();
-}));
+document.querySelectorAll("[data-kind]").forEach((button) =>
+  button.addEventListener("click", () => {
+    document.querySelectorAll("[data-kind]").forEach((item) => {
+      item.classList.remove("active");
+      item.setAttribute("aria-selected", "false");
+    });
+    button.classList.add("active");
+    button.setAttribute("aria-selected", "true");
+    state.kind = button.dataset.kind;
+    render();
+  }),
+);
+document.querySelectorAll("[data-sport]").forEach((button) =>
+  button.addEventListener("click", () => {
+    document.querySelectorAll("[data-sport]").forEach((item) => item.classList.remove("active"));
+    button.classList.add("active");
+    state.sport = button.dataset.sport;
+    render();
+  }),
+);
 void load();
