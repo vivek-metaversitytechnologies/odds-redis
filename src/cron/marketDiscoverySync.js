@@ -43,12 +43,6 @@ function discoveryEventBatchSize(lane) {
   return integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
 }
 
-function marketIsCurrent(market) {
-  // isActive=false is also used for temporary suspension during live play.
-  // Results and event retirement provide the terminal lifecycle signals.
-  return market?.gameOver !== true;
-}
-
 function chunks(items, size = DB_WRITE_BATCH_SIZE) {
   const result = [];
   for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size));
@@ -163,8 +157,8 @@ function isMarketSnapshotResponse(response) {
 
 // The vendor can return contradictory states for the same market between the
 // unfiltered request and a typed request. Treat the responses as a union: a
-// market remains current when any response says it is not game over. Temporary
-// isActive=false availability must not override a non-terminal lifecycle state.
+// market remains active when any response says it is active. It is deactivated
+// only when every response containing that ID agrees that it is inactive.
 function mergeDiscoveredMarkets(markets) {
   const merged = new Map();
   for (const market of markets || []) {
@@ -173,14 +167,14 @@ function mergeDiscoveredMarkets(markets) {
       merged.set(market.marketId, market);
       continue;
     }
-    const currentLifecycle = marketIsCurrent(current);
-    const incomingLifecycle = marketIsCurrent(market);
+    const currentActive = current.isActive && !current.gameOver;
+    const incomingActive = market.isActive && !market.gameOver;
     const preferIncomingMetadata = current.marketType === "unknown" && market.marketType !== "unknown";
     const metadata = preferIncomingMetadata ? market : current;
     merged.set(market.marketId, {
       ...metadata,
-      isActive: current.isActive || market.isActive,
-      gameOver: !currentLifecycle && !incomingLifecycle,
+      isActive: currentActive || incomingActive,
+      gameOver: !currentActive && !incomingActive && (current.gameOver || market.gameOver),
     });
   }
   return [...merged.values()];
@@ -218,14 +212,14 @@ async function upsertFancies(fancies) {
     const writable = fancies.filter(
       (fancy) =>
         existing.has(fancy.marketId) ||
-        marketIsCurrent(fancy) ||
+        (fancy.isActive && !fancy.gameOver) ||
         fancy.marketType === "line-market",
     );
     inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
     updated = writable.length - inserted;
     for (const batch of chunks(writable)) {
       const values = batch.map((fancy) => {
-        const active = marketIsCurrent(fancy);
+        const active = fancy.isActive && !fancy.gameOver;
         return [
           fancy.marketId,
           fancy.marketName,
@@ -276,7 +270,7 @@ async function upsertFancies(fancies) {
       deactivatedFancyIds: writable
         .filter(
           (fancy) =>
-            !marketIsCurrent(fancy) &&
+            (!fancy.isActive || fancy.gameOver) &&
             (existing.get(fancy.marketId) ||
               (!existing.has(fancy.marketId) && fancy.marketType === "line-market")),
         )
@@ -305,12 +299,12 @@ async function upsertMarkets(markets) {
     );
     const existing = new Map(existingRows.map((row) => [String(row.marketid), Number(row.isactive) === 1]));
     const writable = markets.filter(
-      (market) => existing.has(market.marketId) || marketIsCurrent(market),
+      (market) => existing.has(market.marketId) || (market.isActive && !market.gameOver),
     );
     inserted = writable.filter((market) => !existing.has(market.marketId)).length;
     updated = writable.length - inserted;
     for (const market of writable) {
-      if (existing.get(market.marketId) && !marketIsCurrent(market)) {
+      if (existing.get(market.marketId) && (!market.isActive || market.gameOver)) {
         deactivatedMarketIds.push(market.marketId);
       }
     }
@@ -322,7 +316,7 @@ async function upsertMarkets(markets) {
         market.marketName,
         market.matchName,
         true,
-        marketIsCurrent(market),
+        market.isActive && !market.gameOver,
         new Date(),
         new Date(),
         market.openDate,
@@ -359,7 +353,7 @@ async function upsertMarkets(markets) {
       inserted,
       updated,
       marketIds: markets
-        .filter(marketIsCurrent)
+        .filter((market) => market.isActive && !market.gameOver)
         .map((market) => market.marketId),
       deactivatedMarketIds,
     };
@@ -543,7 +537,9 @@ async function seedTossMarkets(markets) {
 }
 
 function inactiveLineMarkets(markets) {
-  return (markets || []).filter((market) => market.marketType === "line-market" && !marketIsCurrent(market));
+  return (markets || []).filter(
+    (market) => market.marketType === "line-market" && (!market.isActive || market.gameOver),
+  );
 }
 
 async function reconcileInactiveLineMarkets(markets) {
@@ -672,7 +668,7 @@ async function syncMarketDiscovery(events, lane = "active") {
       ...primaryFancyPersisted.fancyIds,
     ]);
     const primaryRunnerPromise = fetchAndStoreRunners(
-      primaryRegular.filter(marketIsCurrent).map((market) => market.marketId),
+      primaryRegular.filter((market) => market.isActive && !market.gameOver).map((market) => market.marketId),
     );
     const fastLineReconciliation = await reconcileInactiveLineMarkets(primaryRows);
     // Reconcile only batches with a successful, structurally valid response. A timeout,
@@ -717,7 +713,7 @@ async function syncMarketDiscovery(events, lane = "active") {
     // The Redis reconciler only writes when the resulting payload actually differs.
     const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
     const activeRegularIds = regularMarkets
-      .filter(marketIsCurrent)
+      .filter((market) => market.isActive && !market.gameOver)
       .map((market) => market.marketId);
     const primaryRunnerResult = await primaryRunnerPromise;
     const remainingRunnerResult = await fetchAndStoreRunners(activeRegularIds);
@@ -758,7 +754,7 @@ async function syncMarketDiscovery(events, lane = "active") {
         ? subscriptionResult.activeMarketIds.length
         : 0,
     };
-    const activeFancies = fancies.filter(marketIsCurrent).length;
+    const activeFancies = fancies.filter((fancy) => fancy.isActive && !fancy.gameOver).length;
     for (const market of unique)
       setBounded(discoveryFingerprints, market.marketId, marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
     if (fullDiscovery) lastFullDiscoveryAt.set(lane, Date.now());
@@ -871,7 +867,7 @@ async function syncLiveMarketCleanup() {
       isMarketSnapshotResponse(responses[index]) ? eids : [],
     );
     const missingLines = await reconcileMissingLineMarkets(validEventIds, vendorMarkets);
-    const inactive = vendorMarkets.filter((market) => !marketIsCurrent(market));
+    const inactive = vendorMarkets.filter((market) => !market.isActive || market.gameOver);
     if (!inactive.length) {
       return { events: events.length, inactive: 0, removed: missingLines.removed, missingLines };
     }
@@ -959,7 +955,6 @@ module.exports = {
   seedTossMarkets,
   inactiveLineMarkets,
   missingLineMarketIds,
-  marketIsCurrent,
   discoveryEventBatchSize,
   reconcileMissingLineMarkets,
   fetchActiveEventsForMarketDiscovery,

@@ -49,7 +49,6 @@ const {
   enforceBookmaker2Eligibility,
   inactiveLineMarkets,
   missingLineMarketIds,
-  marketIsCurrent,
   discoveryEventBatchSize,
   oddsType,
   storedInFancyTable,
@@ -388,7 +387,7 @@ test("explicitly inactive line markets remain in discovery for deactivation", ()
   assert.equal(rows[0].betDelay, 5);
 });
 
-test("only game-over line markets are selected for immediate reconciliation", () => {
+test("inactive line markets are selected for immediate reconciliation", () => {
   const rows = inactiveLineMarkets([
     { marketId: "1.1", marketType: "line-market", isActive: true, gameOver: false },
     { marketId: "1.2", marketType: "line-market", isActive: false, gameOver: false },
@@ -397,10 +396,8 @@ test("only game-over line markets are selected for immediate reconciliation", ()
   ]);
   assert.deepEqual(
     rows.map((row) => row.marketId),
-    ["1.3"],
+    ["1.2", "1.3"],
   );
-  assert.equal(marketIsCurrent({ isActive: false, gameOver: false }), true);
-  assert.equal(marketIsCurrent({ isActive: true, gameOver: true }), false);
 });
 
 test("session market suffixes map to Java fancy odds types", () => {
@@ -646,7 +643,7 @@ test("active vendor discovery wins over contradictory typed inactive records", (
   assert.equal(rows[0].gameOver, false);
 });
 
-test("a non-game-over response wins over a contradictory completed response", () => {
+test("vendor discovery deactivates a market when every response agrees", () => {
   const base = {
     marketId: "4.1-F2",
     eventId: 10,
@@ -659,7 +656,7 @@ test("a non-game-over response wins over a contradictory completed response", ()
     { ...base, isActive: false, gameOver: true },
   ]);
   assert.equal(row.isActive, false);
-  assert.equal(row.gameOver, false);
+  assert.equal(row.gameOver, true);
 });
 
 test("missing line markets require consecutive authoritative discovery passes", () => {
@@ -1051,10 +1048,9 @@ test("cricket casino rate maps to the visible back price", () => {
   assert.equal(output.ls1, null);
 });
 
-test("unavailable fancy ticks remain suspended until game over", () => {
-  assert.equal(shouldRemoveFromPayload("Fancy2", { s: false, go: false }), false);
+test("unavailable fancy ticks are removed without treating them as result ticks", () => {
+  assert.equal(shouldRemoveFromPayload("Fancy2", { s: false, go: false }), true);
   assert.equal(shouldRemoveFromPayload("Fancy2", { s: true, go: false }), false);
-  assert.equal(shouldRemoveFromPayload("Fancy2", { s: false, go: true }), true);
   assert.equal(isResultTick({ mid: "4.1-F2", s: false, go: false }), false);
 });
 
