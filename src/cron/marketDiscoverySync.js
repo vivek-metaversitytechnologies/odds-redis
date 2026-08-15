@@ -707,8 +707,10 @@ async function syncMarketDiscovery(events) {
     redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
     const fancyPersisted = await upsertFancies(changedMarkets.filter(storedInFancyTable));
     redisStore.invalidateMarkets(fancyPersisted.fancyIds);
-    const changedFancies = fancies.filter((market) => changedIds.has(market.marketId));
-    const redisDefinitions = await redisStore.reconcileFancyDefinitions(changedFancies);
+    // Reconcile every discovered fancy against Redis. Restricting this to changed
+    // fingerprints cannot restore a definition after external eviction or expiry.
+    // The Redis reconciler only writes when the resulting payload actually differs.
+    const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
     const activeRegularIds = regularMarkets
       .filter((market) => market.isActive && !market.gameOver)
       .map((market) => market.marketId);

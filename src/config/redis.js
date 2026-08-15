@@ -15,6 +15,8 @@ const eventPayloadCache = new Map();
 const eventPayloadRevisions = new Map();
 const tickActivity = new Map();
 const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
+const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 });
+const SCORE_TTL_SECONDS = integer("REDIS_SCORE_TTL_SECONDS", 86400, { min: 60 });
 
 const PAYLOAD_GROUPS = [
   "Odds",
@@ -45,7 +47,7 @@ async function writeScore(score) {
   const redis = await getRedisClient();
   if (!redis?.isOpen) return null;
   const payload = { ...score, eid: Number(eventId), data: html, receivedAt: new Date().toISOString() };
-  await redis.set(scoreKey(eventId), JSON.stringify(payload));
+  await redis.set(scoreKey(eventId), JSON.stringify(payload), { EX: SCORE_TTL_SECONDS });
   return payload;
 }
 
@@ -458,8 +460,11 @@ async function reconcileFancyDefinitions(markets) {
         added += 1;
         changed = true;
       } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
-        payload[group][index] = fancyDefinitionEntry(market);
-        changed = true;
+        const definition = fancyDefinitionEntry(market);
+        if (JSON.stringify(payload[group][index]) !== JSON.stringify(definition)) {
+          payload[group][index] = definition;
+          changed = true;
+        }
       } else if (
         active &&
         index >= 0 &&
@@ -483,7 +488,7 @@ async function reconcileFancyDefinitions(markets) {
   }
   if (writes.length) {
     const transaction = redis.multi();
-    for (const [key, value] of writes) transaction.set(key, value);
+    for (const [key, value] of writes) transaction.set(key, value, { EX: EVENT_TTL_SECONDS });
     await transaction.exec();
   }
   return { events: byEvent.size, added, removed, changedEventIds };
@@ -664,7 +669,7 @@ async function reconcileRegularDefinitions(markets) {
   }
   if (writes.length) {
     const transaction = redis.multi();
-    for (const [key, value] of writes) transaction.set(key, value);
+    for (const [key, value] of writes) transaction.set(key, value, { EX: EVENT_TTL_SECONDS });
     await transaction.exec();
   }
   return { events: byEvent.size, added, removed, changedEventIds };
@@ -777,6 +782,7 @@ async function writeTicks(items) {
       }
     }
   }
+  const previousSerialized = JSON.stringify(payload);
   await Promise.allSettled(
     acceptedRows
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
@@ -795,11 +801,13 @@ async function writeTicks(items) {
     if (!shouldRemoveFromPayload(group, item, market)) payload[group].push(...entries);
   }
   moveTiedMatchLast(payload);
-  await redis.set(key, JSON.stringify(payload));
+  const serialized = JSON.stringify(payload);
+  const changed = serialized !== previousSerialized;
+  if (changed) await redis.set(key, serialized, { EX: EVENT_TTL_SECONDS });
   setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
-  eventPayloadRevisions.set(eventId, (eventPayloadRevisions.get(eventId) || 0) + 1);
+  if (changed) eventPayloadRevisions.set(eventId, (eventPayloadRevisions.get(eventId) || 0) + 1);
   for (const { item } of acceptedRows) recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
-  return { payload, accepted: acceptedRows.map(({ item }) => item), rejected };
+  return { payload, accepted: acceptedRows.map(({ item }) => item), rejected, changed };
 }
 
 async function writeTick(item) {
@@ -949,7 +957,7 @@ async function removeMarket(eventId, marketId) {
     payload[group] = filtered;
   }
   if (!removed) return false;
-  await redis.set(key, JSON.stringify(payload));
+  await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
   setBounded(eventPayloadCache, eventKey, payload, CACHE_LIMIT);
   return true;
 }

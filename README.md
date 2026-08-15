@@ -38,6 +38,7 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - Subscribe new market IDs in bounded HTTP batches.
 - Connect to the provider Socket.IO endpoint and replay subscriptions after a reconnect.
 - Serialize incoming writes to preserve tick order and avoid unbounded Redis work.
+- Coalesce event ticks for 100 ms by default and skip identical Redis writes and frontend emissions.
 - Store the grouped frontend payload at `Data-Rs:<eid>`.
 - Convert bookmaker runner payloads using market metadata before storing them.
 - Publish the complete Redis-backed event payload to subscribed frontends after each persisted update.
@@ -76,6 +77,8 @@ pass every `MARKET_FULL_DISCOVERY_MS` (default: 30000). Unchanged definitions ar
 `REDIS_EVENT_CLEANUP_CRON` (every 10 minutes by default) scans event snapshot and score keys and
 removes events that are no longer active in `t_event`. The cleanup is fail-safe: a source database
 query failure aborts the run before any Redis keys are deleted.
+Event snapshots and scorecards also use sliding 24-hour TTLs by default; configure them with
+`REDIS_EVENT_TTL_SECONDS` and `REDIS_SCORE_TTL_SECONDS`.
 Empty runner responses are cached for `RUNNER_MISS_CACHE_MS` (default: 300000).
 
 Apply all pending database migrations using the service environment:

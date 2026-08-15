@@ -9,9 +9,8 @@ const { setBounded } = require("../utils/boundedMap");
 let socket;
 const eventWriteChains = new Map();
 const pendingEventTicks = new Map();
-// Production favours latency over write coalescing. Set a positive value only when
-// Redis/network pressure makes batching more valuable than immediate delivery.
-const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 0, { min: 0, max: 250 });
+// Coalesce each event within a short fixed window. Result ticks bypass the delay.
+const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 100, { min: 0, max: 250 });
 let tickPublisher = () => {};
 let scorePublisher = () => {};
 let rawTickPublisher = () => {};
@@ -35,6 +34,7 @@ const state = {
   scoreUnchangedCount: 0,
   unknownMessageCount: 0,
   persistedTickCount: 0,
+  unchangedTickCount: 0,
   failedTickCount: 0,
   lastTickAt: null,
   lastTickSummary: null,
@@ -162,7 +162,8 @@ async function persist(items, receivedAtMs = Date.now()) {
   try {
     const result = await redisStore.writeTicks(items);
     const accepted = result.accepted || [];
-    state.persistedTickCount += accepted.length;
+    if (result.changed) state.persistedTickCount += accepted.length;
+    else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;
     if (result.payload && accepted.length) {
       const lastWriteCompletedAt = Date.now();
@@ -182,18 +183,20 @@ async function persist(items, receivedAtMs = Date.now()) {
         });
         if (isResultTick(item)) resultedMarketIds.add(String(item.mid));
       }
-      const eventId = String(accepted[0].eid);
-      const emitStartedAt = Date.now();
-      tickPublisher(eventId, result.payload);
-      logSocketTiming({
-        eventId,
-        marketId: String(accepted.at(-1).mid),
-        stage: "frontend.emit",
-        backendProcessingMs: emitStartedAt - receivedAtMs,
-        postRedisToEmitMs: emitStartedAt - lastWriteCompletedAt,
-        emitCallMs: Date.now() - emitStartedAt,
-        batchMarkets: accepted.length,
-      });
+      if (result.changed) {
+        const eventId = String(accepted[0].eid);
+        const emitStartedAt = Date.now();
+        tickPublisher(eventId, result.payload);
+        logSocketTiming({
+          eventId,
+          marketId: String(accepted.at(-1).mid),
+          stage: "frontend.emit",
+          backendProcessingMs: emitStartedAt - receivedAtMs,
+          postRedisToEmitMs: emitStartedAt - lastWriteCompletedAt,
+          emitCallMs: Date.now() - emitStartedAt,
+          batchMarkets: accepted.length,
+        });
+      }
     }
   } catch (error) {
     state.failedTickCount += items.length;
