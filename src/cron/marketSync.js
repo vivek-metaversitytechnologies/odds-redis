@@ -78,20 +78,10 @@ async function syncMarketSubscriptions(lane = "active") {
     ];
     const currentSubscriptions = websocket.getSubscribedMarketIds();
     const initialDiff = subscriptionDiff(discovered, currentSubscriptions, subscriptions.isMarketSuppressed);
-    let unsubscribed = [];
-    if (initialDiff.stale.length) {
-      const staleResult = await subscriptions.unsubscribeEventMarkets(initialDiff.stale);
-      unsubscribed = staleResult.unsubscribed || [];
-      record("stale.unsubscribed", { markets: unsubscribed.length });
-    }
-    // Recompute after stale registrations are removed. This invariant makes every
-    // active-lane cycle repair markets that discovery found but startup missed.
-    const { pending } = subscriptionDiff(
-      discovered,
-      websocket.getSubscribedMarketIds(),
-      subscriptions.isMarketSuppressed,
-    );
-    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 100, { min: 1, max: 100 });
+    // Subscribe missing live markets before doing slow stale cleanup. Provider calls
+    // are kept sequential, but new markets no longer wait for an unsubscribe round trip.
+    const pending = initialDiff.pending;
+    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
     const batches = [];
     for (let index = 0; index < pending.length; index += batchSize) {
       batches.push(pending.slice(index, index + batchSize));
@@ -120,6 +110,12 @@ async function syncMarketSubscriptions(lane = "active") {
         skipped.push(...batch);
         record("batch.failed", { batch: index + 1, size: batch.length, error: error.message });
       }
+    }
+    let unsubscribed = [];
+    if (initialDiff.stale.length) {
+      const staleResult = await subscriptions.unsubscribeEventMarkets(initialDiff.stale);
+      unsubscribed = staleResult.unsubscribed || [];
+      record("stale.unsubscribed", { markets: unsubscribed.length });
     }
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
     const result = {

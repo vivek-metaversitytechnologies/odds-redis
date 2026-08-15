@@ -46,7 +46,7 @@ function loggedPayload(value) {
   return { truncated: true, originalCharacters: serialized.length, preview: serialized.slice(0, maxLength) };
 }
 
-async function request(path, { method = "GET", query, body, retries = 2 } = {}) {
+async function request(path, { method = "GET", query, body, retries = 2, priority = 5 } = {}) {
   const url = providerUrl(path, query);
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const startedAt = Date.now();
@@ -59,7 +59,7 @@ async function request(path, { method = "GET", query, body, retries = 2 } = {}) 
         attempt: attempt + 1,
       };
       writeProviderLog("provider.request", requestLog);
-      const response = await providerLimiter.schedule(async () => {
+      const response = await providerLimiter.schedule({ priority }, async () => {
         const controller = new AbortController();
         const timer = setTimeout(
           () => controller.abort(),
@@ -126,7 +126,9 @@ async function request(path, { method = "GET", query, body, retries = 2 } = {}) 
 
 function postIds(path, ids) {
   if (!Array.isArray(ids) || !ids.length) return null;
-  return request(path, { method: "POST", body: { data: ids } });
+  // Subscription control is latency-sensitive and must not sit behind the much
+  // larger discovery queue. Bottleneck priority 1 runs before default priority 5.
+  return request(path, { method: "POST", body: { data: ids }, priority: 1 });
 }
 
 module.exports = {

@@ -21,6 +21,14 @@ const {
   validMarketIdentifier,
 } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
+const { isFutureMarket } = require("../src/controllers/subscriptionController");
+
+test("subscription admin separates future markets from actionable pending markets", () => {
+  const now = Date.parse("2026-08-15T10:00:00.000Z");
+  assert.equal(isFutureMarket({ inplay: 0, opendate: "2026-08-15T11:01:00.000Z" }, now), true);
+  assert.equal(isFutureMarket({ inplay: 0, opendate: "2026-08-15T11:00:00.000Z" }, now), false);
+  assert.equal(isFutureMarket({ inplay: 1, opendate: "2026-08-16T11:00:00.000Z" }, now), false);
+});
 const {
   collectOddsTicks,
   collectScores,
@@ -119,6 +127,7 @@ test("Redis event cleanup extracts only numeric event IDs from configured key pr
 
 test("event workload lanes use mutually exclusive start-time predicates", () => {
   assert.match(eventWindowSql("e", "active"), /open_date <= DATE_ADD/);
+  assert.match(eventWindowSql("e", "active"), /UTC_TIMESTAMP\(\).*INTERVAL 390 MINUTE/);
   assert.match(eventWindowSql("e", "active"), /in_play/);
   assert.match(eventWindowSql("e", "future"), /open_date > DATE_ADD/);
   assert.match(eventWindowSql("e", "future"), /in_play,0\)=0/);

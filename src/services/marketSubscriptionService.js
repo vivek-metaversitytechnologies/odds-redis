@@ -81,7 +81,7 @@ async function flushResultUnsubscriptions() {
   const queued = [...pendingResultUnsubscriptions];
   if (!queued.length || retriesStopped) return undefined;
   unsubscribePromise = (async () => {
-    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
     for (let index = 0; index < queued.length && !retriesStopped; index += batchSize) {
       const batch = queued.slice(index, index + batchSize);
       try {
@@ -132,7 +132,7 @@ async function unsubscribeEventMarkets(ids) {
   if (!marketIds.length) return { requested: [], unsubscribed: [] };
   websocket.unsubscribeMarkets(marketIds);
 
-  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
   const unsubscribed = [];
   for (let index = 0; index < marketIds.length; index += batchSize) {
     const batch = marketIds.slice(index, index + batchSize);
@@ -156,7 +156,7 @@ async function reconcileProviderSubscriptions(ids) {
     ),
   ];
   if (!marketIds.length) return { requested: 0, unsubscribed: 0 };
-  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
   let unsubscribed = 0;
   for (let index = 0; index < marketIds.length; index += batchSize) {
     const batch = marketIds.slice(index, index + batchSize);
@@ -200,7 +200,7 @@ async function retrySkippedMarkets() {
   retryState.lastError = null;
   let accepted = 0;
   let skipped = 0;
-  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 10, { min: 1, max: 100 });
+  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
 
   logger.info("[MarketSubscription] retrying provider-skipped markets", {
     attempt: retryState.attempts,

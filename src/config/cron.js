@@ -10,7 +10,7 @@ module.exports = Object.freeze({
     runOnStart: booleanEnv("RUN_COMPETITION_SYNC_ON_START"),
   }),
   event: Object.freeze({
-    expression: process.env.EVENT_SYNC_CRON || "0 0 */6 * * *",
+    expression: process.env.EVENT_SYNC_CRON || "0 0 * * * *",
     runOnStart: booleanEnv("RUN_EVENT_SYNC_ON_START"),
   }),
   marketDiscovery: Object.freeze({

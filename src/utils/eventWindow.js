@@ -6,7 +6,8 @@ function leadMinutes() {
 
 function eventWindowSql(alias = "e", lane = "active") {
   if (lane === "all") return "1=1";
-  const threshold = `DATE_ADD(NOW(), INTERVAL ${leadMinutes()} MINUTE)`;
+  // open_date is stored as an IST wall-clock DATETIME while production MySQL uses UTC.
+  const threshold = `DATE_ADD(UTC_TIMESTAMP(), INTERVAL ${leadMinutes() + 330} MINUTE)`;
   if (lane === "future") {
     return `COALESCE(${alias}.in_play,0)=0 AND ${alias}.open_date > ${threshold}`;
   }
