@@ -28,11 +28,6 @@ async function startServer() {
   // Establish the replacement socket before any optional provider cleanup. Redis remains
   // the durable frontend snapshot and must not be touched during a process restart.
   websocket.connectSocket();
-  if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "false").toLowerCase() === "true") {
-    const markets = await fetchActiveMarkets();
-    const marketIds = markets.map((market) => market.marketid).filter(Boolean);
-    await subscriptions.reconcileProviderSubscriptions(marketIds);
-  }
   subscriptions.startSkippedRetries();
   const competitionCronTask = startCompetitionSync();
   const eventCronTask = startEventSync();
@@ -50,6 +45,21 @@ async function startServer() {
     syncEvents().catch(() => {});
   }
   const cronTask = startMarketSync();
+  // Provider reconciliation can take minutes for thousands of markets. It must not
+  // block cron initialization, otherwise a slow provider leaves every worker idle.
+  if (String(process.env.RECONCILE_SUBSCRIPTIONS_ON_START || "false").toLowerCase() === "true") {
+    setImmediate(() => {
+      fetchActiveMarkets()
+        .then((markets) =>
+          subscriptions.reconcileProviderSubscriptions(
+            markets.map((market) => market.marketid).filter(Boolean),
+          ),
+        )
+        .catch((error) =>
+          logger.error("Startup subscription reconciliation failed", { error: error.message }),
+        );
+    });
+  }
   if (cronConfig.marketSubscription.runOnStart) {
     syncMarketSubscriptions().catch((error) =>
       logger.error("Initial market sync failed", { error: error.message }),
