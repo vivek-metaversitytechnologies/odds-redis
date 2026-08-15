@@ -49,6 +49,7 @@ const {
   enforceBookmaker2Eligibility,
   inactiveLineMarkets,
   missingLineMarketIds,
+  discoveryEventBatchSize,
   oddsType,
   storedInFancyTable,
 } = require("../src/cron/marketDiscoverySync");
@@ -77,6 +78,18 @@ test("environment helpers reject invalid values and normalize lists", () => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+});
+
+test("active market discovery isolates events while future discovery remains batched", () => {
+  const previousFuture = process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
+  delete process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
+  assert.equal(discoveryEventBatchSize("active"), 1);
+  assert.equal(discoveryEventBatchSize("future"), 10);
+  process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE = "20";
+  assert.equal(discoveryEventBatchSize("active"), 1);
+  assert.equal(discoveryEventBatchSize("future"), 20);
+  if (previousFuture === undefined) delete process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
+  else process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE = previousFuture;
 });
 
 test("bounded maps evict their oldest entry", () => {

@@ -35,6 +35,14 @@ const DB_WRITE_BATCH_SIZE = integer("MARKET_DB_WRITE_BATCH_SIZE", 500, { min: 50
 const DISCOVERY_CACHE_LIMIT = integer("MARKET_DISCOVERY_CACHE_LIMIT", 50000, { min: 1000 });
 const MISSING_LINE_MARKET_PASSES = integer("MARKET_MISSING_LINE_PASSES", 2, { min: 1, max: 20 });
 
+function discoveryEventBatchSize(lane) {
+  // The provider caps large market responses. A single cricket event can contain
+  // more than a thousand current and historical markets, so batching active
+  // events can silently truncate the snapshot and leave valid markets hidden.
+  if (lane === "active") return 1;
+  return integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
+}
+
 function chunks(items, size = DB_WRITE_BATCH_SIZE) {
   const result = [];
   for (let index = 0; index < items.length; index += size) result.push(items.slice(index, index + size));
@@ -629,10 +637,9 @@ async function syncMarketDiscovery(events, lane = "active") {
   try {
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const eventIds = [...eventsById.keys()].map(Number);
-    // Smaller batches create more independent vendor calls, allowing the provider
-    // limiter to use the available CPU/network concurrency and reducing the amount
-    // of data delayed behind one slow response.
-    const batchSize = integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
+    // Active events use isolated snapshots to avoid the provider's response cap.
+    // Future events retain configurable batching because they run less frequently.
+    const batchSize = discoveryEventBatchSize(lane);
     const discovered = [];
     const eventBatches = chunks(eventIds, batchSize);
 
@@ -846,7 +853,9 @@ async function syncLiveMarketCleanup() {
     const events = await fetchLiveEventsForMarketCleanup();
     if (!events.length) return { events: 0, inactive: 0, removed: 0 };
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
-    const eventBatchSize = integer("LIVE_MARKET_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
+    // Cleanup must also use complete per-event snapshots. A truncated batch could
+    // otherwise be mistaken for missing markets and deactivate valid definitions.
+    const eventBatchSize = 1;
     const eventBatches = chunks(
       events.map((event) => event.eventId),
       eventBatchSize,
@@ -946,6 +955,7 @@ module.exports = {
   seedTossMarkets,
   inactiveLineMarkets,
   missingLineMarketIds,
+  discoveryEventBatchSize,
   reconcileMissingLineMarkets,
   fetchActiveEventsForMarketDiscovery,
   fetchLiveEventsForMarketCleanup,
