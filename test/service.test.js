@@ -240,6 +240,8 @@ test("dashboard sorts outright winner markets before normal matches", () => {
 });
 
 test("competition sync keeps only supported sports", () => {
+  const previousSportIds = process.env.SPORT_IDS;
+  process.env.SPORT_IDS = "1,2,4";
   const rows = competitionRows({
     data: [
       { id: "10", name: "Football League", sportId: 1 },
@@ -248,6 +250,8 @@ test("competition sync keeps only supported sports", () => {
       { id: "40", name: "Unsupported", sportId: 7 },
     ],
   });
+  if (previousSportIds === undefined) delete process.env.SPORT_IDS;
+  else process.env.SPORT_IDS = previousSportIds;
   assert.deepEqual(
     rows.map((row) => row.seriesId),
     [10, 20, 30],
@@ -255,6 +259,8 @@ test("competition sync keeps only supported sports", () => {
 });
 
 test("event sync keeps supported events including completed lifecycle updates", () => {
+  const previousSportIds = process.env.SPORT_IDS;
+  process.env.SPORT_IDS = "1,2,4";
   const rows = eventRows([
     {
       data: [
@@ -285,6 +291,8 @@ test("event sync keeps supported events including completed lifecycle updates", 
       ],
     },
   ]);
+  if (previousSportIds === undefined) delete process.env.SPORT_IDS;
+  else process.env.SPORT_IDS = previousSportIds;
   assert.deepEqual(
     rows.map((row) => row.eventId),
     [10, 20],
