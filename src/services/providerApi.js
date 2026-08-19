@@ -139,7 +139,8 @@ module.exports = {
   events: (query) => request("/v1/events", { query }),
   markets: (body) => request("/v1/markets", { method: "POST", body }),
   runners: (marketId) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`),
-  results: (body) => request("/v1/markets/results", { method: "POST", body }),
+  // Results must not sit behind the much larger discovery queue indefinitely.
+  results: (body) => request("/v1/markets/results", { method: "POST", body, priority: 2 }),
   subscribe: (ids) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids),
   unsubscribe: (ids) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids),
 };

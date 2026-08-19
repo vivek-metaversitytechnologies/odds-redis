@@ -1,6 +1,7 @@
 const provider = require("./providerApi");
 const websocket = require("./websocketService");
 const logger = require("../utils/logger");
+const redisStore = require("../config/redis");
 const { integer } = require("../config/env");
 
 const skippedMarketIds = new Set();
@@ -48,7 +49,7 @@ async function subscribeMarkets(ids) {
       (ids || [])
         .map(String)
         .map((id) => id.trim())
-        .filter(Boolean),
+        .filter(redisStore.validMarketIdentifier),
     ),
   ].filter((id) => !completedMarketIds.has(id));
   if (!marketIds.length) return { subscribed: [], skipped: [] };
@@ -109,7 +110,7 @@ async function unsubscribeResultMarkets(ids) {
       (ids || [])
         .map(String)
         .map((id) => id.trim())
-        .filter(Boolean),
+        .filter(redisStore.validMarketIdentifier),
     ),
   ];
   marketIds.forEach((id) => {
@@ -126,7 +127,7 @@ async function unsubscribeEventMarkets(ids) {
       (ids || [])
         .map(String)
         .map((id) => id.trim())
-        .filter(Boolean),
+        .filter(redisStore.validMarketIdentifier),
     ),
   ];
   if (!marketIds.length) return { requested: [], unsubscribed: [] };
@@ -152,7 +153,7 @@ async function reconcileProviderSubscriptions(ids) {
       (ids || [])
         .map(String)
         .map((id) => id.trim())
-        .filter(Boolean),
+        .filter(redisStore.validMarketIdentifier),
     ),
   ];
   if (!marketIds.length) return { requested: 0, unsubscribed: 0 };

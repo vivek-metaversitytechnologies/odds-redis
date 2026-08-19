@@ -413,7 +413,7 @@ function subscribeMarkets(ids) {
       (ids || [])
         .map(String)
         .map((id) => id.trim())
-        .filter(Boolean),
+        .filter(redisStore.validMarketIdentifier),
     ),
   ].filter((id) => !subscribedMarketIds.has(id));
   fresh.forEach((id) => subscribedMarketIds.add(id));
@@ -429,7 +429,7 @@ function unsubscribeMarkets(ids) {
       (ids || [])
         .map(String)
         .map((id) => id.trim())
-        .filter(Boolean),
+        .filter(redisStore.validMarketIdentifier),
     ),
   ].filter((id) => subscribedMarketIds.delete(id));
   if (!removed.length) return [];

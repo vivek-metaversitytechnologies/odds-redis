@@ -37,39 +37,39 @@ function competitionRows(response) {
 async function upsertCompetitions(competitions) {
   if (!competitions.length) return { inserted: 0, updated: 0 };
   const connection = await getSourcePool().getConnection();
-  let inserted = 0;
-  let updated = 0;
   try {
-    await connection.beginTransaction();
     const ids = competitions.map((competition) => competition.seriesId);
     const [existingRows] = await connection.query(
       `SELECT seriesid FROM t_series WHERE seriesid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
     const existing = new Set(existingRows.map((row) => Number(row.seriesid)));
-    for (const competition of competitions) {
-      if (existing.has(competition.seriesId)) {
-        await connection.execute(
-          `UPDATE t_series SET seriesname = ?, sportid = ?, isactive = ?, status = ?, updatedon = NOW()
-           WHERE seriesid = ?`,
-          [competition.seriesName, competition.sportId, true, true, competition.seriesId],
-        );
-        updated += 1;
-        continue;
-      }
-      await connection.execute(
-        `INSERT INTO t_series
-          (adminid, appid, createdon, isactive, marketcount, seriesid, seriesname, sportid, status, updatedon)
-         VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, NOW())`,
-        ["1", 1, true, "0", competition.seriesId, competition.seriesName, competition.sportId, true],
-      );
-      inserted += 1;
-    }
-    await connection.commit();
-    return { inserted, updated };
-  } catch (error) {
-    await connection.rollback();
-    throw error;
+    const values = competitions.map((competition) => [
+      "1",
+      1,
+      new Date(),
+      true,
+      "0",
+      competition.seriesId,
+      competition.seriesName,
+      competition.sportId,
+      true,
+      new Date(),
+    ]);
+    // One autocommit statement keeps the series locks short. The previous row-by-row
+    // transaction could overlap market discovery and hit InnoDB's lock wait timeout.
+    await connection.query(
+      `INSERT INTO t_series
+        (adminid,appid,createdon,isactive,marketcount,seriesid,seriesname,sportid,status,updatedon)
+       VALUES ?
+       ON DUPLICATE KEY UPDATE seriesname=VALUES(seriesname),sportid=VALUES(sportid),
+         isactive=VALUES(isactive),status=VALUES(status),updatedon=NOW()`,
+      [values],
+    );
+    return {
+      inserted: competitions.filter((competition) => !existing.has(competition.seriesId)).length,
+      updated: competitions.filter((competition) => existing.has(competition.seriesId)).length,
+    };
   } finally {
     connection.release();
   }

@@ -4,6 +4,7 @@ const Market = require("../models/Market");
 const subscriptions = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
+const redisStore = require("../config/redis");
 const cronConfig = require("../config/cron");
 const { integer, csvIntegers } = require("../config/env");
 const { eventWindowSql } = require("../utils/eventWindow");
@@ -25,8 +26,10 @@ function record(type, details = {}) {
 }
 
 function subscriptionDiff(desiredIds, subscribedIds, isSuppressed = () => false) {
-  const desired = new Set((desiredIds || []).map(String));
-  const subscribed = new Set((subscribedIds || []).map(String));
+  const normalize = (ids) =>
+    (ids || []).map(String).map((id) => id.trim()).filter(redisStore.validMarketIdentifier);
+  const desired = new Set(normalize(desiredIds));
+  const subscribed = new Set(normalize(subscribedIds));
   return {
     pending: [...desired].filter((id) => !subscribed.has(id) && !isSuppressed(id)),
     stale: [...subscribed].filter((id) => !desired.has(id)),
@@ -72,7 +75,7 @@ async function syncMarketSubscriptions(lane = "active") {
       ...new Set(
         markets
           .map((market) => market.marketid)
-          .filter(Boolean)
+          .filter(redisStore.validMarketIdentifier)
           .map(String),
       ),
     ];

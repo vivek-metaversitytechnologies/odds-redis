@@ -658,10 +658,10 @@ async function syncMarketDiscovery(events, lane = "active") {
     const primaryRegular = primaryUnique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const primaryStoredRegular = primaryUnique.filter((market) => !storedInFancyTable(market));
     const primaryStoredFancies = primaryUnique.filter(storedInFancyTable);
-    const [primaryPersisted, primaryFancyPersisted] = await Promise.all([
-      upsertMarkets(primaryStoredRegular),
-      upsertFancies(primaryStoredFancies),
-    ]);
+    // Both writers can touch t_market (fancy persistence removes migrated rows), so
+    // serialize them to avoid cross-transaction lock waits during busy discovery runs.
+    const primaryPersisted = await upsertMarkets(primaryStoredRegular);
+    const primaryFancyPersisted = await upsertFancies(primaryStoredFancies);
     redisStore.invalidateMarkets([
       ...primaryPersisted.marketIds,
       ...primaryPersisted.deactivatedMarketIds,
@@ -874,7 +874,8 @@ async function syncLiveMarketCleanup() {
     const unique = [...new Map(inactive.map((market) => [market.marketId, market])).values()];
     const fancies = unique.filter(storedInFancyTable);
     const regular = unique.filter((market) => !storedInFancyTable(market));
-    const [regularResult, fancyResult] = await Promise.all([upsertMarkets(regular), upsertFancies(fancies)]);
+    const regularResult = await upsertMarkets(regular);
+    const fancyResult = await upsertFancies(fancies);
     const removals = await Promise.all(
       unique.map((market) => redisStore.removeMarket(market.eventId, market.marketId)),
     );

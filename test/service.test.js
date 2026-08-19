@@ -143,6 +143,10 @@ test("active subscription reconciliation finds missing and stale market IDs", ()
     pending: [],
     stale: [],
   });
+  assert.deepEqual(subscriptionDiff([undefined, null, "undefined", "valid"], ["null", "stale"]), {
+    pending: ["valid"],
+    stale: ["stale"],
+  });
 });
 
 test("migration runner discovers ordered SQL files and produces stable checksums", () => {
