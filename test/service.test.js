@@ -73,8 +73,35 @@ const { setBounded } = require("../src/utils/boundedMap");
 const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
-const { eventWindowSql } = require("../src/utils/eventWindow");
+const { eventInWindow, eventWindowSql } = require("../src/utils/eventWindow");
 const { subscriptionDiff } = require("../src/cron/marketSync");
+const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
+
+test("stored result filters validate and parameterize supported query fields", () => {
+  const filters = resultFilters({
+    type: "fancy",
+    sportId: "4",
+    eventId: "35916587",
+    marketId: "4.123-F2",
+    status: "OPEN",
+    from: "2026-08-20",
+    to: "2026-08-21",
+    limit: "999",
+  });
+  assert.equal(filters.type, "fancy");
+  assert.equal(filters.limit, 500);
+  const where = resultWhere(filters, "fancy");
+  assert.match(where.sql, /fancyid = \?/);
+  assert.match(where.sql, /updatedon >= \?/);
+  assert.match(where.sql, /updatedon < \?/);
+  assert.deepEqual(where.params.slice(0, 4), [4, 35916587, "4.123-F2", "OPEN"]);
+});
+
+test("stored result filters reject unsupported types and malformed IDs", () => {
+  assert.throws(() => resultFilters({ type: "all-results" }), /type must be/);
+  assert.throws(() => resultFilters({ sportId: "cricket" }), /sportId must be/);
+  assert.throws(() => resultFilters({ from: "2026-08-22", to: "2026-08-21" }), /from must be earlier/);
+});
 
 test("environment helpers reject invalid values and normalize lists", () => {
   const previous = {
@@ -138,6 +165,17 @@ test("event workload lanes use mutually exclusive start-time predicates", () => 
   assert.match(eventWindowSql("e", "future"), /open_date > DATE_ADD/);
   assert.match(eventWindowSql("e", "future"), /in_play,0\)=0/);
   assert.equal(eventWindowSql("e", "all"), "1=1");
+  const now = Date.parse("2026-08-20T10:00:00Z");
+  assert.equal(eventInWindow({ openDate: "2026-08-20 16:29:00", inPlay: false }, "active", now), true);
+  assert.equal(eventInWindow({ openDate: "2026-08-20 16:31:00", inPlay: false }, "active", now), false);
+  assert.equal(eventInWindow({ openDate: "2026-08-20 16:31:00", inPlay: false }, "future", now), true);
+  assert.equal(eventInWindow({ openDate: "2026-08-21 16:31:00", inPlay: true }, "future", now), false);
+});
+
+test("market discovery delegates subscription reconciliation to its standalone cron", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  assert.doesNotMatch(source, /syncMarketSubscriptions\s*\(/);
+  assert.match(source, /delegatedToMarketSync:\s*true/);
 });
 
 test("active subscription reconciliation finds missing and stale market IDs", () => {
@@ -145,10 +183,13 @@ test("active subscription reconciliation finds missing and stale market IDs", ()
     pending: ["missing"],
     stale: ["stale"],
   });
-  assert.deepEqual(subscriptionDiff(["settled"], [], (id) => id === "settled"), {
-    pending: [],
-    stale: [],
-  });
+  assert.deepEqual(
+    subscriptionDiff(["settled"], [], (id) => id === "settled"),
+    {
+      pending: [],
+      stale: [],
+    },
+  );
   assert.deepEqual(subscriptionDiff([undefined, null, "undefined", "valid"], ["null", "stale"]), {
     pending: ["valid"],
     stale: ["stale"],
@@ -315,10 +356,7 @@ test("Redis active-match cache excludes completed and expired events", () => {
     ["1", snapshot],
     ["2", snapshot],
   ]);
-  assert.deepEqual(
-    activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")),
-    [],
-  );
+  assert.deepEqual(activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")), []);
 });
 
 test("database active-match rows are grouped without correlated market scans", () => {

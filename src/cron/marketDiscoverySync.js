@@ -1,14 +1,13 @@
 const cron = require("node-cron");
 const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
-const { syncMarketSubscriptions } = require("./marketSync");
 const { unsubscribeEventMarkets } = require("../services/marketSubscriptionService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
 const { integer, csvIntegers } = require("../config/env");
-const { eventWindowSql } = require("../utils/eventWindow");
+const { eventInWindow, eventWindowSql } = require("../utils/eventWindow");
 const { setBounded } = require("../utils/boundedMap");
 const {
   FANCY_MARKET_TYPES,
@@ -741,19 +740,6 @@ async function syncMarketDiscovery(events, lane = "active") {
     ];
     await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
     const tossDefinitions = await seedTossMarkets(regularMarkets);
-    const subscriptionResult =
-      lane === "active"
-        ? await syncMarketSubscriptions("active")
-        : { total: 0, requested: 0, newlySubscribed: 0, providerSkipped: 0, activeMarketIds: [] };
-    const subscription = {
-      total: subscriptionResult.total,
-      requested: subscriptionResult.requested,
-      newlySubscribed: subscriptionResult.newlySubscribed,
-      providerSkipped: subscriptionResult.providerSkipped,
-      active: Array.isArray(subscriptionResult.activeMarketIds)
-        ? subscriptionResult.activeMarketIds.length
-        : 0,
-    };
     const activeFancies = fancies.filter((fancy) => fancy.isActive && !fancy.gameOver).length;
     for (const market of unique)
       setBounded(discoveryFingerprints, market.marketId, marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
@@ -780,7 +766,7 @@ async function syncMarketDiscovery(events, lane = "active") {
       regularDefinitions,
       tossDefinitions,
       runners: runnerResult,
-      subscription,
+      subscription: { delegatedToMarketSync: true },
     };
     state.lastResult = result;
     state.lastCompletedAt = new Date().toISOString();
@@ -804,6 +790,13 @@ async function syncMarketDiscovery(events, lane = "active") {
 async function fetchActiveEventsForMarketDiscovery(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   if (!sportIds.length) return [];
+  const cachedBySport = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  if (cachedBySport.every((events) => events !== null)) {
+    return cachedBySport
+      .flat()
+      .filter((event) => !event.gameOver && eventInWindow(event, lane))
+      .sort((left, right) => left.eventId - right.eventId);
+  }
   const [rows] = await getSourcePool().query(
     `SELECT eventid,eventname,sportid,seriesid,open_date,in_play
        FROM t_event
@@ -827,6 +820,13 @@ async function fetchActiveEventsForMarketDiscovery(lane = "active") {
 async function fetchLiveEventsForMarketCleanup() {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   if (!sportIds.length) return [];
+  const cachedBySport = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  if (cachedBySport.every((events) => events !== null)) {
+    return cachedBySport
+      .flat()
+      .filter((event) => event.inPlay === true && event.gameOver !== true)
+      .map((event) => ({ ...event, inPlay: true }));
+  }
   const settled = await Promise.allSettled(sportIds.map((si) => provider.events({ si, today: 1 })));
   return settled
     .filter((result) => result.status === "fulfilled")

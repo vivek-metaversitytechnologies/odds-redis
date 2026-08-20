@@ -47,66 +47,46 @@ function eventRows(responses) {
 async function upsertEvents(events) {
   if (!events.length) return { inserted: 0, updated: 0 };
   const connection = await getSourcePool().getConnection();
-  let inserted = 0;
-  let updated = 0;
   try {
-    await connection.beginTransaction();
     const ids = events.map((event) => event.eventId);
     const [existingRows] = await connection.query(
       `SELECT eventid FROM t_event WHERE eventid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
     const existing = new Set(existingRows.map((row) => Number(row.eventid)));
-    for (const event of events) {
-      if (existing.has(event.eventId)) {
-        await connection.execute(
-          `UPDATE t_event SET eventname = ?, seriesid = ?, sportid = ?, open_date = ?,
-             in_play = ?, isactive = ?, status = ?, updatedon = NOW()
-           WHERE eventid = ?`,
-          [
-            event.eventName,
-            event.seriesId,
-            event.sportId,
-            event.openDate,
-            event.gameOver ? false : event.inPlay,
-            !event.gameOver,
-            !event.gameOver,
-            event.eventId,
-          ],
-        );
-        updated += 1;
-        continue;
-      }
-      await connection.execute(
-        `INSERT INTO t_event
-          (seriesid, sportid, eventid, eventname, open_date, status, isactive, createdon, updatedon,
-           fancypause, betlock, is_redis_updated, in_play, fancylock, bookmaker, fancy, channel_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          event.seriesId,
-          event.sportId,
-          event.eventId,
-          event.eventName,
-          event.openDate,
-          !event.gameOver,
-          !event.gameOver,
-          false,
-          false,
-          true,
-          event.gameOver ? false : event.inPlay,
-          true,
-          true,
-          true,
-          "1",
-        ],
-      );
-      inserted += 1;
-    }
-    await connection.commit();
-    return { inserted, updated };
-  } catch (error) {
-    await connection.rollback();
-    throw error;
+    const values = events.map((event) => [
+      event.seriesId,
+      event.sportId,
+      event.eventId,
+      event.eventName,
+      event.openDate,
+      !event.gameOver,
+      !event.gameOver,
+      new Date(),
+      new Date(),
+      false,
+      false,
+      true,
+      event.gameOver ? false : event.inPlay,
+      true,
+      true,
+      true,
+      "1",
+    ]);
+    await connection.query(
+      `INSERT INTO t_event
+        (seriesid,sportid,eventid,eventname,open_date,status,isactive,createdon,updatedon,
+         fancypause,betlock,is_redis_updated,in_play,fancylock,bookmaker,fancy,channel_id)
+       VALUES ?
+       ON DUPLICATE KEY UPDATE eventname=VALUES(eventname),seriesid=VALUES(seriesid),
+         sportid=VALUES(sportid),open_date=VALUES(open_date),in_play=VALUES(in_play),
+         isactive=VALUES(isactive),status=VALUES(status),updatedon=NOW()`,
+      [values],
+    );
+    return {
+      inserted: events.filter((event) => !existing.has(event.eventId)).length,
+      updated: events.filter((event) => existing.has(event.eventId)).length,
+    };
   } finally {
     connection.release();
   }
@@ -115,7 +95,7 @@ async function upsertEvents(events) {
 async function retireCompletedEvents(events) {
   const completed = events.filter((event) => event.gameOver);
   if (!completed.length) return { events: 0, markets: 0 };
-  const eventIds = completed.map((event) => event.eventId);
+  const eventIds = [...new Set(completed.map((event) => event.eventId))];
   const placeholders = eventIds.map(() => "?").join(",");
   const connection = await getSourcePool().getConnection();
   let marketIds = [];
@@ -130,17 +110,21 @@ async function retireCompletedEvents(events) {
       [...eventIds, true],
     );
     marketIds = [...markets, ...fancies].map((row) => String(row.marketid));
-    await connection.query(
-      `UPDATE t_market SET isactive = ?, status = ?, issubscribed = ?, updatedon = NOW()
-       WHERE eventid IN (${placeholders})`,
-      [false, false, false, ...eventIds],
-    );
-    await connection.query(
-      `UPDATE t_matchfancy SET isactive = ?, isshow = ?, is_show = ?, issubscribed = ?,
-         status = ?, updatedon = NOW() WHERE eventid IN (${placeholders})`,
-      [false, false, false, false, "CLOSED", ...eventIds],
-    );
-    await connection.commit();
+    if (!marketIds.length) {
+      await connection.rollback();
+    } else {
+      await connection.query(
+        `UPDATE t_market SET isactive = ?, status = ?, issubscribed = ?, updatedon = NOW()
+         WHERE eventid IN (${placeholders})`,
+        [false, false, false, ...eventIds],
+      );
+      await connection.query(
+        `UPDATE t_matchfancy SET isactive = ?, isshow = ?, is_show = ?, issubscribed = ?,
+           status = ?, updatedon = NOW() WHERE eventid IN (${placeholders})`,
+        [false, false, false, false, "CLOSED", ...eventIds],
+      );
+      await connection.commit();
+    }
   } catch (error) {
     await connection.rollback();
     throw error;

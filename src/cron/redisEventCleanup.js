@@ -3,7 +3,7 @@ const { getSourcePool } = require("../config/sourceDb");
 const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
-const { integer } = require("../config/env");
+const { csvIntegers, integer } = require("../config/env");
 
 let running = false;
 const state = {
@@ -25,6 +25,17 @@ function eventIdFromKey(key, prefixes) {
 }
 
 async function activeEventIds() {
+  const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
+  const cachedBySport = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  if (cachedBySport.length && cachedBySport.every((events) => events !== null)) {
+    return new Set(
+      cachedBySport
+        .flat()
+        .filter((event) => !event.gameOver)
+        .map((event) => String(event.eventId))
+        .filter((id) => /^\d+$/.test(id)),
+    );
+  }
   const [rows] = await getSourcePool().query(
     "SELECT eventid FROM t_event WHERE isactive = ? AND eventid IS NOT NULL",
     [true],

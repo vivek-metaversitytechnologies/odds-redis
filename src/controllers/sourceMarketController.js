@@ -9,6 +9,7 @@ const { getCompetitionSyncStatus, syncCompetitions } = require("../cron/competit
 const { getEventSyncStatus, syncEvents } = require("../cron/eventSync");
 const { getMarketDiscoveryStatus } = require("../cron/marketDiscoverySync");
 const { getResultSyncStatus, syncResults } = require("../cron/resultSync");
+const { RESULT_TYPES, resultFilters, resultWhere } = require("../utils/resultFilters");
 
 async function list(req, res, next) {
   try {
@@ -145,36 +146,59 @@ async function runResultSync(req, res, next) {
 
 async function listResults(req, res, next) {
   try {
-    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 250));
-    const [marketRows] = await getSourcePool().query(
-      `SELECT 'market' AS resulttype, id, marketid, marketname, matchid, matchname,
-              selectionid, selectionname, result, resultstatus, status, date AS declaredat
-       FROM t_matchresult ORDER BY id DESC LIMIT ?`,
-      [limit],
-    );
-    const [fancyRows] = await getSourcePool().query(
-      `SELECT 'fancy' AS resulttype, id, fancyid AS marketid, fancyname AS marketname,
-              matchid, matchname, NULL AS selectionid, NULL AS selectionname, result,
-              resultstatus, isresult AS status, updatedon AS declaredat
-       FROM t_fancyresult ORDER BY id DESC LIMIT ?`,
-      [limit],
-    );
-    const [exceptionalRows] = await getSourcePool().query(
-      `SELECT 'exceptional' AS resulttype, id, marketid, marketname, matchid, matchname,
-              NULL AS selectionid, NULL AS selectionname, result, result AS resultstatus,
-              status, date AS declaredat
-       FROM t_matchabondendtie ORDER BY id DESC LIMIT ?`,
-      [limit],
-    );
-    const [[counts]] = await getSourcePool().query(
-      `SELECT (SELECT COUNT(*) FROM t_matchresult) AS market,
-              (SELECT COUNT(*) FROM t_fancyresult) AS fancy,
-              (SELECT COUNT(*) FROM t_matchabondendtie) AS exceptional`,
-    );
-    const rows = [...marketRows, ...fancyRows, ...exceptionalRows]
-      .sort((left, right) => Number(right.id) - Number(left.id))
-      .slice(0, limit);
-    res.json({ status: "ok", data: rows, meta: counts });
+    const filters = resultFilters(req.query);
+    const types = filters.type ? [filters.type] : [...RESULT_TYPES];
+    const definitions = {
+      market: {
+        table: "t_matchresult",
+        select: `SELECT 'market' AS resulttype, id, marketid, marketname, matchid, matchname,
+                 selectionid, selectionname, result, resultstatus, status, date AS declaredat`,
+      },
+      fancy: {
+        table: "t_fancyresult",
+        select: `SELECT 'fancy' AS resulttype, id, fancyid AS marketid, fancyname AS marketname,
+                 matchid, matchname, NULL AS selectionid, NULL AS selectionname, result,
+                 resultstatus, isresult AS status, updatedon AS declaredat`,
+      },
+      exceptional: {
+        table: "t_matchabondendtie",
+        select: `SELECT 'exceptional' AS resulttype, id, marketid, marketname, matchid, matchname,
+                 NULL AS selectionid, NULL AS selectionname, result, result AS resultstatus,
+                 status, date AS declaredat`,
+      },
+    };
+    const pool = getSourcePool();
+    const rows = [];
+    const counts = { market: 0, fancy: 0, exceptional: 0 };
+    const countExpressions = [];
+    const countParams = [];
+    for (const type of types) {
+      const definition = definitions[type];
+      const where = resultWhere(filters, type);
+      const [typeRows] = await pool.query(
+        `${definition.select} FROM ${definition.table}${where.sql} ORDER BY id DESC LIMIT ?`,
+        [...where.params, filters.limit],
+      );
+      rows.push(...typeRows);
+      countExpressions.push(`(SELECT COUNT(*) FROM ${definition.table}${where.sql}) AS ${type}`);
+      countParams.push(...where.params);
+    }
+    const [[filteredCounts]] = await pool.query(`SELECT ${countExpressions.join(", ")}`, countParams);
+    for (const type of types) counts[type] = Number(filteredCounts?.[type]) || 0;
+    const data = rows.sort((left, right) => Number(right.id) - Number(left.id)).slice(0, filters.limit);
+    res.json({
+      status: "ok",
+      data,
+      meta: {
+        ...counts,
+        total: types.reduce((sum, type) => sum + counts[type], 0),
+        filters: {
+          ...filters,
+          from: filters.from?.value || null,
+          to: filters.to?.value || null,
+        },
+      },
+    });
   } catch (error) {
     next(error);
   }
