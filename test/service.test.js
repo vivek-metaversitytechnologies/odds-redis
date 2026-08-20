@@ -208,6 +208,7 @@ test("migration runner discovers ordered SQL files and produces stable checksums
 
 test("normal service shutdown preserves provider registrations", () => {
   const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.match(serverSource, /closeProviderRequests\(\)/);
   assert.doesNotMatch(serverSource, /subscriptions\.unsubscribeAll\s*\(/);
   assert.match(serverSource, /RECONCILE_SUBSCRIPTIONS_ON_START\s*\|\|\s*"false"/);
 });

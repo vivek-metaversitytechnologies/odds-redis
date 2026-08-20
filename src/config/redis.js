@@ -219,26 +219,49 @@ async function getRedisClient() {
   return connecting;
 }
 
-async function findMarket(mid) {
-  if (marketCache.has(mid)) return marketCache.get(mid);
-  const [rows] = await getSourcePool().query("SELECT * FROM t_market WHERE marketid = ? LIMIT 1", [mid]);
-  if (rows.length) {
-    const market = Market.fromRow(rows[0]);
-    setBounded(marketCache, mid, market, CACHE_LIMIT);
-    return market;
+async function findMarkets(marketIds) {
+  const ids = [...new Set((marketIds || []).map(String).filter(validMarketIdentifier))];
+  const found = new Map();
+  const missing = [];
+  for (const id of ids) {
+    if (marketCache.has(id)) found.set(id, marketCache.get(id));
+    else missing.push(id);
   }
+  if (!missing.length) return found;
+  const placeholders = missing.map(() => "?").join(",");
+  const [rows] = await getSourcePool().query(
+    `SELECT * FROM t_market WHERE marketid IN (${placeholders})`,
+    missing,
+  );
+  for (const row of rows) {
+    const id = String(row.marketid);
+    const market = Market.fromRow(row);
+    found.set(id, market);
+    setBounded(marketCache, id, market, CACHE_LIMIT);
+  }
+  const unresolved = missing.filter((id) => !found.has(id));
+  if (!unresolved.length) return found;
+  const fancyPlaceholders = unresolved.map(() => "?").join(",");
   const [fancies] = await getSourcePool().query(
     `SELECT f.*, f.fancyid AS marketid, f.name AS marketname,
        COALESCE(f.sportid,e.sportid) AS sportid, e.eventname AS matchname,
        e.open_date AS opendate, e.in_play AS inplay
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
-     WHERE f.fancyid=? LIMIT 1`,
-    [mid],
+     WHERE f.fancyid IN (${fancyPlaceholders})`,
+    unresolved,
   );
-  if (!fancies.length) return null;
-  const market = Market.fromRow(fancies[0]);
-  setBounded(marketCache, mid, market, CACHE_LIMIT);
-  return market;
+  for (const row of fancies) {
+    const id = String(row.marketid);
+    const market = Market.fromRow(row);
+    found.set(id, market);
+    setBounded(marketCache, id, market, CACHE_LIMIT);
+  }
+  // Discovery invalidates every inserted or changed ID, so caching a miss avoids
+  // repeated database reads for unsupported provider ticks without hiding new markets.
+  for (const id of unresolved) {
+    if (!found.has(id)) setBounded(marketCache, id, null, CACHE_LIMIT);
+  }
+  return found;
 }
 
 function status(value) {
@@ -810,9 +833,8 @@ async function writeTicks(items) {
   const eventId = String(candidates[0].eid);
   const sameEvent = candidates.filter((item) => String(item.eid) === eventId);
   const rejected = candidates.filter((item) => String(item.eid) !== eventId);
-  const marketRows = await Promise.all(
-    sameEvent.map(async (item) => ({ item, market: await findMarket(String(item.mid)) })),
-  );
+  const markets = await findMarkets(sameEvent.map((item) => item.mid));
+  const marketRows = sameEvent.map((item) => ({ item, market: markets.get(String(item.mid)) || null }));
   const acceptedRows = marketRows.filter(({ item, market }) => {
     if (!market) return false;
     if (booleanOr(market.isactive ?? market.isActive, false) !== false) return true;

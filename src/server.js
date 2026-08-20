@@ -14,6 +14,7 @@ const frontendSocket = require("./services/frontendSocketService");
 const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const cronConfig = require("./config/cron");
+const { closeProviderRequests } = require("./services/providerApi");
 
 async function startServer() {
   await checkSourceDbConnection();
@@ -79,6 +80,9 @@ async function startServer() {
       marketDiscoveryCronTask.stop();
       resultCronTask.stop();
       redisEventCleanupCronTask.stop();
+      // Requests owned by the outgoing process must not keep PM2 waiting through
+      // provider timeouts and retries. The replacement process establishes fresh work.
+      await closeProviderRequests();
       await subscriptions.stopSkippedRetries();
       websocket.setResultHandler(null);
       await frontendSocket.closeFrontendSocket();

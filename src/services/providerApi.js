@@ -9,6 +9,8 @@ const providerLimiter = new Bottleneck({
   maxConcurrent: integer("PROVIDER_MAX_CONCURRENT", 100, { min: 1, max: 100 }),
   minTime: Math.max(configuredMinTime, rateLimitMinTime),
 });
+const activeControllers = new Set();
+let shuttingDown = false;
 
 function providerUrl(path, query) {
   const url = new URL(path, process.env.PROVIDER_BASE_URL || "https://sportexchange-test-dev.rexgames.in/");
@@ -47,8 +49,10 @@ function loggedPayload(value) {
 }
 
 async function request(path, { method = "GET", query, body, retries = 2, priority = 5 } = {}) {
+  if (shuttingDown) throw new Error("Provider client is shutting down");
   const url = providerUrl(path, query);
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    if (shuttingDown) throw new Error("Provider client is shutting down");
     const startedAt = Date.now();
     try {
       const requestLog = {
@@ -61,6 +65,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
       writeProviderLog("provider.request", requestLog);
       const response = await providerLimiter.schedule({ priority }, async () => {
         const controller = new AbortController();
+        activeControllers.add(controller);
         const timer = setTimeout(
           () => controller.abort(),
           integer("PROVIDER_HTTP_TIMEOUT_MS", 60000, { min: 1000 }),
@@ -78,6 +83,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
           });
         } finally {
           clearTimeout(timer);
+          activeControllers.delete(controller);
         }
       });
       const text = await response.text();
@@ -116,12 +122,20 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
         error: error.message,
       };
       writeProviderLog("provider.error", errorLog);
+      if (shuttingDown) throw error;
       if (attempt >= retries || (error.statusCode && ![429, 500, 502, 503, 504].includes(error.statusCode)))
         throw error;
       await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
     }
   }
   return null;
+}
+
+async function closeProviderRequests() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  for (const controller of activeControllers) controller.abort();
+  await providerLimiter.stop({ dropWaitingJobs: true, dropErrorMessage: "Provider client is shutting down" });
 }
 
 function postIds(path, ids) {
@@ -134,6 +148,7 @@ function postIds(path, ids) {
 module.exports = {
   providerLimiter,
   request,
+  closeProviderRequests,
   sports: () => request("/v1/sports"),
   competitions: (query) => request("/v1/competitions", { query }),
   events: (query) => request("/v1/events", { query }),
