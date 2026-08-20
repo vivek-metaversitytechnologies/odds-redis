@@ -108,6 +108,42 @@ function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()
     .sort(compareDashboardEntries);
 }
 
+function selectDashboardRows(rows) {
+  const byEvent = new Map();
+  for (const row of rows || []) {
+    const eventId = String(row.eventid);
+    if (!byEvent.has(eventId)) byEvent.set(eventId, []);
+    byEvent.get(eventId).push(row);
+  }
+  const selected = [];
+  for (const eventRows of byEvent.values()) {
+    const activeRows = eventRows.filter((row) => !row.settled_marketid);
+    const candidate = activeRows
+      .filter((row) => /match odds|bookmaker|winner/i.test(String(row.marketname || "")))
+      .sort((left, right) => {
+        const priority = (row) => {
+          const name = String(row.marketname || "").toLowerCase();
+          if (name === "match odds") return 1;
+          if (name.includes("bookmaker")) return 2;
+          if (name.includes("winner")) return 3;
+          return 99;
+        };
+        return priority(left) - priority(right);
+      })[0];
+    if (!candidate) continue;
+    const marketNames = eventRows.map((row) => String(row.marketname || ""));
+    selected.push({
+      ...candidate,
+      isBookmaker: marketNames.some((name) => /bookmaker/i.test(name)),
+      isGoal: marketNames.some((name) => /goal/i.test(name)),
+      isOutright:
+        marketNames.some((name) => name === "Winner" || /winner bookmaker/i.test(name)) &&
+        !marketNames.some((name) => name === "Match Odds"),
+    });
+  }
+  return selected;
+}
+
 async function activeMatches(sportId) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const cachedEvents = await redisStore.getEvents(sportId);
@@ -117,37 +153,18 @@ async function activeMatches(sportId) {
   }
   const [rows] = await getSourcePool().query(
     `SELECT t.matchname, t.opendate, t.inplay, t.eventid, t.marketid, t.marketname,
-      t.sportid, t.seriesid,
-      EXISTS(SELECT 1 FROM t_market bm WHERE bm.eventid = t.eventid
-        AND bm.isactive = TRUE AND bm.marketname LIKE '%Bookmaker%') AS isBookmaker,
-      EXISTS(SELECT 1 FROM t_market gm WHERE gm.eventid = t.eventid
-        AND gm.isactive = TRUE AND gm.marketname LIKE '%Goal%') AS isGoal,
-      (EXISTS(SELECT 1 FROM t_market wm WHERE wm.eventid = t.eventid
-         AND wm.isactive = TRUE
-         AND (wm.marketname = 'Winner' OR wm.marketname LIKE '%Winner Bookmaker%'))
-       AND NOT EXISTS(SELECT 1 FROM t_market mo WHERE mo.eventid = t.eventid
-         AND mo.isactive = TRUE AND mo.marketname = 'Match Odds')) AS isOutright
-    FROM t_market t
-    INNER JOIN t_event e ON e.eventid = t.eventid
-    WHERE t.sportid = ? AND t.isactive = TRUE AND e.isactive = TRUE
+      t.sportid, t.seriesid, r.marketid AS settled_marketid
+    FROM t_event e
+    STRAIGHT_JOIN t_market t ON t.eventid = e.eventid AND t.isactive = TRUE
+    LEFT JOIN t_matchresult r ON r.marketid = t.marketid
+    WHERE e.sportid = ? AND e.isactive = TRUE
       AND e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR)
-      AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid = t.marketid)
       AND (t.marketname = 'Match Odds' OR t.marketname LIKE '%Bookmaker%'
-        OR t.marketname LIKE '%Winner%')
-    ORDER BY t.eventid ASC,
-      CASE WHEN t.marketname = 'Match Odds' THEN 1
-        WHEN t.marketname LIKE '%Bookmaker%' THEN 2
-        WHEN t.marketname LIKE '%Winner%' THEN 3 ELSE 99 END`,
+        OR t.marketname LIKE '%Winner%' OR t.marketname LIKE '%Goal%')
+    ORDER BY e.eventid ASC`,
     [sportId],
   );
-  const selected = [];
-  const seenEvents = new Set();
-  for (const row of rows) {
-    const eventId = String(row.eventid);
-    if (seenEvents.has(eventId)) continue;
-    seenEvents.add(eventId);
-    selected.push(row);
-  }
+  const selected = selectDashboardRows(rows);
   const snapshots = await redisStore.getEventSnapshots(selected.map((row) => row.eventid));
   return selected
     .map((row) => dashboardEntry(row, snapshots.get(String(row.eventid))))
@@ -162,4 +179,5 @@ module.exports = {
   dashboardEntry,
   compareDashboardEntries,
   openDateValue,
+  selectDashboardRows,
 };

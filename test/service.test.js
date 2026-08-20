@@ -43,6 +43,7 @@ const {
   cachedDashboardRow,
   dashboardEntry,
   compareDashboardEntries,
+  selectDashboardRows,
 } = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
 const { eventRows } = require("../src/cron/eventSync");
@@ -318,6 +319,27 @@ test("Redis active-match cache excludes completed and expired events", () => {
     activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")),
     [],
   );
+});
+
+test("database active-match rows are grouped without correlated market scans", () => {
+  const common = {
+    eventid: 101,
+    matchname: "Alpha v Beta",
+    sportid: 4,
+    isactive: 1,
+  };
+  const selected = selectDashboardRows([
+    { ...common, marketid: "goal", marketname: "First Goal" },
+    { ...common, marketid: "winner", marketname: "Winner" },
+    { ...common, marketid: "book", marketname: "Match Bookmaker" },
+    { ...common, marketid: "odds", marketname: "Match Odds" },
+    { ...common, marketid: "settled", marketname: "Match Odds", settled_marketid: "settled" },
+  ]);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].marketid, "odds");
+  assert.equal(selected[0].isBookmaker, true);
+  assert.equal(selected[0].isGoal, true);
+  assert.equal(selected[0].isOutright, false);
 });
 
 test("competition sync keeps only supported sports", () => {
