@@ -16,6 +16,7 @@ const eventPayloadRevisions = new Map();
 const tickActivity = new Map();
 const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
 const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 });
+const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 172800, { min: 300 });
 const SCORE_TTL_SECONDS = integer("REDIS_SCORE_TTL_SECONDS", 86400, { min: 60 });
 
 const PAYLOAD_GROUPS = [
@@ -38,6 +39,57 @@ function emptyEventPayload() {
 
 function scoreKey(eventId) {
   return `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventId}`;
+}
+
+function eventMetadataKey(sportId) {
+  return `${process.env.REDIS_EVENT_METADATA_KEY_PREFIX || "Events-Rs:"}${sportId}`;
+}
+
+async function writeEvents(events, sportIds = []) {
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return { sports: 0, events: 0 };
+  const requestedSports = [...new Set((sportIds || []).map(Number).filter(Number.isInteger))];
+  const bySport = new Map(requestedSports.map((sportId) => [sportId, []]));
+  for (const event of events || []) {
+    const sportId = Number(event?.sportId);
+    if (!Number.isInteger(sportId) || !bySport.has(sportId)) continue;
+    bySport.get(sportId).push({
+      eventId: Number(event.eventId),
+      eventName: String(event.eventName || "").trim(),
+      sportId,
+      seriesId: Number(event.seriesId),
+      openDate: event.openDate ?? null,
+      inPlay: Boolean(event.inPlay),
+      gameOver: Boolean(event.gameOver),
+    });
+  }
+  if (!bySport.size) return { sports: 0, events: 0 };
+  const transaction = redis.multi();
+  for (const [sportId, rows] of bySport) {
+    transaction.set(eventMetadataKey(sportId), JSON.stringify(rows), {
+      EX: EVENT_METADATA_TTL_SECONDS,
+    });
+  }
+  await transaction.exec();
+  return {
+    sports: bySport.size,
+    events: [...bySport.values()].reduce((total, rows) => total + rows.length, 0),
+  };
+}
+
+async function getEvents(sportId) {
+  const normalized = Number(sportId);
+  if (!Number.isInteger(normalized) || normalized <= 0) return null;
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return null;
+  const value = await redis.get(eventMetadataKey(normalized));
+  if (value == null) return null;
+  try {
+    const events = JSON.parse(value);
+    return Array.isArray(events) ? events : null;
+  } catch {
+    return null;
+  }
 }
 
 async function writeScore(score) {
@@ -1006,6 +1058,8 @@ module.exports = {
   writeTicks,
   writeScore,
   getScore,
+  writeEvents,
+  getEvents,
   removeMarket,
   removeEvent,
   getEventSnapshot,

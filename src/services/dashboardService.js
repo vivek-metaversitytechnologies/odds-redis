@@ -60,8 +60,61 @@ function compareDashboardEntries(left, right) {
   return leftTime - rightTime;
 }
 
+function cachedDashboardRow(event, snapshot) {
+  const odds = Array.isArray(snapshot?.Odds) ? snapshot.Odds : [];
+  const bookmaker = Array.isArray(snapshot?.Bookmaker) ? snapshot.Bookmaker : [];
+  const matchOdds = odds.find(
+    (market) => String(market?.Name || "").trim().toLowerCase() === "match odds",
+  );
+  const bookmakerMarket = bookmaker.find((market) => /bookmaker/i.test(String(market?.t || "")));
+  const winnerMarket = [...odds, ...bookmaker].find((market) =>
+    /winner/i.test(String(market?.Name ?? market?.t ?? "")),
+  );
+  const selected = matchOdds || bookmakerMarket || winnerMarket;
+  const marketId = selected?.marketId ?? selected?.mid;
+  if (!marketId) return null;
+  const marketName = String(selected?.Name ?? selected?.t ?? "");
+  return {
+    marketid: String(marketId),
+    marketname: marketName,
+    matchname: event.eventName,
+    opendate: event.openDate,
+    inplay: event.inPlay,
+    eventid: event.eventId,
+    sportid: event.sportId,
+    seriesid: event.seriesId,
+    isBookmaker: bookmaker.length > 0,
+    isGoal: [...odds, ...bookmaker].some((market) =>
+      /goal/i.test(String(market?.Name ?? market?.t ?? "")),
+    ),
+    isOutright: !matchOdds && Boolean(winnerMarket),
+  };
+}
+
+function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {
+  const oldest = now - maxAgeHours * 60 * 60 * 1000;
+  return (events || [])
+    .filter((event) => {
+      if (event?.gameOver) return false;
+      const openTime = Date.parse(event?.openDate);
+      return !Number.isFinite(openTime) || openTime >= oldest;
+    })
+    .map((event) => {
+      const snapshot = snapshots.get(String(event.eventId));
+      const row = cachedDashboardRow(event, snapshot);
+      return row ? dashboardEntry(row, snapshot) : null;
+    })
+    .filter(Boolean)
+    .sort(compareDashboardEntries);
+}
+
 async function activeMatches(sportId) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
+  const cachedEvents = await redisStore.getEvents(sportId);
+  if (cachedEvents !== null) {
+    const snapshots = await redisStore.getEventSnapshots(cachedEvents.map((event) => event.eventId));
+    return activeMatchesFromCache(cachedEvents, snapshots, maxAgeHours);
+  }
   const [rows] = await getSourcePool().query(
     `SELECT t.matchname, t.opendate, t.inplay, t.eventid, t.marketid, t.marketname,
       t.sportid, t.seriesid,
@@ -102,4 +155,11 @@ async function activeMatches(sportId) {
     .sort(compareDashboardEntries);
 }
 
-module.exports = { activeMatches, dashboardEntry, compareDashboardEntries, openDateValue };
+module.exports = {
+  activeMatches,
+  activeMatchesFromCache,
+  cachedDashboardRow,
+  dashboardEntry,
+  compareDashboardEntries,
+  openDateValue,
+};

@@ -178,6 +178,9 @@ async function syncEvents() {
     const responseResults = await Promise.allSettled(
       sportIds.map((si) => provider.events({ si, today: 1 })),
     );
+    const successfulSportIds = sportIds.filter(
+      (_sportId, index) => responseResults[index]?.status === "fulfilled",
+    );
     const responses = responseResults
       .filter((result) => result.status === "fulfilled")
       .map((result) => result.value);
@@ -192,6 +195,9 @@ async function syncEvents() {
       0,
     );
     const events = eventRows(responses);
+    // Populate the public read cache before MySQL writes. Database lock or storage
+    // pressure must not prevent fresh provider events from reaching public APIs.
+    const cached = await redis.writeEvents(events, successfulSportIds);
     const persisted = await upsertEvents(events);
     const retired = await retireCompletedEvents(events);
     const result = {
@@ -200,6 +206,7 @@ async function syncEvents() {
       supported: events.length,
       sportIds,
       ...persisted,
+      cached,
       retired,
       failedSports: responseResults.filter((item) => item.status === "rejected").length,
     };

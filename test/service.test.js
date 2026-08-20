@@ -38,7 +38,12 @@ const {
   isResultTick,
 } = require("../src/services/websocketService");
 const { parseJsonObjects, containsMarketId } = require("../src/services/logReaderService");
-const { dashboardEntry, compareDashboardEntries } = require("../src/services/dashboardService");
+const {
+  activeMatchesFromCache,
+  cachedDashboardRow,
+  dashboardEntry,
+  compareDashboardEntries,
+} = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
 const { eventRows } = require("../src/cron/eventSync");
 const {
@@ -240,6 +245,78 @@ test("dashboard sorts outright winner markets before normal matches", () => {
   assert.deepEqual(
     entries.map((entry) => entry.matchId),
     [3, 2, 1],
+  );
+});
+
+test("Redis event metadata and snapshots produce the active-match API shape", () => {
+  const events = [
+    {
+      eventId: 101,
+      eventName: "Alpha v Beta",
+      sportId: 4,
+      seriesId: 55,
+      openDate: "2026-08-20T12:00:00.000Z",
+      inPlay: true,
+      gameOver: false,
+    },
+  ];
+  const snapshots = new Map([
+    [
+      "101",
+      {
+        Odds: [
+          {
+            marketId: "1.101",
+            Name: "Match Odds",
+            inplay: true,
+            runners: [
+              { ex: { availableToBack: [{ price: 1.8 }], availableToLay: [{ price: 1.9 }] } },
+              { ex: { availableToBack: [{ price: 2.1 }], availableToLay: [{ price: 2.2 }] } },
+            ],
+          },
+        ],
+        Bookmaker: [{ mid: "4.101-BM", t: "Match Bookmaker" }],
+      },
+    ],
+  ]);
+  assert.equal(cachedDashboardRow(events[0], snapshots.get("101")).marketid, "1.101");
+  assert.deepEqual(activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")), [
+    {
+      matchName: "Alpha v Beta",
+      openDate: "2026-08-20T12:00:00.000Z",
+      inPlay: true,
+      matchId: 101,
+      marketId: "1.101",
+      bm: true,
+      GM: false,
+      outright: false,
+      team1Back: 1.8,
+      team1Lay: 1.9,
+      team2Back: 2.1,
+      team2Lay: 2.2,
+      drawBack: 0,
+      drawLay: 0,
+      li: 55,
+    },
+  ]);
+});
+
+test("Redis active-match cache excludes completed and expired events", () => {
+  const snapshot = {
+    Odds: [{ marketId: "1.101", Name: "Match Odds", runners: [] }],
+    Bookmaker: [],
+  };
+  const events = [
+    { eventId: 1, sportId: 4, openDate: "2026-08-17T12:00:00Z", gameOver: false },
+    { eventId: 2, sportId: 4, openDate: "2026-08-20T12:00:00Z", gameOver: true },
+  ];
+  const snapshots = new Map([
+    ["1", snapshot],
+    ["2", snapshot],
+  ]);
+  assert.deepEqual(
+    activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")),
+    [],
   );
 });
 
