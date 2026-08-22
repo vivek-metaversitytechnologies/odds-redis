@@ -8,6 +8,7 @@ const { setBounded } = require("../utils/boundedMap");
 
 let socket;
 const eventWriteChains = new Map();
+const queuedEventWrites = new Map();
 const pendingEventTicks = new Map();
 // Coalesce each event within a short fixed window. Result ticks bypass the delay.
 const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 100, { min: 0, max: 250 });
@@ -296,21 +297,45 @@ function enqueueEventTicks(eventId, items, receivedAtMs) {
   }
 }
 
+function mergeEventWrite(target, source) {
+  target.receivedAtMs = Math.min(target.receivedAtMs, source.receivedAtMs);
+  for (const item of source.items.values()) {
+    const marketId = String(item.mid);
+    const current = target.items.get(marketId);
+    // Never let a later non-result update replace a settlement waiting for Redis.
+    if (!isResultTick(current) || isResultTick(item)) target.items.set(marketId, item);
+  }
+  return target;
+}
+
+function startEventWrite(key, batch) {
+  const write = Promise.resolve().then(() => persist([...batch.items.values()], batch.receivedAtMs));
+  eventWriteChains.set(key, write);
+  const advance = () => {
+    if (eventWriteChains.get(key) !== write) return;
+    const queued = queuedEventWrites.get(key);
+    if (queued) {
+      queuedEventWrites.delete(key);
+      startEventWrite(key, queued);
+    } else {
+      eventWriteChains.delete(key);
+    }
+  };
+  write.then(advance, advance);
+  return write;
+}
+
 function flushPendingEvent(key) {
   const pending = pendingEventTicks.get(key);
   if (!pending) return eventWriteChains.get(key) || Promise.resolve();
   pendingEventTicks.delete(key);
   if (pending.timer) clearTimeout(pending.timer);
-  const previous = eventWriteChains.get(key) || Promise.resolve();
-  const next = previous
-    .catch(() => {})
-    .then(() => persist([...pending.items.values()], pending.receivedAtMs));
-  eventWriteChains.set(key, next);
-  const cleanup = () => {
-    if (eventWriteChains.get(key) === next) eventWriteChains.delete(key);
-  };
-  next.then(cleanup, cleanup);
-  return next;
+  const active = eventWriteChains.get(key);
+  if (!active) return startEventWrite(key, pending);
+  const queued = queuedEventWrites.get(key);
+  if (queued) mergeEventWrite(queued, pending);
+  else queuedEventWrites.set(key, pending);
+  return active;
 }
 
 function connectSocket() {
@@ -438,7 +463,8 @@ async function stopSocket() {
     socket = undefined;
   }
   await Promise.allSettled([...pendingEventTicks.keys()].map(flushPendingEvent));
-  await Promise.allSettled([...eventWriteChains.values()]);
+  // Completing an active write may promote its single queued replacement.
+  while (eventWriteChains.size) await Promise.allSettled([...eventWriteChains.values()]);
 }
 
 function getSocketStatus() {
@@ -451,6 +477,11 @@ function getSocketStatus() {
       0,
     ),
     activeEventWriteCount: eventWriteChains.size,
+    queuedEventWriteCount: queuedEventWrites.size,
+    queuedWriteTickCount: [...queuedEventWrites.values()].reduce(
+      (total, pending) => total + pending.items.size,
+      0,
+    ),
     tickCoalesceMs: TICK_COALESCE_MS,
     traffic: trafficStatus(),
   };
