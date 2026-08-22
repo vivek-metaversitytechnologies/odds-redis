@@ -4,8 +4,8 @@ require("dotenv").config({ quiet: true });
 
 const definitions = [
   { table: "t_event", key: "eventid", unique: "uq_event_eventid" },
-  { table: "t_market", key: "marketid", unique: "uq_market_marketid" },
-  { table: "t_matchfancy", key: "fancyid", unique: "uq_fancy_fancyid" },
+  { table: "t_market", key: "marketid", unique: "uq_market_marketid", prefix: 191 },
+  { table: "t_matchfancy", key: "fancyid", unique: "uq_fancy_fancyid", prefix: 191 },
 ];
 
 function databaseConfig() {
@@ -25,12 +25,14 @@ function stamp() {
 async function tableStats(connection, { table, key }) {
   const [[row]] = await connection.query(
     `SELECT COUNT(*) total, COUNT(DISTINCT \`${key}\`) unique_ids,
-            SUM(\`${key}\` IS NULL) null_ids FROM \`${table}\``,
+            SUM(\`${key}\` IS NULL) null_ids,
+            MAX(CHAR_LENGTH(\`${key}\`)) max_key_length FROM \`${table}\``,
   );
   return {
     total: Number(row.total),
     uniqueIds: Number(row.unique_ids),
     nullIds: Number(row.null_ids),
+    maxKeyLength: Number(row.max_key_length || 0),
   };
 }
 
@@ -58,11 +60,19 @@ async function assertSafeSchema(connection) {
 async function deduplicate({ execute = false } = {}) {
   const connection = await mysql.createConnection(databaseConfig());
   let locked = false;
+  const createdTables = [];
   try {
     await assertSafeSchema(connection);
     const before = {};
     for (const definition of definitions) {
       before[definition.table] = await tableStats(connection, definition);
+    }
+    for (const definition of definitions) {
+      if (definition.prefix && before[definition.table].maxKeyLength > definition.prefix) {
+        throw new Error(
+          `${definition.table}.${definition.key} contains a value longer than ${definition.prefix} characters`,
+        );
+      }
     }
     process.stdout.write(`${JSON.stringify({ execute, before }, null, 2)}\n`);
     if (!execute) {
@@ -80,12 +90,14 @@ async function deduplicate({ execute = false } = {}) {
     const swaps = [];
     const result = {};
     for (const definition of definitions) {
-      const { table, key, unique } = definition;
+      const { table, key, unique, prefix } = definition;
       const clean = `${table}_dedupe_${suffix}`;
       const backup = `${table}_backup_${suffix}`;
       process.stdout.write(`Building ${clean} from ${table}...\n`);
       await connection.query(`CREATE TABLE \`${clean}\` LIKE \`${table}\``);
-      await connection.query(`ALTER TABLE \`${clean}\` ADD UNIQUE KEY \`${unique}\` (\`${key}\`)`);
+      createdTables.push(clean);
+      const indexedKey = prefix ? `\`${key}\`(${prefix})` : `\`${key}\``;
+      await connection.query(`ALTER TABLE \`${clean}\` ADD UNIQUE KEY \`${unique}\` (${indexedKey})`);
       await connection.query(
         `INSERT INTO \`${clean}\`
          SELECT source.* FROM \`${table}\` source
@@ -108,9 +120,19 @@ async function deduplicate({ execute = false } = {}) {
 
     process.stdout.write("Validation passed; atomically swapping all tables...\n");
     await connection.query(`RENAME TABLE ${swaps.join(", ")}`);
+    createdTables.length = 0;
     process.stdout.write(`${JSON.stringify({ completed: true, result }, null, 2)}\n`);
     process.stdout.write("Backups retained. Do not delete them until application verification is complete.\n");
     return result;
+  } catch (error) {
+    for (const table of createdTables.reverse()) {
+      try {
+        await connection.query(`DROP TABLE IF EXISTS \`${table}\``);
+      } catch {
+        /* Preserve the original failure; partial clean tables can be removed manually. */
+      }
+    }
+    throw error;
   } finally {
     if (locked) {
       await connection.query("SELECT RELEASE_LOCK(?)", ["odds_socket_natural_id_deduplication"]);
