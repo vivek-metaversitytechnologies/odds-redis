@@ -213,6 +213,11 @@ test("normal service shutdown preserves provider registrations", () => {
   assert.match(serverSource, /RECONCILE_SUBSCRIPTIONS_ON_START\s*\|\|\s*"false"/);
 });
 
+test("socket coalescing does not retain unused promise waiters", () => {
+  const socketSource = fs.readFileSync(path.join(__dirname, "../src/services/websocketService.js"), "utf8");
+  assert.doesNotMatch(socketSource, /pending\.waiters/);
+});
+
 test("database rows map to API event fields", () => {
   const event = Event.fromRow({
     id: 1,

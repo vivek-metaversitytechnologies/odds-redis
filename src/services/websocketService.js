@@ -272,7 +272,7 @@ function enqueueEventTicks(eventId, items, receivedAtMs) {
   const key = String(eventId);
   let pending = pendingEventTicks.get(key);
   if (!pending) {
-    pending = { items: new Map(), receivedAtMs, waiters: [], timer: null, immediate: false };
+    pending = { items: new Map(), receivedAtMs, timer: null, immediate: false };
     pendingEventTicks.set(key, pending);
   }
   pending.receivedAtMs = Math.min(pending.receivedAtMs, receivedAtMs);
@@ -284,7 +284,6 @@ function enqueueEventTicks(eventId, items, receivedAtMs) {
   }
   const resultTick = (items || []).some(isResultTick);
   pending.immediate ||= resultTick;
-  const completion = new Promise((resolve, reject) => pending.waiters.push({ resolve, reject }));
   if (pending.immediate) {
     if (pending.timer) clearTimeout(pending.timer);
     pending.timer = setTimeout(() => flushPendingEvent(key), 0);
@@ -295,7 +294,6 @@ function enqueueEventTicks(eventId, items, receivedAtMs) {
     pending.timer = setTimeout(() => flushPendingEvent(key), TICK_COALESCE_MS);
     pending.timer.unref?.();
   }
-  return completion;
 }
 
 function flushPendingEvent(key) {
@@ -311,10 +309,6 @@ function flushPendingEvent(key) {
   const cleanup = () => {
     if (eventWriteChains.get(key) === next) eventWriteChains.delete(key);
   };
-  next.then(
-    (value) => pending.waiters.forEach(({ resolve }) => resolve(value)),
-    (error) => pending.waiters.forEach(({ reject }) => reject(error)),
-  );
   next.then(cleanup, cleanup);
   return next;
 }

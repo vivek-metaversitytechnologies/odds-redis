@@ -882,7 +882,9 @@ async function writeTicks(items) {
   const changed = serialized !== previousSerialized;
   if (changed) await redis.set(key, serialized, { EX: EVENT_TTL_SECONDS });
   setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
-  if (changed) eventPayloadRevisions.set(eventId, (eventPayloadRevisions.get(eventId) || 0) + 1);
+  if (changed) {
+    setBounded(eventPayloadRevisions, eventId, (eventPayloadRevisions.get(eventId) || 0) + 1, CACHE_LIMIT);
+  }
   for (const { item } of acceptedRows) recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
   return {
     payload,

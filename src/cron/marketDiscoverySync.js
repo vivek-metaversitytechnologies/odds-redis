@@ -645,11 +645,15 @@ async function syncMarketDiscovery(events, lane = "active") {
     // First pass: one unfiltered request per event batch. Inactive line markets are
     // reconciled immediately instead of waiting for every fancy family and thousands
     // of database upserts in the full discovery pass.
-    const primarySettled = await Promise.allSettled(eventBatches.map((eids) => provider.markets({ eids })));
-    const primaryResponses = primarySettled.map((result) =>
-      result.status === "fulfilled" ? result.value : null,
+    const primarySettled = await Promise.allSettled(
+      eventBatches.map(async (eids) => {
+        const response = await provider.markets({ eids });
+        return { valid: isMarketSnapshotResponse(response), rows: marketRows(response, eventsById) };
+      }),
     );
-    const primaryRows = primaryResponses.flatMap((response) => marketRows(response, eventsById));
+    const primaryRows = primarySettled.flatMap((result) =>
+      result.status === "fulfilled" ? result.value.rows : [],
+    );
     discovered.push(...primaryRows);
     // Commit the useful primary snapshot immediately. Typed-family discovery and runner
     // hydration are independent stages and must not prevent core markets from appearing.
@@ -673,7 +677,7 @@ async function syncMarketDiscovery(events, lane = "active") {
     // Reconcile only batches with a successful, structurally valid response. A timeout,
     // error response, or malformed body must never be interpreted as an empty market list.
     const validPrimaryEventIds = eventBatches.flatMap((eids, index) =>
-      isMarketSnapshotResponse(primaryResponses[index]) ? eids : [],
+      primarySettled[index]?.status === "fulfilled" && primarySettled[index].value.valid ? eids : [],
     );
     const validPrimaryEventIdSet = new Set(validPrimaryEventIds.map(Number));
     const missingLineReconciliation = await reconcileMissingLineMarkets(
@@ -688,12 +692,15 @@ async function syncMarketDiscovery(events, lane = "active") {
     const typedSettled = fullDiscovery
       ? await Promise.allSettled(
           eventBatches.flatMap((eids) =>
-            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map((type) => provider.markets({ eids, type })),
+            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map(async (type) => {
+              const response = await provider.markets({ eids, type });
+              return marketRows(response, eventsById);
+            }),
           ),
         )
       : [];
     for (const result of typedSettled) {
-      if (result.status === "fulfilled") discovered.push(...marketRows(result.value, eventsById));
+      if (result.status === "fulfilled") discovered.push(...result.value);
     }
     const unique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(discovered));
     const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
