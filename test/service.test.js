@@ -19,6 +19,9 @@ const {
   regularDefinitionEntries,
   normalizeEventPayload,
   validMarketIdentifier,
+  writeTicks,
+  reconcileFancyDefinitions,
+  __testing__: redisTesting,
 } = require("../src/config/redis");
 const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
 const { isFutureMarket } = require("../src/controllers/subscriptionController");
@@ -103,6 +106,99 @@ test("startup preflight accepts complete infrastructure configuration", () => {
   );
   assert.deepEqual(cronErrors({ sample: { expression: "*/5 * * * * *" } }), []);
   assert.equal(cronErrors({ sample: { expression: "not a cron" } }).length, 1);
+});
+
+function createFakeRedisClient({ gateFirstGet = false } = {}) {
+  const store = new Map();
+  let firstGetGated = gateFirstGet;
+  let releaseGate = () => {};
+  const gate = gateFirstGet
+    ? new Promise((resolve) => {
+        releaseGate = resolve;
+      })
+    : Promise.resolve();
+  const client = {
+    isOpen: true,
+    async get(key) {
+      // Snapshot the value immediately (like a real Redis server would, at the
+      // moment it processes the command) and only delay handing the response back
+      // — a delayed *response* must not silently pick up writes made in the meantime.
+      const shouldGate = firstGetGated;
+      firstGetGated = false;
+      const value = store.has(key) ? store.get(key) : null;
+      if (shouldGate) await gate;
+      return value;
+    },
+    async set(key, value) {
+      store.set(key, value);
+      return "OK";
+    },
+    async mGet(keys) {
+      return keys.map((key) => (store.has(key) ? store.get(key) : null));
+    },
+    multi() {
+      const ops = [];
+      const builder = {
+        set(key, value) {
+          ops.push([key, value]);
+          return builder;
+        },
+        async exec() {
+          for (const [key, value] of ops) store.set(key, value);
+          return ops.map(() => "OK");
+        },
+      };
+      return builder;
+    },
+  };
+  return { client, store, releaseGate };
+}
+
+test("discovery reconciliation cannot overwrite a socket tick that lands mid-read", async () => {
+  const { client: fakeClient, store, releaseGate } = createFakeRedisClient({ gateFirstGet: true });
+  redisTesting.reset();
+  redisTesting.setRedisClient(fakeClient);
+  redisTesting.primeMarketCache([
+    [
+      "9001.F2",
+      { marketid: "9001.F2", eventid: 9001, marketname: "Session Runs", isactive: true, matchname: "Alpha v Beta" },
+    ],
+  ]);
+
+  const marketDefinition = {
+    eventId: 9001,
+    marketId: "9001.F2",
+    marketName: "Session Runs",
+    isActive: true,
+    gameOver: false,
+  };
+  const tickItem = { eid: 9001, mid: "9001.F2", sb: "OPEN" };
+
+  // Reconciliation starts first and blocks on its Redis read (simulating network
+  // latency), which registers it as the event's lock holder. A live socket tick for
+  // the same market arrives while it is still stuck there.
+  const reconcilePromise = reconcileFancyDefinitions([marketDefinition]);
+  await new Promise((resolve) => setImmediate(resolve));
+  const tickPromise = writeTicks([tickItem]);
+
+  // Give the tick every opportunity to run if it weren't blocked by the event lock.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    store.has("Data-Rs:9001"),
+    false,
+    "the tick must not be able to persist while reconciliation still holds the event lock",
+  );
+
+  releaseGate();
+  await Promise.all([reconcilePromise, tickPromise]);
+
+  const stored = JSON.parse(store.get("Data-Rs:9001"));
+  const entry = stored.Fancy2.find((row) => String(row.mid ?? row.sid) === "9001.F2");
+  assert.ok(entry, "the market survives both operations");
+  assert.notEqual(entry.gstatus, "WAITING", "the tick's live status must not be reverted by reconciliation");
+
+  redisTesting.reset();
 });
 
 test("Redis API reads use a connection isolated from background writes", () => {

@@ -906,9 +906,16 @@ async function syncLiveMarketCleanup() {
     const regular = unique.filter((market) => !storedInFancyTable(market));
     const regularResult = await upsertMarkets(regular);
     const fancyResult = await upsertFancies(fancies);
+    const marketIdsByEvent = new Map();
+    for (const market of unique) {
+      const eventId = String(market.eventId);
+      if (!marketIdsByEvent.has(eventId)) marketIdsByEvent.set(eventId, []);
+      marketIdsByEvent.get(eventId).push(market.marketId);
+    }
     const removals = await Promise.all(
-      unique.map((market) => redisStore.removeMarket(market.eventId, market.marketId)),
+      [...marketIdsByEvent.entries()].map(([eventId, marketIds]) => redisStore.removeMarkets(eventId, marketIds)),
     );
+    const removedCount = removals.reduce((total, removedIds) => total + removedIds.size, 0);
     const marketIds = unique.map((market) => market.marketId);
     redisStore.invalidateMarkets(marketIds);
     await unsubscribeEventMarkets(marketIds);
@@ -918,7 +925,7 @@ async function syncLiveMarketCleanup() {
       events: events.length,
       inactive: unique.length,
       deactivated: regularResult.updated + fancyResult.updated,
-      removed: removals.filter(Boolean).length + missingLines.removed,
+      removed: removedCount + missingLines.removed,
       missingLines,
     };
   } finally {

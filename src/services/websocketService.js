@@ -91,6 +91,23 @@ function byteSize(value) {
   return Buffer.byteLength(JSON.stringify(value) || "");
 }
 
+const INGESTED_BYTE_SAMPLE_INTERVAL_MS = integer("PROVIDER_TICK_BYTE_SAMPLE_MS", 1000, { min: 0 });
+let ingestedByteSample = { bytesPerMessage: 0, sampledAt: 0 };
+
+// Exact JSON.stringify sizing runs on every raw socket message otherwise, which is
+// pure synchronous CPU on the tick ingest hot path. Sample it periodically instead
+// and extrapolate from the last sample the rest of the time — this feeds an
+// approximate traffic metric, not business logic, so the estimate is acceptable.
+function estimateIngestedBytes(data, messageCount) {
+  const now = Date.now();
+  if (now - ingestedByteSample.sampledAt >= INGESTED_BYTE_SAMPLE_INTERVAL_MS) {
+    const bytes = byteSize(data);
+    ingestedByteSample = { bytesPerMessage: messageCount ? bytes / messageCount : bytes, sampledAt: now };
+    return bytes;
+  }
+  return Math.round(ingestedByteSample.bytesPerMessage * messageCount);
+}
+
 function summarize(item) {
   if (!item || typeof item !== "object") return { type: typeof item };
   return {
@@ -417,7 +434,7 @@ function connectSocket() {
     const oddsTicks = collectOddsTicks(data);
     recordTraffic({
       ingestedTicks: oddsTicks.length,
-      ingestedBytes: byteSize(data),
+      ingestedBytes: estimateIngestedBytes(data, messages.length),
     });
     const scores = messages.flatMap(collectScores);
     if (scores.length || oddsTicks.length) logRawSocketPayload(data);

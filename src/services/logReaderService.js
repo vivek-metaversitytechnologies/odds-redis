@@ -1,5 +1,6 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { integer } = require("../config/env");
 
 function parseJsonObjects(text) {
   const records = [];
@@ -61,12 +62,40 @@ function normalize(record, source) {
   return { ...record, source, type, level };
 }
 
-async function readSource(source) {
+const LOG_CACHE_MAX_RECORDS = integer("LOG_READER_CACHE_MAX_RECORDS", 2000, { min: 100 });
+const sourceCache = new Map();
+
+async function findLogFile(source) {
   const provider = source === "provider";
   const directory = path.resolve(
     provider ? process.env.PROVIDER_LOG_DIR || "logs/provider" : process.env.LOG_DIR || "logs",
   );
-  const file = await latestLogFile(directory, provider ? "provider-http-" : "application-");
+  return latestLogFile(directory, provider ? "provider-http-" : "application-");
+}
+
+// Bounded cache for the frequently-polled log list: it never needs more than
+// `limit` (<=500) most recent records, so only the tail is retained — caching the
+// full parsed array of a 20-25MB log would hold far more heap than the source file.
+async function readSource(source) {
+  const file = await findLogFile(source);
+  if (!file) return { source, file: null, records: [] };
+  const stats = await fs.stat(file);
+  const cached = sourceCache.get(source);
+  if (cached && cached.file === file && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+    return cached.result;
+  }
+  const text = await fs.readFile(file, "utf8");
+  const records = parseJsonObjects(text).map((record) => normalize(record, source));
+  const bounded = records.length > LOG_CACHE_MAX_RECORDS ? records.slice(-LOG_CACHE_MAX_RECORDS) : records;
+  const result = { source, file: path.basename(file), records: bounded };
+  sourceCache.set(source, { file, mtimeMs: stats.mtimeMs, size: stats.size, result });
+  return result;
+}
+
+// Marketid lookups must search the whole file — a match can sit well outside the
+// bounded tail readSource() caches — so this always reads and parses fresh.
+async function readSourceFull(source) {
+  const file = await findLogFile(source);
   if (!file) return { source, file: null, records: [] };
   const text = await fs.readFile(file, "utf8");
   return {
@@ -94,7 +123,7 @@ function containsMarketId(value, marketId, visited = new Set()) {
 }
 
 async function readRawSocketLogs({ marketId, limit = 20 } = {}) {
-  const result = await readSource("provider");
+  const result = await readSourceFull("provider");
   const boundedLimit = Math.max(1, Math.min(100, Number(limit) || 20));
   const records = result.records
     .filter((record) => record.type === "provider.socket.raw" && containsMarketId(record.payload, marketId))

@@ -14,8 +14,8 @@ const marketCache = new Map();
 const runnerNameCache = new Map();
 const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
-const eventPayloadRevisions = new Map();
 const tickActivity = new Map();
+const eventLocks = new Map();
 const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
 const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 });
 const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 172800, { min: 300 });
@@ -34,6 +34,21 @@ const PAYLOAD_GROUPS = [
   "CricketCasino",
   "BallByBall",
 ];
+
+// Serializes every read-modify-write against one event's Redis payload (tick writes,
+// market removals, event deletion) so concurrent callers can't race and clobber
+// each other's update. Keyed per event so unrelated events never block each other.
+function withEventLock(eventId, fn) {
+  const key = String(eventId);
+  const previousTail = (eventLocks.get(key) || Promise.resolve()).catch(() => {});
+  const result = previousTail.then(fn);
+  const tail = result.catch(() => {});
+  eventLocks.set(key, tail);
+  tail.finally(() => {
+    if (eventLocks.get(key) === tail) eventLocks.delete(key);
+  });
+  return result;
+}
 
 function emptyEventPayload() {
   return Object.fromEntries(PAYLOAD_GROUPS.map((group) => [group, []]));
@@ -537,68 +552,63 @@ async function reconcileFancyDefinitions(markets) {
   let removed = 0;
   const changedEventIds = [];
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
-  const eventDefinitions = [...byEvent.entries()];
-  const startingRevisions = new Map(
-    eventDefinitions.map(([eventId]) => [eventId, eventPayloadRevisions.get(eventId) || 0]),
-  );
-  const currentValues = eventDefinitions.length
-    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`))
-    : [];
-  const writes = [];
-  for (let eventIndex = 0; eventIndex < eventDefinitions.length; eventIndex += 1) {
-    const [eventId, definitions] = eventDefinitions[eventIndex];
-    const key = `${prefix}${eventId}`;
-    let payload = emptyEventPayload();
-    const current = currentValues[eventIndex];
-    if (current) {
-      try {
-        const parsed = JSON.parse(current);
-        payload = normalizeEventPayload(parsed);
-      } catch {
-        /* replace malformed payload */
-      }
-    }
-    let changed = false;
-    for (const { market, group } of definitions) {
-      const marketId = String(market.marketId);
-      const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
-      const active = market.isActive && !market.gameOver;
-      if (active && index < 0) {
-        payload[group].push(fancyDefinitionEntry(market));
-        added += 1;
-        changed = true;
-      } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
-        const definition = fancyDefinitionEntry(market);
-        if (JSON.stringify(payload[group][index]) !== JSON.stringify(definition)) {
-          payload[group][index] = definition;
-          changed = true;
+  // Each event's read-modify-write runs inside withEventLock so it can never race a
+  // concurrent tick write or removal for that same event (see writeTicks/removeMarkets).
+  // That rules out batching all events into one mGet/MULTI round trip: a stale
+  // snapshot read outside the lock is exactly what let a reconciler resurrect a
+  // market a tick had just updated.
+  await Promise.all(
+    [...byEvent.entries()].map(([eventId, definitions]) =>
+      withEventLock(eventId, async () => {
+        const key = `${prefix}${eventId}`;
+        let payload = eventPayloadCache.get(eventId);
+        if (!payload) {
+          payload = emptyEventPayload();
+          const current = await redis.get(key);
+          if (current) {
+            try {
+              payload = normalizeEventPayload(JSON.parse(current));
+            } catch {
+              /* replace malformed payload */
+            }
+          }
         }
-      } else if (
-        active &&
-        index >= 0 &&
-        payload[group][index]?.display_message !== (market.displayMessage ?? null)
-      ) {
-        payload[group][index].display_message = market.displayMessage ?? null;
-        changed = true;
-      } else if (!active && index >= 0) {
-        payload[group].splice(index, 1);
-        removed += 1;
-        changed = true;
-      }
-    }
-    if (changed) {
-      moveTiedMatchLast(payload);
-      if ((eventPayloadRevisions.get(eventId) || 0) !== startingRevisions.get(eventId)) continue;
-      writes.push([key, JSON.stringify(payload)]);
-      setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
-      changedEventIds.push(eventId);
-    }
-  }
-  if (writes.length) {
-    const transaction = redis.multi();
-    for (const [key, value] of writes) transaction.set(key, value, { EX: EVENT_TTL_SECONDS });
-    await transaction.exec();
-  }
+        let changed = false;
+        for (const { market, group } of definitions) {
+          const marketId = String(market.marketId);
+          const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
+          const active = market.isActive && !market.gameOver;
+          if (active && index < 0) {
+            payload[group].push(fancyDefinitionEntry(market));
+            added += 1;
+            changed = true;
+          } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
+            const definition = fancyDefinitionEntry(market);
+            if (JSON.stringify(payload[group][index]) !== JSON.stringify(definition)) {
+              payload[group][index] = definition;
+              changed = true;
+            }
+          } else if (
+            active &&
+            index >= 0 &&
+            payload[group][index]?.display_message !== (market.displayMessage ?? null)
+          ) {
+            payload[group][index].display_message = market.displayMessage ?? null;
+            changed = true;
+          } else if (!active && index >= 0) {
+            payload[group].splice(index, 1);
+            removed += 1;
+            changed = true;
+          }
+        }
+        if (!changed) return;
+        moveTiedMatchLast(payload);
+        await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
+        setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+        changedEventIds.push(eventId);
+      }),
+    ),
+  );
   return { events: byEvent.size, added, removed, changedEventIds };
 }
 
@@ -699,87 +709,83 @@ async function reconcileRegularDefinitions(markets) {
   let removed = 0;
   const changedEventIds = [];
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
-  const eventDefinitions = [...byEvent.entries()];
-  const startingRevisions = new Map(
-    eventDefinitions.map(([eventId]) => [eventId, eventPayloadRevisions.get(eventId) || 0]),
-  );
-  const currentValues = eventDefinitions.length
-    ? await redis.mGet(eventDefinitions.map(([eventId]) => `${prefix}${eventId}`))
-    : [];
-  const writes = [];
-  for (let eventIndex = 0; eventIndex < eventDefinitions.length; eventIndex += 1) {
-    const [eventId, definitions] = eventDefinitions[eventIndex];
-    const key = `${prefix}${eventId}`;
-    let payload = emptyEventPayload();
-    const current = currentValues[eventIndex];
-    if (current) {
-      try {
-        payload = normalizeEventPayload(JSON.parse(current));
-      } catch {
-        /* replace malformed payload */
-      }
-    }
-    let changed = false;
-    for (const market of definitions) {
-      const active = market.isActive && !market.gameOver;
-      if (!active) {
-        for (const group of PAYLOAD_GROUPS) {
-          const filtered = payload[group].filter((entry) => entryMarketId(entry) !== String(market.marketId));
-          if (filtered.length !== payload[group].length) {
-            removed += 1;
-            changed = true;
-            payload[group] = filtered;
-          }
-        }
-        continue;
-      }
-      if (payloadHasMarket(payload, market.marketId)) {
-        // Replace the placeholder once runner names for this exact BM2 market are available.
-        const marketId = String(market.marketId);
-        const currentEntries = payload.Bookmaker.filter((entry) => entryMarketId(entry) === marketId);
-        const syntheticBookmaker2 =
-          /-BM2$/i.test(marketId) &&
-          currentEntries.length === 1 &&
-          String(currentEntries[0]?.nation || "").toLowerCase() === "bookmaker2";
-        if (syntheticBookmaker2 && (market.runners || []).length) {
-          for (const groupName of PAYLOAD_GROUPS) {
-            payload[groupName] = payload[groupName].filter((entry) => entryMarketId(entry) !== marketId);
-          }
-          const seeded = regularDefinitionEntries(market, market.runners);
-          payload[seeded.group].push(...seeded.entries);
-          changed = true;
-        }
-        for (const groupName of PAYLOAD_GROUPS) {
-          for (const entry of payload[groupName]) {
-            if (
-              entryMarketId(entry) === marketId &&
-              entry.display_message !== (market.displayMessage ?? null)
-            ) {
-              entry.display_message = market.displayMessage ?? null;
-              changed = true;
+  // See reconcileFancyDefinitions: each event's read-modify-write runs inside
+  // withEventLock instead of a batched mGet/MULTI so it can't race a concurrent
+  // tick write or removal for that event.
+  await Promise.all(
+    [...byEvent.entries()].map(([eventId, definitions]) =>
+      withEventLock(eventId, async () => {
+        const key = `${prefix}${eventId}`;
+        let payload = eventPayloadCache.get(eventId);
+        if (!payload) {
+          payload = emptyEventPayload();
+          const current = await redis.get(key);
+          if (current) {
+            try {
+              payload = normalizeEventPayload(JSON.parse(current));
+            } catch {
+              /* replace malformed payload */
             }
           }
         }
-        continue;
-      }
-      const { group, entries } = regularDefinitionEntries(market, market.runners || []);
-      payload[group].push(...entries);
-      added += 1;
-      changed = true;
-    }
-    if (changed) {
-      moveTiedMatchLast(payload);
-      if ((eventPayloadRevisions.get(eventId) || 0) !== startingRevisions.get(eventId)) continue;
-      writes.push([key, JSON.stringify(payload)]);
-      setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
-      changedEventIds.push(eventId);
-    }
-  }
-  if (writes.length) {
-    const transaction = redis.multi();
-    for (const [key, value] of writes) transaction.set(key, value, { EX: EVENT_TTL_SECONDS });
-    await transaction.exec();
-  }
+        let changed = false;
+        for (const market of definitions) {
+          const active = market.isActive && !market.gameOver;
+          if (!active) {
+            for (const group of PAYLOAD_GROUPS) {
+              const filtered = payload[group].filter(
+                (entry) => entryMarketId(entry) !== String(market.marketId),
+              );
+              if (filtered.length !== payload[group].length) {
+                removed += 1;
+                changed = true;
+                payload[group] = filtered;
+              }
+            }
+            continue;
+          }
+          if (payloadHasMarket(payload, market.marketId)) {
+            // Replace the placeholder once runner names for this exact BM2 market are available.
+            const marketId = String(market.marketId);
+            const currentEntries = payload.Bookmaker.filter((entry) => entryMarketId(entry) === marketId);
+            const syntheticBookmaker2 =
+              /-BM2$/i.test(marketId) &&
+              currentEntries.length === 1 &&
+              String(currentEntries[0]?.nation || "").toLowerCase() === "bookmaker2";
+            if (syntheticBookmaker2 && (market.runners || []).length) {
+              for (const groupName of PAYLOAD_GROUPS) {
+                payload[groupName] = payload[groupName].filter((entry) => entryMarketId(entry) !== marketId);
+              }
+              const seeded = regularDefinitionEntries(market, market.runners);
+              payload[seeded.group].push(...seeded.entries);
+              changed = true;
+            }
+            for (const groupName of PAYLOAD_GROUPS) {
+              for (const entry of payload[groupName]) {
+                if (
+                  entryMarketId(entry) === marketId &&
+                  entry.display_message !== (market.displayMessage ?? null)
+                ) {
+                  entry.display_message = market.displayMessage ?? null;
+                  changed = true;
+                }
+              }
+            }
+            continue;
+          }
+          const { group, entries } = regularDefinitionEntries(market, market.runners || []);
+          payload[group].push(...entries);
+          added += 1;
+          changed = true;
+        }
+        if (!changed) return;
+        moveTiedMatchLast(payload);
+        await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
+        setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+        changedEventIds.push(eventId);
+      }),
+    ),
+  );
   return { events: byEvent.size, added, removed, changedEventIds };
 }
 
@@ -874,47 +880,61 @@ async function writeTicks(items) {
   rejected.push(...marketRows.filter(({ item }) => !acceptedItems.has(item)).map(({ item }) => item));
   if (!acceptedRows.length) return { payload: false, accepted: [], rejected };
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
-  let payload = eventPayloadCache.get(eventId);
-  if (!payload) {
-    payload = emptyEventPayload();
-    const current = await redis.get(key);
-    if (current) {
-      try {
-        const parsed = JSON.parse(current);
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          payload = normalizeEventPayload(parsed);
-        }
-      } catch {
-        /* Replace malformed legacy data with a valid event payload. */
-      }
-    }
-  }
-  const previousSerialized = JSON.stringify(payload);
   await Promise.allSettled(
     acceptedRows
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
-  for (const { item, market } of acceptedRows) {
-    const { group, entries } = transformedTick(item, market);
-    const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === String(item.mid));
-    if (group === "Odds") preserveRunnerNames(entries, previousEntries);
-    // A market can change grouping as discovery metadata improves; keep exactly one copy.
-    for (const payloadGroupName of PAYLOAD_GROUPS) {
-      payload[payloadGroupName] = payload[payloadGroupName].filter(
-        (entry) => entryMarketId(entry) !== String(item.mid),
-      );
+  const { payload, changed, serialized } = await withEventLock(eventId, async () => {
+    let payload = eventPayloadCache.get(eventId);
+    if (!payload) {
+      payload = emptyEventPayload();
+      const current = await redis.get(key);
+      if (current) {
+        try {
+          const parsed = JSON.parse(current);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            payload = normalizeEventPayload(parsed);
+          }
+        } catch {
+          /* Replace malformed legacy data with a valid event payload. */
+        }
+      }
     }
-    if (!shouldRemoveFromPayload(group, item, market)) payload[group].push(...entries);
-  }
-  moveTiedMatchLast(payload);
-  const serialized = JSON.stringify(payload);
-  const changed = serialized !== previousSerialized;
-  if (changed) await redis.set(key, serialized, { EX: EVENT_TTL_SECONDS });
-  setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
-  if (changed) {
-    setBounded(eventPayloadRevisions, eventId, (eventPayloadRevisions.get(eventId) || 0) + 1, CACHE_LIMIT);
-  }
+    let changed = false;
+    for (const { item, market } of acceptedRows) {
+      const { group, entries } = transformedTick(item, market);
+      const marketId = String(item.mid);
+      const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === marketId);
+      // Detect whether this market's entries were sitting in a different group before
+      // (grouping can change as discovery metadata improves), which is itself a change.
+      const movedFromOtherGroup = PAYLOAD_GROUPS.some(
+        (payloadGroupName) =>
+          payloadGroupName !== group &&
+          payload[payloadGroupName].some((entry) => entryMarketId(entry) === marketId),
+      );
+      if (group === "Odds") preserveRunnerNames(entries, previousEntries);
+      const newEntries = shouldRemoveFromPayload(group, item, market) ? [] : entries;
+      const marketChanged =
+        movedFromOtherGroup ||
+        previousEntries.length !== newEntries.length ||
+        JSON.stringify(previousEntries) !== JSON.stringify(newEntries);
+      if (!marketChanged) continue;
+      changed = true;
+      // A market can change grouping as discovery metadata improves; keep exactly one copy.
+      for (const payloadGroupName of PAYLOAD_GROUPS) {
+        payload[payloadGroupName] = payload[payloadGroupName].filter(
+          (entry) => entryMarketId(entry) !== marketId,
+        );
+      }
+      if (newEntries.length) payload[group].push(...newEntries);
+    }
+    moveTiedMatchLast(payload);
+    const serialized = changed ? JSON.stringify(payload) : null;
+    if (changed) await redis.set(key, serialized, { EX: EVENT_TTL_SECONDS });
+    setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+    return { payload, changed, serialized };
+  });
   for (const { item } of acceptedRows) recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
   return {
     payload,
@@ -1048,47 +1068,60 @@ async function getEventSnapshots(eventIds) {
   return snapshots;
 }
 
-async function removeMarket(eventId, marketId) {
+async function removeMarkets(eventId, marketIds) {
+  const normalizedIds = [...new Set((marketIds || []).map((id) => String(id)))];
   const redis = await getRedisClient();
-  if (!redis?.isOpen) return false;
+  if (!redis?.isOpen || !normalizedIds.length) return new Set();
   const eventKey = String(eventId);
-  const normalizedMarketId = String(marketId);
-  const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`;
-  let payload = eventPayloadCache.get(eventKey);
-  if (!payload) {
-    const value = await redis.get(key);
-    if (!value) return false;
-    try {
-      payload = JSON.parse(value);
-    } catch {
-      return false;
+  return withEventLock(eventKey, async () => {
+    const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`;
+    let payload = eventPayloadCache.get(eventKey);
+    if (!payload) {
+      const value = await redis.get(key);
+      if (!value) return new Set();
+      try {
+        payload = JSON.parse(value);
+      } catch {
+        return new Set();
+      }
     }
-  }
-  let removed = false;
-  for (const group of PAYLOAD_GROUPS) {
-    if (!Array.isArray(payload[group])) payload[group] = [];
-    const filtered = payload[group].filter((entry) => entryMarketId(entry) !== normalizedMarketId);
-    if (filtered.length !== payload[group].length) removed = true;
-    payload[group] = filtered;
-  }
-  if (!removed) return false;
-  await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
-  setBounded(eventPayloadCache, eventKey, payload, CACHE_LIMIT);
-  return true;
+    const idSet = new Set(normalizedIds);
+    const removedIds = new Set();
+    for (const group of PAYLOAD_GROUPS) {
+      if (!Array.isArray(payload[group])) payload[group] = [];
+      const filtered = [];
+      for (const entry of payload[group]) {
+        const entryId = entryMarketId(entry);
+        if (idSet.has(entryId)) removedIds.add(entryId);
+        else filtered.push(entry);
+      }
+      payload[group] = filtered;
+    }
+    if (!removedIds.size) return removedIds;
+    await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
+    setBounded(eventPayloadCache, eventKey, payload, CACHE_LIMIT);
+    return removedIds;
+  });
+}
+
+async function removeMarket(eventId, marketId) {
+  const removedIds = await removeMarkets(eventId, [marketId]);
+  return removedIds.size > 0;
 }
 
 async function removeEvent(eventId) {
   const redis = await getRedisClient();
   if (!redis?.isOpen) return false;
   const eventKey = String(eventId);
-  const keys = [
-    `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
-    `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
-  ];
-  await redis.del(keys);
-  eventPayloadCache.delete(eventKey);
-  eventPayloadRevisions.delete(eventKey);
-  return true;
+  return withEventLock(eventKey, async () => {
+    const keys = [
+      `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
+      `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
+    ];
+    await redis.del(keys);
+    eventPayloadCache.delete(eventKey);
+    return true;
+  });
 }
 
 async function closeRedis() {
@@ -1118,6 +1151,7 @@ module.exports = {
   writeEvents,
   getEvents,
   removeMarket,
+  removeMarkets,
   removeEvent,
   getEventSnapshot,
   getEventSnapshots,
@@ -1145,4 +1179,20 @@ module.exports = {
   normalizeEventPayload,
   validMarketIdentifier,
   invalidateMarkets,
+  __testing__: {
+    setRedisClient(fakeClient) {
+      client = fakeClient;
+      readClient = fakeClient;
+    },
+    primeMarketCache(entries) {
+      for (const [id, market] of entries) marketCache.set(String(id), market);
+    },
+    reset() {
+      client = undefined;
+      readClient = undefined;
+      marketCache.clear();
+      eventPayloadCache.clear();
+      eventLocks.clear();
+    },
+  },
 };

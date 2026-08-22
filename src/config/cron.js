@@ -20,7 +20,7 @@ module.exports = Object.freeze({
     expression: process.env.FUTURE_MARKET_DISCOVERY_CRON || "0 */10 * * * *",
   }),
   liveMarketCleanup: Object.freeze({
-    expression: process.env.LIVE_MARKET_CLEANUP_CRON || "* * * * * *",
+    expression: process.env.LIVE_MARKET_CLEANUP_CRON || "*/3 * * * * *",
   }),
   redisEventCleanup: Object.freeze({
     expression: process.env.REDIS_EVENT_CLEANUP_CRON || "0 */10 * * * *",
