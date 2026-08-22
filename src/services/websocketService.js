@@ -19,6 +19,7 @@ let resultHandler = async () => {};
 const loggedShapes = new Set();
 const rawSocketActivity = [];
 const subscribedMarketIds = new Set();
+const marketSubscribedAt = new Map();
 const scoreHashes = new Map();
 const pendingScores = new Map();
 let scoreFlushTimer;
@@ -425,7 +426,11 @@ function connectSocket() {
     state.lastConnectedAt = new Date().toISOString();
     state.lastConnectError = null;
     logger.info("[ProviderWS] connected", { socketId: socket.id });
-    if (subscribedMarketIds.size) socket.emit("subscribe", [...subscribedMarketIds]);
+    if (subscribedMarketIds.size) {
+      const now = Date.now();
+      for (const id of subscribedMarketIds) marketSubscribedAt.set(id, now);
+      socket.emit("subscribe", [...subscribedMarketIds]);
+    }
   });
   socket.on("tick", (data) => {
     const receivedAtMs = Date.now();
@@ -493,7 +498,11 @@ function subscribeMarkets(ids) {
         .filter(redisStore.validMarketIdentifier),
     ),
   ].filter((id) => !subscribedMarketIds.has(id));
-  fresh.forEach((id) => subscribedMarketIds.add(id));
+  const now = Date.now();
+  fresh.forEach((id) => {
+    subscribedMarketIds.add(id);
+    marketSubscribedAt.set(id, now);
+  });
   if (!fresh.length) return [];
   const current = connectSocket();
   if (current?.connected) current.emit("subscribe", fresh);
@@ -509,9 +518,18 @@ function unsubscribeMarkets(ids) {
         .filter(redisStore.validMarketIdentifier),
     ),
   ].filter((id) => subscribedMarketIds.delete(id));
+  removed.forEach((id) => marketSubscribedAt.delete(id));
   if (!removed.length) return [];
   if (socket?.connected) socket.emit("unsubscribe", removed);
   return removed;
+}
+
+function reconnectSocket() {
+  state.connectionRequested = true;
+  if (!socket) return connectSocket();
+  socket.disconnect();
+  socket.connect();
+  return socket;
 }
 
 async function stopSocket() {
@@ -559,7 +577,9 @@ module.exports = {
   unsubscribeMarkets,
   stopSocket,
   getSocketStatus,
+  reconnectSocket,
   getSubscribedMarketIds: () => [...subscribedMarketIds],
+  getMarketSubscribedAt: (marketId) => marketSubscribedAt.get(String(marketId)) || null,
   collectOddsTicks,
   collectScores,
   messageShape,

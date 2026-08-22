@@ -19,6 +19,7 @@ const { getMarketSyncStatus } = require("./cron/marketSync");
 const { getResultSyncStatus } = require("./cron/resultSync");
 const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
 const { providerLimiter } = require("./services/providerApi");
+const { getHealthStatus } = require("./services/healthSupervisor");
 
 function createApp() {
   const app = express();
@@ -79,8 +80,10 @@ function createApp() {
   app.get("/health", async (req, res) => {
     try {
       await checkSourceDbConnection();
-      res.json({
-        status: "ok",
+      const supervisor = getHealthStatus();
+      res.status(supervisor.status === "critical" ? 503 : 200).json({
+        status: supervisor.status === "critical" ? "critical" : "ok",
+        supervisor,
         sourceDatabase: "connected",
         redis: redis.getRedisStatus(),
         websocket: websocket.getSocketStatus(),
@@ -95,8 +98,10 @@ function createApp() {
         },
       });
     } catch (error) {
+      const supervisor = getHealthStatus();
       res.status(503).json({
         status: "error",
+        supervisor,
         sourceDatabase: "disconnected",
         redis: redis.getRedisStatus(),
         websocket: websocket.getSocketStatus(),

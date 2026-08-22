@@ -173,6 +173,22 @@ async function reconcileProviderSubscriptions(ids) {
   return { requested: marketIds.length, unsubscribed };
 }
 
+async function refreshMarkets(ids) {
+  const marketIds = [
+    ...new Set((ids || []).map(String).map((id) => id.trim()).filter(redisStore.validMarketIdentifier)),
+  ].filter((id) => !completedMarketIds.has(id));
+  if (!marketIds.length) return { requested: 0, subscribed: [], skipped: [] };
+  await provider.unsubscribe(marketIds);
+  websocket.unsubscribeMarkets(marketIds);
+  const response = await provider.subscribe(marketIds);
+  const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
+  websocket.subscribeMarkets(acknowledgement.subscribed);
+  acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
+  acknowledgement.skipped.forEach((id) => skippedMarketIds.add(id));
+  scheduleSkippedRetry();
+  return { requested: marketIds.length, ...acknowledgement };
+}
+
 function scheduleSkippedRetry() {
   if (retriesStopped || retryTimer || retryPromise || skippedMarketIds.size === 0) return;
   retryTimer = setTimeout(() => {
@@ -293,5 +309,6 @@ module.exports = {
   unsubscribeResultMarkets,
   unsubscribeEventMarkets,
   reconcileProviderSubscriptions,
+  refreshMarkets,
   isMarketSuppressed: (id) => completedMarketIds.has(String(id)),
 };

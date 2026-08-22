@@ -81,6 +81,20 @@ const { eventInWindow, eventWindowSql } = require("../src/utils/eventWindow");
 const { subscriptionDiff } = require("../src/cron/marketSync");
 const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
 const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
+const { pipelineCheck } = require("../src/services/healthSupervisor");
+
+test("health supervisor classifies failed and stuck pipelines", () => {
+  const now = Date.parse("2026-08-22T12:00:00.000Z");
+  assert.equal(pipelineCheck("events", { lastError: "provider timeout" }, now).status, "degraded");
+  assert.equal(
+    pipelineCheck("events", { running: true, lastStartedAt: "2026-08-22T11:55:00.000Z" }, now).status,
+    "critical",
+  );
+  assert.equal(
+    pipelineCheck("events", { running: false, lastCompletedAt: new Date(now).toISOString() }, now).status,
+    "healthy",
+  );
+});
 
 test("startup preflight rejects missing infrastructure configuration", () => {
   const errors = environmentErrors({ PORT: "70000", PROVIDER_SOCKET_URL: "invalid" });

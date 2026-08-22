@@ -10,6 +10,7 @@ const { integer, csvIntegers } = require("../config/env");
 const { eventWindowSql } = require("../utils/eventWindow");
 
 const activeMarketIds = new Set();
+const noTickRecovery = new Map();
 let running = false;
 const syncState = {
   running: false,
@@ -34,6 +35,23 @@ function subscriptionDiff(desiredIds, subscribedIds, isSuppressed = () => false)
     pending: [...desired].filter((id) => !subscribed.has(id) && !isSuppressed(id)),
     stale: [...subscribed].filter((id) => !desired.has(id)),
   };
+}
+
+function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
+  const subscribed = new Set((subscribedIds || []).map(String));
+  const graceMs = integer("MARKET_FIRST_TICK_GRACE_MS", 60000, { min: 10000 });
+  const cooldownMs = integer("MARKET_RECOVERY_COOLDOWN_MS", 300000, { min: 60000 });
+  const maxAttempts = integer("MARKET_RECOVERY_MAX_ATTEMPTS", 3, { min: 1, max: 10 });
+  return (markets || []).filter((market) => {
+    const id = String(market.marketid || "");
+    if (!subscribed.has(id) || redisStore.getTickActivity(id)) return false;
+    const subscribedAt = websocket.getMarketSubscribedAt(id);
+    if (!subscribedAt || now - subscribedAt < graceMs) return false;
+    const startsAt = new Date(market.opendate).getTime();
+    if (Number(market.inplay) !== 1 && Number.isFinite(startsAt) && startsAt > now) return false;
+    const recovery = noTickRecovery.get(id);
+    return (!recovery || now - recovery.lastAttemptAt >= cooldownMs) && (recovery?.attempts || 0) < maxAttempts;
+  });
 }
 
 async function fetchActiveMarkets(lane = "active") {
@@ -120,6 +138,36 @@ async function syncMarketSubscriptions(lane = "active") {
       unsubscribed = staleResult.unsubscribed || [];
       record("stale.unsubscribed", { markets: unsubscribed.length });
     }
+    const recoveryLimit = integer("MARKET_RECOVERY_BATCH_SIZE", 20, { min: 1, max: 100 });
+    const recoveryIds = noTickRecoveryCandidates(markets, websocket.getSubscribedMarketIds())
+      .slice(0, recoveryLimit)
+      .map((market) => String(market.marketid));
+    let recovered = { requested: 0, subscribed: [], skipped: [] };
+    if (recoveryIds.length) {
+      const attemptedAt = Date.now();
+      for (const id of recoveryIds) {
+        const previous = noTickRecovery.get(id);
+        noTickRecovery.set(id, { attempts: (previous?.attempts || 0) + 1, lastAttemptAt: attemptedAt });
+      }
+      try {
+        recovered = await subscriptions.refreshMarkets(recoveryIds);
+        record("no-tick.recovered", {
+          requested: recovered.requested,
+          subscribed: recovered.subscribed.length,
+          skipped: recovered.skipped.length,
+        });
+      } catch (error) {
+        recovered = { requested: recoveryIds.length, subscribed: [], skipped: recoveryIds, error: error.message };
+        record("no-tick.recovery-failed", { requested: recoveryIds.length, error: error.message });
+        logger.warn("[MarketSync] no-tick recovery failed", {
+          marketIds: recoveryIds,
+          error: error.message,
+        });
+      }
+    }
+    for (const id of [...noTickRecovery.keys()]) {
+      if (redisStore.getTickActivity(id) || !discovered.includes(id)) noTickRecovery.delete(id);
+    }
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
     const result = {
       skipped: false,
@@ -133,6 +181,13 @@ async function syncMarketSubscriptions(lane = "active") {
       providerSkipped: skipped.length,
       activeMarketIds: currentActiveMarketIds,
       skippedMarketIds: [...new Set(skipped)],
+      noTickRecovery: {
+        requested: recovered.requested,
+        subscribed: recovered.subscribed.length,
+        skipped: recovered.skipped.length,
+        tracked: noTickRecovery.size,
+        error: recovered.error || null,
+      },
     };
     syncState.lastResult = result;
     syncState.lastCompletedAt = new Date().toISOString();
@@ -183,6 +238,7 @@ function startMarketSync() {
 module.exports = {
   fetchActiveMarkets,
   subscriptionDiff,
+  noTickRecoveryCandidates,
   syncMarketSubscriptions,
   startMarketSync,
   getMarketSyncStatus,

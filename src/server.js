@@ -16,6 +16,7 @@ const { closeProviderLog } = require("./utils/providerFileLogger");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
 const { runStartupPreflight } = require("./services/startupPreflight");
+const { startHealthSupervisor, stopHealthSupervisor } = require("./services/healthSupervisor");
 
 async function startServer() {
   const preflight = await runStartupPreflight();
@@ -37,6 +38,7 @@ async function startServer() {
   const marketDiscoveryCronTask = startMarketDiscoverySync();
   const resultCronTask = startResultSync();
   const redisEventCleanupCronTask = startRedisEventCleanup();
+  startHealthSupervisor();
   if (cronConfig.competition.runOnStart) {
     syncCompetitions()
       .then(() => {
@@ -82,6 +84,7 @@ async function startServer() {
       marketDiscoveryCronTask.stop();
       resultCronTask.stop();
       redisEventCleanupCronTask.stop();
+      stopHealthSupervisor();
       // Requests owned by the outgoing process must not keep PM2 waiting through
       // provider timeouts and retries. The replacement process establishes fresh work.
       await closeProviderRequests();
