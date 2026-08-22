@@ -33,6 +33,26 @@ const state = {
 const DB_WRITE_BATCH_SIZE = integer("MARKET_DB_WRITE_BATCH_SIZE", 500, { min: 50, max: 5000 });
 const DISCOVERY_CACHE_LIMIT = integer("MARKET_DISCOVERY_CACHE_LIMIT", 50000, { min: 1000 });
 const MISSING_LINE_MARKET_PASSES = integer("MARKET_MISSING_LINE_PASSES", 2, { min: 1, max: 20 });
+const DISCOVERY_CONCURRENCY = integer("MARKET_DISCOVERY_CONCURRENCY", 4, { min: 1, max: 16 });
+
+async function settleWithConcurrency(items, mapper, concurrency = DISCOVERY_CONCURRENCY) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await mapper(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
 
 function discoveryEventBatchSize(lane) {
   // The provider caps large market responses. A single cricket event can contain
@@ -411,11 +431,12 @@ async function marketsMissingRunners(marketIds) {
 
 async function fetchAndStoreRunners(marketIds) {
   const missing = await marketsMissingRunners(marketIds);
-  const responses = await Promise.allSettled(
-    missing.map(async (marketId) => ({
+  const responses = await settleWithConcurrency(
+    missing,
+    async (marketId) => ({
       marketId,
       response: await provider.runners(runnerSourceMarketId(marketId)),
-    })),
+    }),
   );
   const runners = responses.flatMap((result) => {
     if (result.status !== "fulfilled") return [];
@@ -645,11 +666,12 @@ async function syncMarketDiscovery(events, lane = "active") {
     // First pass: one unfiltered request per event batch. Inactive line markets are
     // reconciled immediately instead of waiting for every fancy family and thousands
     // of database upserts in the full discovery pass.
-    const primarySettled = await Promise.allSettled(
-      eventBatches.map(async (eids) => {
+    const primarySettled = await settleWithConcurrency(
+      eventBatches,
+      async (eids) => {
         const response = await provider.markets({ eids });
         return { valid: isMarketSnapshotResponse(response), rows: marketRows(response, eventsById) };
-      }),
+      },
     );
     const primaryRows = primarySettled.flatMap((result) =>
       result.status === "fulfilled" ? result.value.rows : [],
@@ -690,13 +712,14 @@ async function syncMarketDiscovery(events, lane = "active") {
     const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 5000, { min: 1000 });
     const fullDiscovery = Date.now() - (lastFullDiscoveryAt.get(lane) || 0) >= fullIntervalMs;
     const typedSettled = fullDiscovery
-      ? await Promise.allSettled(
+      ? await settleWithConcurrency(
           eventBatches.flatMap((eids) =>
-            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map(async (type) => {
-              const response = await provider.markets({ eids, type });
-              return marketRows(response, eventsById);
-            }),
+            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map((type) => ({ eids, type })),
           ),
+          async ({ eids, type }) => {
+            const response = await provider.markets({ eids, type });
+            return marketRows(response, eventsById);
+          },
         )
       : [];
     for (const result of typedSettled) {
@@ -867,7 +890,7 @@ async function syncLiveMarketCleanup() {
       events.map((event) => event.eventId),
       eventBatchSize,
     );
-    const settled = await Promise.allSettled(eventBatches.map((eids) => provider.markets({ eids })));
+    const settled = await settleWithConcurrency(eventBatches, (eids) => provider.markets({ eids }));
     const responses = settled.map((result) => (result.status === "fulfilled" ? result.value : null));
     const vendorMarkets = responses.flatMap((response) => marketRows(response, eventsById));
     const validEventIds = eventBatches.flatMap((eids, index) =>
