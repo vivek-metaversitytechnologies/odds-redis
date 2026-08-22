@@ -218,6 +218,8 @@ test("socket coalescing does not retain unused promise waiters", () => {
   assert.doesNotMatch(socketSource, /pending\.waiters/);
   assert.match(socketSource, /const queuedEventWrites = new Map\(\)/);
   assert.doesNotMatch(socketSource, /const previous = eventWriteChains\.get/);
+  assert.match(socketSource, /const pendingScores = new Map\(\)/);
+  assert.doesNotMatch(socketSource, /void persistScores\(scores/);
 });
 
 test("database rows map to API event fields", () => {

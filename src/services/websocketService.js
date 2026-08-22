@@ -20,8 +20,12 @@ const loggedShapes = new Set();
 const rawSocketActivity = [];
 const subscribedMarketIds = new Set();
 const scoreHashes = new Map();
+const pendingScores = new Map();
+let scoreFlushTimer;
+let scoreFlushPromise;
 const trafficBuckets = new Map();
 const SCORE_HASH_LIMIT = integer("SCORE_HASH_CACHE_LIMIT", 50000, { min: 1000 });
+const SCORE_PENDING_LIMIT = integer("SCORE_PENDING_LIMIT", 2000, { min: 100 });
 const state = {
   connectionRequested: false,
   connected: false,
@@ -160,6 +164,43 @@ async function persistScores(scores, receivedAtMs = Date.now()) {
     }
   });
   await Promise.allSettled(writes);
+}
+
+function enqueueScores(scores, receivedAtMs = Date.now()) {
+  for (const score of scores || []) {
+    const eventId = String(score?.eid ?? score?.eventId ?? "").trim();
+    const html = score?.data ?? score?.html ?? score?.scorecard;
+    if (/^\d+$/.test(eventId) && typeof html === "string" && html.trim()) {
+      setBounded(pendingScores, eventId, { score, receivedAtMs }, SCORE_PENDING_LIMIT);
+    }
+  }
+  if (scoreFlushPromise || scoreFlushTimer || !pendingScores.size) return;
+  scoreFlushTimer = setTimeout(flushPendingScores, TICK_COALESCE_MS);
+  scoreFlushTimer.unref?.();
+}
+
+function flushPendingScores() {
+  if (scoreFlushPromise || !pendingScores.size) return scoreFlushPromise || Promise.resolve();
+  if (scoreFlushTimer) clearTimeout(scoreFlushTimer);
+  scoreFlushTimer = undefined;
+  const batch = [...pendingScores.values()];
+  pendingScores.clear();
+  const receivedAtMs = Math.min(...batch.map((entry) => entry.receivedAtMs));
+  const write = persistScores(
+    batch.map((entry) => entry.score),
+    receivedAtMs,
+  );
+  scoreFlushPromise = write;
+  const advance = () => {
+    if (scoreFlushPromise !== write) return;
+    scoreFlushPromise = undefined;
+    if (pendingScores.size) {
+      scoreFlushTimer = setTimeout(flushPendingScores, 0);
+      scoreFlushTimer.unref?.();
+    }
+  };
+  write.then(advance, advance);
+  return write;
 }
 
 function messageShape(value) {
@@ -383,7 +424,7 @@ function connectSocket() {
     if (scores.length) {
       state.scoreUpdateCount += scores.length;
       logShape("score", messages[0]);
-      void persistScores(scores, receivedAtMs);
+      enqueueScores(scores, receivedAtMs);
     }
     if (oddsTicks.length) {
       for (const item of oddsTicks) {
@@ -462,6 +503,12 @@ async function stopSocket() {
     socket.disconnect();
     socket = undefined;
   }
+  if (scoreFlushTimer) clearTimeout(scoreFlushTimer);
+  scoreFlushTimer = undefined;
+  while (scoreFlushPromise || pendingScores.size) {
+    if (!scoreFlushPromise) flushPendingScores();
+    if (scoreFlushPromise) await Promise.allSettled([scoreFlushPromise]);
+  }
   await Promise.allSettled([...pendingEventTicks.keys()].map(flushPendingEvent));
   // Completing an active write may promote its single queued replacement.
   while (eventWriteChains.size) await Promise.allSettled([...eventWriteChains.values()]);
@@ -482,6 +529,8 @@ function getSocketStatus() {
       (total, pending) => total + pending.items.size,
       0,
     ),
+    pendingScoreCount: pendingScores.size,
+    scoreWriteActive: Boolean(scoreFlushPromise),
     tickCoalesceMs: TICK_COALESCE_MS,
     traffic: trafficStatus(),
   };
