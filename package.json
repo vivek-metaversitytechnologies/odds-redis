@@ -13,6 +13,7 @@
     "dev": "nodemon src/server.js",
     "db:migrate": "node scripts/migrate.js",
     "db:migrate:lock": "node scripts/migration-lock.js",
+    "db:deduplicate": "node scripts/deduplicate-source-tables.js",
     "lint": "eslint src test scripts",
     "format": "prettier --write src test scripts README.md eslint.config.js",
     "format:check": "prettier --check src test scripts README.md eslint.config.js",
