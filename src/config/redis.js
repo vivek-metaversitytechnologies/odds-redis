@@ -8,6 +8,8 @@ const { setBounded } = require("../utils/boundedMap");
 
 let client;
 let connecting;
+let readClient;
+let readConnecting;
 const marketCache = new Map();
 const runnerNameCache = new Map();
 const runnerNameLoads = new Map();
@@ -80,7 +82,7 @@ async function writeEvents(events, sportIds = []) {
 async function getEvents(sportId) {
   const normalized = Number(sportId);
   if (!Number.isInteger(normalized) || normalized <= 0) return null;
-  const redis = await getRedisClient();
+  const redis = await getRedisReadClient();
   if (!redis?.isOpen) return null;
   const value = await redis.get(eventMetadataKey(normalized));
   if (value == null) return null;
@@ -106,7 +108,7 @@ async function writeScore(score) {
 async function getScore(eventId) {
   const normalized = String(eventId || "").trim();
   if (!/^\d+$/.test(normalized)) return null;
-  const redis = await getRedisClient();
+  const redis = await getRedisReadClient();
   if (!redis?.isOpen) return null;
   const value = await redis.get(scoreKey(normalized));
   if (!value) return null;
@@ -217,6 +219,34 @@ async function getRedisClient() {
       connecting = undefined;
     });
   return connecting;
+}
+
+async function getRedisReadClient() {
+  if (readClient?.isOpen) return readClient;
+  if (readConnecting) return readConnecting;
+  const url = redisUrl();
+  if (!url) return null;
+  readClient = createClient({
+    url,
+    database: Number(process.env.REDIS_DB || 0),
+    socket: { connectTimeout: Number(process.env.REDIS_TIMEOUT_MS || 15000) },
+  });
+  readClient.on("error", (error) => logger.error("[RedisRead] client error", { error: error.message }));
+  readConnecting = readClient
+    .connect()
+    .then(() => {
+      logger.info("[RedisRead] connected");
+      return readClient;
+    })
+    .catch((error) => {
+      logger.error("[RedisRead] connection failed", { error: error.message });
+      readClient = undefined;
+      return null;
+    })
+    .finally(() => {
+      readConnecting = undefined;
+    });
+  return readConnecting;
 }
 
 async function findMarkets(marketIds) {
@@ -938,7 +968,7 @@ function payloadHasMarket(payload, marketId) {
 }
 
 async function inspectTicks({ eventId, marketId, limit = 250, includePayload = false } = {}) {
-  const redis = await getRedisClient();
+  const redis = await getRedisReadClient();
   if (!redis?.isOpen) return { connected: false, scanned: 0, truncated: false, items: [] };
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
   const boundedLimit = Math.max(1, Math.min(500, Number(limit) || 250));
@@ -989,7 +1019,7 @@ function getTickActivity(marketId) {
 }
 
 async function getEventSnapshot(eventId) {
-  const redis = await getRedisClient();
+  const redis = await getRedisReadClient();
   if (!redis?.isOpen) return emptyEventPayload();
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
   const value = await redis.get(key);
@@ -1002,7 +1032,7 @@ async function getEventSnapshot(eventId) {
 }
 
 async function getEventSnapshots(eventIds) {
-  const redis = await getRedisClient();
+  const redis = await getRedisReadClient();
   const ids = [...new Set((eventIds || []).map(String).filter(Boolean))];
   const snapshots = new Map();
   if (!redis?.isOpen || !ids.length) return snapshots;
@@ -1062,22 +1092,25 @@ async function removeEvent(eventId) {
 }
 
 async function closeRedis() {
-  if (!client?.isOpen) return;
-  const current = client;
+  const current = client?.isOpen ? client : null;
+  const currentRead = readClient?.isOpen ? readClient : null;
   client = undefined;
-  await current.quit();
+  readClient = undefined;
+  await Promise.allSettled([current?.quit(), currentRead?.quit()].filter(Boolean));
 }
 
 function getRedisStatus() {
   return {
     configured: Boolean(redisUrl()),
     connected: Boolean(client?.isOpen),
+    readConnected: Boolean(readClient?.isOpen),
     activityCount: tickActivity.size,
   };
 }
 
 module.exports = {
   getRedisClient,
+  getRedisReadClient,
   writeTick,
   writeTicks,
   writeScore,

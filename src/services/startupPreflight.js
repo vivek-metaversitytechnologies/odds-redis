@@ -103,6 +103,10 @@ async function runStartupPreflight() {
   if (!redis?.isOpen) throw new Error("Redis connection is required but unavailable");
   const pong = await redis.ping();
   if (pong !== "PONG") throw new Error(`Redis PING returned ${String(pong)}`);
+  const redisRead = await redisStore.getRedisReadClient();
+  if (!redisRead?.isOpen) throw new Error("Redis read connection is required but unavailable");
+  const readPong = await redisRead.ping();
+  if (readPong !== "PONG") throw new Error(`Redis read PING returned ${String(readPong)}`);
 
   return { sourceDatabase: "ready", redis: "ready", schema: "ready", configuration: "ready" };
 }

@@ -105,6 +105,13 @@ test("startup preflight accepts complete infrastructure configuration", () => {
   assert.equal(cronErrors({ sample: { expression: "not a cron" } }).length, 1);
 });
 
+test("Redis API reads use a connection isolated from background writes", () => {
+  const redisSource = fs.readFileSync(path.join(__dirname, "../src/config/redis.js"), "utf8");
+  assert.match(redisSource, /async function getRedisReadClient\(\)/);
+  assert.match(redisSource, /async function getEventSnapshots[\s\S]*?getRedisReadClient\(\)/);
+  assert.match(redisSource, /readConnected: Boolean\(readClient\?\.isOpen\)/);
+});
+
 test("stored result filters validate and parameterize supported query fields", () => {
   const filters = resultFilters({
     type: "fancy",
