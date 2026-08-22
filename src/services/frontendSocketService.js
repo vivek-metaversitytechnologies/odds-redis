@@ -80,7 +80,7 @@ function attachFrontendSocket(server) {
     if (eventId != null)
       io.to(`event:${eventId}`).emit("tick", {
         eventId: String(eventId),
-        data: payload,
+        data: redis.frontendEventPayload(payload),
         receivedAt: new Date().toISOString(),
       });
   });

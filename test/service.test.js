@@ -18,6 +18,7 @@ const {
   fancyDefinitionEntry,
   regularDefinitionEntries,
   normalizeEventPayload,
+  frontendEventPayload,
   validMarketIdentifier,
   writeTicks,
   reconcileFancyDefinitions,
@@ -1264,6 +1265,23 @@ test("invalid sentinel market IDs are rejected and removed from snapshots", () =
   assert.equal(validMarketIdentifier("1.123"), true);
   const payload = normalizeEventPayload({ Odds: [{ marketId: "undefined", Name: "Market undefined" }] });
   assert.equal(payload.Odds.length, 0);
+});
+
+test("frontend snapshots hide waiting markets but retain live and suspended markets", () => {
+  const payload = frontendEventPayload({
+    Odds: [
+      { marketId: "1.waiting", status: "WAITING" },
+      { marketId: "1.open", status: "OPEN" },
+      { marketId: "1.suspended", status: "SUSPENDED" },
+    ],
+    Fancy2: [
+      { mid: "4.waiting-F2", gstatus: "waiting" },
+      { mid: "4.open-F2", gstatus: "ACTIVE" },
+    ],
+  });
+
+  assert.deepEqual(payload.Odds.map((market) => market.marketId), ["1.open", "1.suspended"]);
+  assert.deepEqual(payload.Fancy2.map((market) => market.mid), ["4.open-F2"]);
 });
 
 test("regular API definitions seed line markets with suspended runner placeholders", () => {

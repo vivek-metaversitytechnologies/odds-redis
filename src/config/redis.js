@@ -199,6 +199,21 @@ function normalizeEventPayload(payload) {
   return moveTiedMatchLast(normalized);
 }
 
+function frontendEventPayload(payload) {
+  const normalized = normalizeEventPayload(payload);
+  return Object.fromEntries(
+    PAYLOAD_GROUPS.map((group) => [
+      group,
+      normalized[group].filter((entry) => {
+        const state = String(entry?.status ?? entry?.gstatus ?? entry?.s ?? "")
+          .trim()
+          .toUpperCase();
+        return state !== "WAITING";
+      }),
+    ]),
+  );
+}
+
 function redisUrl() {
   if (process.env.REDIS_URL) return process.env.REDIS_URL;
   if (!process.env.REDIS_HOST) return null;
@@ -1045,7 +1060,7 @@ async function getEventSnapshot(eventId) {
   const value = await redis.get(key);
   if (!value) return emptyEventPayload();
   try {
-    return normalizeEventPayload(JSON.parse(value));
+    return frontendEventPayload(JSON.parse(value));
   } catch {
     return emptyEventPayload();
   }
@@ -1060,7 +1075,7 @@ async function getEventSnapshots(eventIds) {
   const values = await redis.mGet(ids.map((eventId) => `${prefix}${eventId}`));
   ids.forEach((eventId, index) => {
     try {
-      snapshots.set(eventId, values[index] ? normalizeEventPayload(JSON.parse(values[index])) : null);
+      snapshots.set(eventId, values[index] ? frontendEventPayload(JSON.parse(values[index])) : null);
     } catch {
       snapshots.set(eventId, null);
     }
@@ -1177,6 +1192,7 @@ module.exports = {
   regularDefinitionEntries,
   reconcileRegularDefinitions,
   normalizeEventPayload,
+  frontendEventPayload,
   validMarketIdentifier,
   invalidateMarkets,
   __testing__: {
