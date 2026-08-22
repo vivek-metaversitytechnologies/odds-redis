@@ -1,6 +1,6 @@
 require("dotenv").config();
 const { createApp } = require("./app");
-const { checkSourceDbConnection, closeSourceDb } = require("./config/sourceDb");
+const { closeSourceDb } = require("./config/sourceDb");
 const { closeRedis } = require("./config/redis");
 const { fetchActiveMarkets, startMarketSync, syncMarketSubscriptions } = require("./cron/marketSync");
 const { startCompetitionSync, syncCompetitions } = require("./cron/competitionSync");
@@ -15,9 +15,11 @@ const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
+const { runStartupPreflight } = require("./services/startupPreflight");
 
 async function startServer() {
-  await checkSourceDbConnection();
+  const preflight = await runStartupPreflight();
+  logger.info("Startup preflight passed", preflight);
   const app = createApp();
   const server = await new Promise((resolve, reject) => {
     const listener = app.listen(Number(process.env.PORT || 3000), () => resolve(listener));
@@ -104,8 +106,9 @@ async function startServer() {
 }
 
 if (require.main === module) {
-  startServer().catch((error) => {
+  startServer().catch(async (error) => {
     logger.error("Startup failed", { error: error.message });
+    await Promise.allSettled([closeRedis(), closeSourceDb(), closeProviderLog(), logger.close()]);
     process.exitCode = 1;
   });
 }

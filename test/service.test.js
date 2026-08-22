@@ -76,6 +76,34 @@ const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
 const { eventInWindow, eventWindowSql } = require("../src/utils/eventWindow");
 const { subscriptionDiff } = require("../src/cron/marketSync");
 const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
+const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
+
+test("startup preflight rejects missing infrastructure configuration", () => {
+  const errors = environmentErrors({ PORT: "70000", PROVIDER_SOCKET_URL: "invalid" });
+  assert.ok(errors.some((error) => error.includes("SOURCE_DB_HOST")));
+  assert.ok(errors.some((error) => error.includes("REDIS_URL")));
+  assert.ok(errors.some((error) => error.includes("PROVIDER_TOKEN")));
+  assert.ok(errors.some((error) => error.includes("PROVIDER_SOCKET_URL")));
+  assert.ok(errors.some((error) => error.includes("PORT")));
+});
+
+test("startup preflight accepts complete infrastructure configuration", () => {
+  assert.deepEqual(
+    environmentErrors({
+      SOURCE_DB_HOST: "db",
+      SOURCE_DB_USER: "user",
+      SOURCE_DB_NAME: "odds",
+      REDIS_HOST: "redis",
+      PROVIDER_TOKEN: "token",
+      PROVIDER_SOCKET_URL: "wss://provider.example/stream",
+      PROVIDER_BASE_URL: "https://provider.example",
+      PORT: "5673",
+    }),
+    [],
+  );
+  assert.deepEqual(cronErrors({ sample: { expression: "*/5 * * * * *" } }), []);
+  assert.equal(cronErrors({ sample: { expression: "not a cron" } }).length, 1);
+});
 
 test("stored result filters validate and parameterize supported query fields", () => {
   const filters = resultFilters({

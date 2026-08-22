@@ -6,6 +6,8 @@ module.exports = {
     instances: 1,
     exec_mode: "fork",
     autorestart: true,
+    min_uptime: "10s",
+    max_restarts: 5,
     restart_delay: 5000,
     max_memory_restart: "4G",
     node_args: "--max-old-space-size=3072",
