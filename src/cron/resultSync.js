@@ -148,8 +148,8 @@ async function persistMarketResult(connection, market, result) {
   await connection.execute(
     `INSERT INTO t_matchresult
       (date,isresult,ismysqlupdated,marketid,marketname,markettype,matchid,matchname,result,
-       resultstatus,resultstatuscron,selectionid,selectionname,sportid,sportname,status,type,declared_by)
-     SELECT NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
+       resultstatus,resultstatuscron,selectionid,selectionname,sportid,status,type,declared_by)
+     SELECT NOW(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
        (SELECT 1 FROM t_matchresult WHERE marketid=? AND selectionid=? LIMIT 1)`,
     [
       false,
@@ -165,7 +165,6 @@ async function persistMarketResult(connection, market, result) {
       selectionId,
       selections[0].runner_name,
       market.sportid,
-      String(market.sportid) === "4" ? "Cricket" : null,
       true,
       market.marketname,
       "API",
@@ -214,8 +213,8 @@ async function persistFancyResult(connection, fancy, result) {
     ],
   );
   await connection.execute(
-    "UPDATE t_matchfancy SET result=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
-    [result.result, false, false, false, fancy.marketid],
+    "UPDATE t_matchfancy SET isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
+    [false, false, false, fancy.marketid],
   );
   return true;
 }
@@ -224,6 +223,8 @@ async function applyResults(results, candidates) {
   const regularById = new Map(candidates.markets.map((market) => [String(market.marketid), market]));
   const fancyById = new Map(candidates.fancies.map((market) => [String(market.marketid), market]));
   const settled = [];
+  let persistenceFailures = 0;
+  let rejectedResults = 0;
   const changedEventIds = new Set();
   for (const result of results) {
     const market = regularById.get(result.marketId) || fancyById.get(result.marketId);
@@ -237,11 +238,13 @@ async function applyResults(results, candidates) {
         : await persistMarketResult(connection, market, result);
       if (!saved) {
         await connection.rollback();
+        rejectedResults += 1;
         continue;
       }
       await connection.commit();
     } catch (error) {
       await connection.rollback();
+      persistenceFailures += 1;
       logger.error("[ResultSync] result persistence failed", {
         marketId: result.marketId,
         error: error.message,
@@ -266,7 +269,7 @@ async function applyResults(results, candidates) {
     }
   }
   if (settled.length) await subscriptions.unsubscribeResultMarkets(settled);
-  return settled;
+  return { settled, persistenceFailures, rejectedResults };
 }
 
 async function syncResults() {
@@ -288,7 +291,7 @@ async function syncResults() {
     const results = responses.flatMap((response) =>
       response.status === "fulfilled" ? responseRows(response.value) : [],
     );
-    const settled = await applyResults(results, candidates);
+    const applied = await applyResults(results, candidates);
     const output = {
       skipped: false,
       candidates: all.length,
@@ -297,10 +300,15 @@ async function syncResults() {
       calls: batches.length,
       failedCalls: responses.filter((response) => response.status === "rejected").length,
       results: results.length,
-      settled: settled.length,
-      settledMarketIds: settled,
+      settled: applied.settled.length,
+      settledMarketIds: applied.settled,
+      persistenceFailures: applied.persistenceFailures,
+      rejectedResults: applied.rejectedResults,
     };
     state.lastResult = output;
+    if (applied.persistenceFailures) {
+      state.lastError = `${applied.persistenceFailures} result persistence operation(s) failed`;
+    }
     state.lastCompletedAt = new Date().toISOString();
     logger.info("[ResultSync] completed", output);
     return output;
