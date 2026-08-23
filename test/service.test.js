@@ -45,6 +45,7 @@ const { parseJsonObjects, containsMarketId } = require("../src/services/logReade
 const {
   activeMatchesFromCache,
   cachedDashboardRow,
+  eventOnlyDashboardEntry,
   dashboardEntry,
   compareDashboardEntries,
   selectDashboardRows,
@@ -568,6 +569,42 @@ test("Redis event metadata and snapshots produce the active-match API shape", ()
       li: 55,
     },
   ]);
+});
+
+test("Redis events remain visible before a usable market snapshot arrives", () => {
+  const event = {
+    eventId: 102,
+    eventName: "Waiting Home v Waiting Away",
+    sportId: 1,
+    seriesId: 56,
+    openDate: "2026-08-20T14:00:00.000Z",
+    inPlay: false,
+    gameOver: false,
+  };
+  const expected = {
+    matchName: "Waiting Home v Waiting Away",
+    openDate: "2026-08-20T14:00:00.000Z",
+    inPlay: false,
+    matchId: 102,
+    marketId: null,
+    bm: false,
+    GM: false,
+    outright: false,
+    team1Back: 0,
+    team1Lay: 0,
+    team2Back: 0,
+    team2Lay: 0,
+    drawBack: 0,
+    drawLay: 0,
+    li: 56,
+  };
+  const now = Date.parse("2026-08-20T13:00:00Z");
+  assert.deepEqual(eventOnlyDashboardEntry(event), expected);
+  assert.deepEqual(
+    activeMatchesFromCache([event], new Map([["102", { Odds: [], Bookmaker: [] }]]), 48, now),
+    [expected],
+  );
+  assert.deepEqual(activeMatchesFromCache([event], new Map(), 48, now), [expected]);
 });
 
 test("Redis active-match cache excludes completed and expired events", () => {

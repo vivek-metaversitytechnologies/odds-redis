@@ -91,6 +91,26 @@ function cachedDashboardRow(event, snapshot) {
   };
 }
 
+function eventOnlyDashboardEntry(event) {
+  return {
+    matchName: event.eventName ?? null,
+    openDate: openDateValue(event.openDate),
+    inPlay: Boolean(event.inPlay),
+    matchId: Number(event.eventId),
+    marketId: null,
+    bm: false,
+    GM: false,
+    outright: false,
+    team1Back: 0,
+    team1Lay: 0,
+    team2Back: 0,
+    team2Lay: 0,
+    drawBack: 0,
+    drawLay: 0,
+    li: event.seriesId == null ? null : Number(event.seriesId),
+  };
+}
+
 function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {
   const oldest = now - maxAgeHours * 60 * 60 * 1000;
   return (events || [])
@@ -102,9 +122,8 @@ function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()
     .map((event) => {
       const snapshot = snapshots.get(String(event.eventId));
       const row = cachedDashboardRow(event, snapshot);
-      return row ? dashboardEntry(row, snapshot) : null;
+      return (row ? dashboardEntry(row, snapshot) : null) || eventOnlyDashboardEntry(event);
     })
-    .filter(Boolean)
     .sort(compareDashboardEntries);
 }
 
@@ -176,6 +195,7 @@ module.exports = {
   activeMatches,
   activeMatchesFromCache,
   cachedDashboardRow,
+  eventOnlyDashboardEntry,
   dashboardEntry,
   compareDashboardEntries,
   openDateValue,
