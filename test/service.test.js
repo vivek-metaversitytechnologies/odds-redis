@@ -1572,6 +1572,7 @@ test("socket game-over performs durable cleanup without dropping result candidat
   assert.match(resultSource, /redis\.removeMarkets/);
   assert.match(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
+  assert.match(resultSource, /UPPER\(f\.status\) IN \('SUSPENDED','CLOSED'\)/);
   assert.match(discoverySource, /isactive=IF\(status=0,0,VALUES\(isactive\)\)/);
   assert.match(discoverySource, /status=IF\(status='CLOSED','CLOSED',VALUES\(status\)\)/);
 });
