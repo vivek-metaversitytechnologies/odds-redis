@@ -710,6 +710,36 @@ test("event sync keeps supported events including completed lifecycle updates", 
   assert.equal(rows[1].gameOver, true);
 });
 
+test("event sync deduplicates conflicting lifecycle rows with game-over taking precedence", () => {
+  const rows = eventRows([
+    {
+      data: [
+        {
+          id: 77,
+          name: "Old Match",
+          sportId: 4,
+          leagueId: 9,
+          startTime: "2026-08-23T10:00:00Z",
+          inPlay: true,
+          gameOver: false,
+        },
+        {
+          id: 77,
+          name: "Old Match",
+          sportId: 4,
+          leagueId: 9,
+          startTime: "2026-08-23T10:00:00Z",
+          inPlay: false,
+          gameOver: true,
+        },
+      ],
+    },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].gameOver, true);
+  assert.equal(rows[0].inPlay, false);
+});
+
 test("new event rows default fancylock to false", () => {
   const values = eventInsertValues({
     seriesId: 10,

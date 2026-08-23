@@ -20,7 +20,7 @@ const state = {
 
 function eventRows(responses) {
   const sports = supportedSportIds();
-  return (responses || [])
+  const rows = (responses || [])
     .flatMap((response) =>
       Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [],
     )
@@ -42,6 +42,14 @@ function eventRows(responses) {
         Number.isInteger(item.seriesId) &&
         item.openDate,
     );
+  const byId = new Map();
+  for (const event of rows) {
+    const current = byId.get(event.eventId);
+    if (!current || event.gameOver || (!current.inPlay && event.inPlay)) byId.set(event.eventId, event);
+  }
+  return [...byId.values()].map((event) =>
+    event.gameOver ? { ...event, inPlay: false } : event,
+  );
 }
 
 function eventInsertValues(event) {
@@ -200,7 +208,7 @@ async function syncEvents() {
     // pressure must not prevent fresh provider events from reaching public APIs.
     // A terminal primary-market socket tick is authoritative for this process;
     // do not let a lagging vendor event feed add that event back to Redis.
-    const cacheableEvents = await excludeTerminalEvents(events);
+    const cacheableEvents = await excludeTerminalEvents(events.filter((event) => !event.gameOver));
     const cached = await redis.writeEvents(cacheableEvents, successfulSportIds);
     const persisted = await upsertEvents(events);
     const retired = await retireCompletedEvents(events);
