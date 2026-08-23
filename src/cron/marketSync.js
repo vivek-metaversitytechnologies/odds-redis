@@ -7,7 +7,7 @@ const logger = require("../utils/logger");
 const redisStore = require("../config/redis");
 const cronConfig = require("../config/cron");
 const { integer, csvIntegers } = require("../config/env");
-const { eventWindowSql } = require("../utils/eventWindow");
+const { subscriptionEventWindowSql } = require("../utils/eventWindow");
 
 const activeMarketIds = new Set();
 const noTickRecovery = new Map();
@@ -56,12 +56,13 @@ function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
 
 async function fetchActiveMarkets(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
+  const cricketSportId = integer("CRICKET_SPORT_ID", 4, { min: 1 });
   const [rows] = await getSourcePool().query(
     `SELECT m.* FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
-       AND ${eventWindowSql("e", lane)}
+       AND ${subscriptionEventWindowSql("m.sportid", "e", lane)}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
-     ORDER BY sportid ASC, id DESC`,
+     ORDER BY CASE WHEN m.sportid=${cricketSportId} THEN 0 ELSE 1 END, m.sportid ASC, m.id DESC`,
     [true, ...sportIds],
   );
   const [fancyRows] = await getSourcePool().query(
@@ -70,10 +71,11 @@ async function fetchActiveMarkets(lane = "active") {
        e.open_date AS opendate, e.in_play AS inplay
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${sportIds.map(() => "?").join(",")})
-       AND ${eventWindowSql("e", lane)}
+       AND ${subscriptionEventWindowSql("COALESCE(f.sportid,e.sportid)", "e", lane)}
        AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
-     ORDER BY sportid ASC, f.id DESC`,
+     ORDER BY CASE WHEN COALESCE(f.sportid,e.sportid)=${cricketSportId} THEN 0 ELSE 1 END,
+       sportid ASC, f.id DESC`,
     [true, ...sportIds],
   );
   return [...rows, ...fancyRows].map(Market.fromRow);

@@ -81,7 +81,7 @@ const { setBounded } = require("../src/utils/boundedMap");
 const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
-const { eventInWindow, eventWindowSql } = require("../src/utils/eventWindow");
+const { eventInWindow, eventWindowSql, subscriptionEventWindowSql } = require("../src/utils/eventWindow");
 const { subscriptionDiff } = require("../src/cron/marketSync");
 const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
 const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
@@ -354,6 +354,20 @@ test("event workload lanes use mutually exclusive start-time predicates", () => 
   assert.equal(eventInWindow({ openDate: "2026-08-20 16:31:00", inPlay: false }, "active", now), false);
   assert.equal(eventInWindow({ openDate: "2026-08-20 16:31:00", inPlay: false }, "future", now), true);
   assert.equal(eventInWindow({ openDate: "2026-08-21 16:31:00", inPlay: true }, "future", now), false);
+});
+
+test("subscriptions use a wider lead only for non-cricket active markets", () => {
+  const sql = subscriptionEventWindowSql("m.sportid", "e", "active");
+  assert.match(sql, /\(m\.sportid\)=4.*INTERVAL 390 MINUTE/);
+  assert.match(sql, /\(m\.sportid\)<>4.*INTERVAL 1050 MINUTE/);
+  assert.equal(subscriptionEventWindowSql("m.sportid", "e", "all"), "1=1");
+  assert.match(subscriptionEventWindowSql("m.sportid", "e", "future"), /open_date > DATE_ADD/);
+});
+
+test("market subscription batches retain cricket priority", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketSync.js"), "utf8");
+  assert.match(source, /CASE WHEN m\.sportid=.*THEN 0 ELSE 1 END/);
+  assert.match(source, /CASE WHEN COALESCE\(f\.sportid,e\.sportid\)=.*THEN 0 ELSE 1 END/);
 });
 
 test("market discovery delegates subscription reconciliation to its standalone cron", () => {

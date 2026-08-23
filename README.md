@@ -76,8 +76,10 @@ acknowledgement includes both the latest odds `snapshot` and latest `score`.
 Market discovery uses a fast primary pass on `MARKET_DISCOVERY_CRON` and a full typed-family
 pass every `MARKET_FULL_DISCOVERY_MS` (default: 30000). Unchanged definitions are not rewritten.
 Events already in play or starting within `ACTIVE_EVENT_LEAD_MINUTES` (60 by default) use the
-fast discovery and subscription lane. Later events use definition-only discovery every 10 minutes
-through `FUTURE_MARKET_DISCOVERY_CRON`; they are subscribed when they cross into the active window.
+fast discovery lane. Later events use definition-only discovery every 10 minutes through
+`FUTURE_MARKET_DISCOVERY_CRON`. Cricket is subscribed inside the active window; non-cricket events
+can be subscribed earlier with `NON_CRICKET_SUBSCRIPTION_LEAD_MINUTES` (12 hours by default), so
+their initial provider ticks replace frontend-hidden `WAITING` placeholders before kickoff.
 Active discovery and live cleanup request one event at a time by default, preventing the provider's
 market-response limit from truncating large cricket events. Future discovery remains batched.
 
