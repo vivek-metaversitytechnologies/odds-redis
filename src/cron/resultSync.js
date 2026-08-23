@@ -49,6 +49,11 @@ function fancyResultValue(marketId, result, marketType) {
   return null;
 }
 
+function isEventTerminalMarketName(name) {
+  const normalized = String(name || "").trim().toLowerCase();
+  return normalized === "match odds" || normalized.includes("bookmaker");
+}
+
 async function hasExceptionalTable(connection) {
   if (exceptionalTableAvailable != null) return exceptionalTableAvailable;
   const [rows] = await connection.query(
@@ -99,18 +104,23 @@ async function handleSocketGameOver(marketIds) {
     .sort((left, right) => left.localeCompare(right));
   if (!ids.length) return { markets: 0, events: 0, removed: 0 };
   const placeholders = ids.map(() => "?").join(",");
-  const closedRows = await retryDeadlock(async () => {
+  const cleanup = await retryDeadlock(async () => {
     const connection = await getSourcePool().getConnection();
     try {
       await connection.beginTransaction();
       const [markets] = await connection.query(
-        `SELECT marketid,eventid FROM t_market WHERE marketid IN (${placeholders})`,
+        `SELECT marketid,eventid,marketname FROM t_market WHERE marketid IN (${placeholders})`,
         ids,
       );
       const [fancies] = await connection.query(
-        `SELECT fancyid AS marketid,eventid FROM t_matchfancy WHERE fancyid IN (${placeholders})`,
+        `SELECT fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy
+         WHERE fancyid IN (${placeholders})`,
         ids,
       );
+      const terminalEventIds = [...new Set([...markets, ...fancies]
+        .filter((market) => isEventTerminalMarketName(market.marketname))
+        .map((market) => Number(market.eventid))
+        .filter(Number.isInteger))].sort((left, right) => left - right);
       await connection.query(
         `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
          WHERE marketid IN (${placeholders})`,
@@ -121,8 +131,44 @@ async function handleSocketGameOver(marketIds) {
          WHERE fancyid IN (${placeholders})`,
         [false, "CLOSED", false, false, false, ...ids],
       );
+      let terminalEvents = [];
+      let eventMarkets = [];
+      let eventFancies = [];
+      if (terminalEventIds.length) {
+        const eventPlaceholders = terminalEventIds.map(() => "?").join(",");
+        [terminalEvents] = await connection.query(
+          `SELECT eventid,sportid FROM t_event WHERE eventid IN (${eventPlaceholders})`,
+          terminalEventIds,
+        );
+        [eventMarkets] = await connection.query(
+          `SELECT marketid,eventid,marketname FROM t_market WHERE eventid IN (${eventPlaceholders})`,
+          terminalEventIds,
+        );
+        [eventFancies] = await connection.query(
+          `SELECT fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy
+           WHERE eventid IN (${eventPlaceholders})`,
+          terminalEventIds,
+        );
+        await connection.query(
+          `UPDATE t_event SET isactive=?,status=?,in_play=?,updatedon=NOW()
+           WHERE eventid IN (${eventPlaceholders})`,
+          [false, false, false, ...terminalEventIds],
+        );
+        await connection.query(
+          `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
+           WHERE eventid IN (${eventPlaceholders})`,
+          [false, false, false, ...terminalEventIds],
+        );
+        await connection.query(
+          `UPDATE t_matchfancy SET isactive=?,status=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+           WHERE eventid IN (${eventPlaceholders})`,
+          [false, "CLOSED", false, false, false, ...terminalEventIds],
+        );
+      }
       await connection.commit();
-      return [...markets, ...fancies];
+      const closedRows = [...new Map([...markets, ...fancies, ...eventMarkets, ...eventFancies]
+        .map((market) => [String(market.marketid), market])).values()];
+      return { closedRows, terminalEvents };
     } catch (error) {
       await connection.rollback();
       throw error;
@@ -131,6 +177,8 @@ async function handleSocketGameOver(marketIds) {
     }
   });
 
+  const { closedRows, terminalEvents } = cleanup;
+  const terminalEventIds = new Set(terminalEvents.map((event) => String(event.eventid)));
   const marketIdsByEvent = new Map();
   for (const row of closedRows) {
     const eventId = String(row.eventid);
@@ -138,20 +186,27 @@ async function handleSocketGameOver(marketIds) {
     marketIdsByEvent.get(eventId).push(String(row.marketid));
   }
   const removals = await Promise.allSettled(
-    [...marketIdsByEvent].map(([eventId, idsForEvent]) => redis.removeMarkets(eventId, idsForEvent)),
+    [...marketIdsByEvent].map(([eventId, idsForEvent]) =>
+      terminalEventIds.has(eventId) ? redis.removeEvent(eventId).then(() => new Set(idsForEvent)) : redis.removeMarkets(eventId, idsForEvent),
+    ),
   );
   const removed = removals.reduce(
     (total, result) => total + (result.status === "fulfilled" ? result.value.size : 0),
     0,
   );
-  await subscriptions.unsubscribeResultMarkets(ids);
-  await Promise.allSettled([...marketIdsByEvent.keys()].map((eventId) => frontendSocket.publishEventSnapshot(eventId)));
+  await redis.removeEventsFromMetadata(terminalEvents);
+  await subscriptions.unsubscribeResultMarkets(closedRows.map((market) => market.marketid));
+  await Promise.allSettled([...marketIdsByEvent.keys()].map((eventId) => {
+    if (terminalEventIds.has(eventId)) return frontendSocket.publishEventRemoved(eventId, "primary-market-game-over");
+    return frontendSocket.publishEventSnapshot(eventId);
+  }));
   logger.info("[ResultSync] socket game-over cleanup completed", {
     markets: closedRows.length,
     events: marketIdsByEvent.size,
     removed,
+    removedEvents: terminalEvents.length,
   });
-  return { markets: closedRows.length, events: marketIdsByEvent.size, removed };
+  return { markets: closedRows.length, events: marketIdsByEvent.size, removed, removedEvents: terminalEvents.length };
 }
 
 async function persistExceptional(connection, market, result) {
@@ -402,6 +457,7 @@ function getResultSyncStatus() {
 module.exports = {
   responseRows,
   fancyResultValue,
+  isEventTerminalMarketName,
   loadCandidates,
   handleSocketGameOver,
   applyResults,

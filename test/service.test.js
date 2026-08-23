@@ -76,7 +76,11 @@ const {
   oddsType,
   storedInFancyTable,
 } = require("../src/cron/marketDiscoverySync");
-const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
+const {
+  responseRows: resultRows,
+  fancyResultValue,
+  isEventTerminalMarketName,
+} = require("../src/cron/resultSync");
 const { integer, boolean, csvIntegers } = require("../src/config/env");
 const { setBounded } = require("../src/utils/boundedMap");
 const { isDeadlock, retryDeadlock } = require("../src/utils/dbRetry");
@@ -1599,6 +1603,14 @@ test("only confirmed game-over ticks trigger result unsubscription", () => {
   assert.equal(isResultTick({ go: true, res: "11" }), false);
 });
 
+test("Match Odds and Bookmaker game-over ticks are event-terminal signals", () => {
+  assert.equal(isEventTerminalMarketName("Match Odds"), true);
+  assert.equal(isEventTerminalMarketName("Match Bookmaker"), true);
+  assert.equal(isEventTerminalMarketName("BOOKMAKER"), true);
+  assert.equal(isEventTerminalMarketName("Over/Under 2.5 Goals"), false);
+  assert.equal(isEventTerminalMarketName("15 Over Run LF"), false);
+});
+
 test("socket game-over performs durable cleanup without dropping result candidates", () => {
   const resultSource = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
@@ -1607,6 +1619,9 @@ test("socket game-over performs durable cleanup without dropping result candidat
   assert.match(resultSource, /UPDATE t_market SET isactive=\?,status=\?,issubscribed=\?/);
   assert.match(resultSource, /UPDATE t_matchfancy SET isactive=\?,status=\?,isshow=\?,is_show=\?,issubscribed=\?/);
   assert.match(resultSource, /redis\.removeMarkets/);
+  assert.match(resultSource, /redis\.removeEvent/);
+  assert.match(resultSource, /redis\.removeEventsFromMetadata/);
+  assert.match(resultSource, /publishEventRemoved\(eventId, "primary-market-game-over"\)/);
   assert.match(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /UPPER\(f\.status\) IN \('SUSPENDED','CLOSED'\)/);

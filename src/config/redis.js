@@ -16,6 +16,7 @@ const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
 const tickActivity = new Map();
 const eventLocks = new Map();
+const eventMetadataLocks = new Map();
 const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
 const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 });
 const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 172800, { min: 300 });
@@ -46,6 +47,18 @@ function withEventLock(eventId, fn) {
   eventLocks.set(key, tail);
   tail.finally(() => {
     if (eventLocks.get(key) === tail) eventLocks.delete(key);
+  });
+  return result;
+}
+
+function withEventMetadataLock(sportId, fn) {
+  const key = String(sportId);
+  const previousTail = (eventMetadataLocks.get(key) || Promise.resolve()).catch(() => {});
+  const result = previousTail.then(fn);
+  const tail = result.catch(() => {});
+  eventMetadataLocks.set(key, tail);
+  tail.finally(() => {
+    if (eventMetadataLocks.get(key) === tail) eventMetadataLocks.delete(key);
   });
   return result;
 }
@@ -81,13 +94,15 @@ async function writeEvents(events, sportIds = []) {
     });
   }
   if (!bySport.size) return { sports: 0, events: 0 };
-  const transaction = redis.multi();
-  for (const [sportId, rows] of bySport) {
-    transaction.set(eventMetadataKey(sportId), JSON.stringify(rows), {
-      EX: EVENT_METADATA_TTL_SECONDS,
-    });
-  }
-  await transaction.exec();
+  await Promise.all(
+    [...bySport].map(([sportId, rows]) =>
+      withEventMetadataLock(sportId, () =>
+        redis.set(eventMetadataKey(sportId), JSON.stringify(rows), {
+          EX: EVENT_METADATA_TTL_SECONDS,
+        }),
+      ),
+    ),
+  );
   return {
     sports: bySport.size,
     events: [...bySport.values()].reduce((total, rows) => total + rows.length, 0),
@@ -107,6 +122,40 @@ async function getEvents(sportId) {
   } catch {
     return null;
   }
+}
+
+async function removeEventsFromMetadata(events) {
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return 0;
+  const bySport = new Map();
+  for (const event of events || []) {
+    const sportId = Number(event?.sportid ?? event?.sportId);
+    const eventId = String(event?.eventid ?? event?.eventId ?? "");
+    if (!Number.isInteger(sportId) || !/^\d+$/.test(eventId)) continue;
+    if (!bySport.has(sportId)) bySport.set(sportId, new Set());
+    bySport.get(sportId).add(eventId);
+  }
+  const removals = await Promise.all(
+    [...bySport].map(([sportId, eventIds]) =>
+      withEventMetadataLock(sportId, async () => {
+        const key = eventMetadataKey(sportId);
+        const value = await redis.get(key);
+        if (!value) return 0;
+        let rows;
+        try {
+          rows = JSON.parse(value);
+        } catch {
+          return 0;
+        }
+        if (!Array.isArray(rows)) return 0;
+        const filtered = rows.filter((event) => !eventIds.has(String(event?.eventId)));
+        const removed = rows.length - filtered.length;
+        if (removed) await redis.set(key, JSON.stringify(filtered), { EX: EVENT_METADATA_TTL_SECONDS });
+        return removed;
+      }),
+    ),
+  );
+  return removals.reduce((total, count) => total + count, 0);
 }
 
 async function writeScore(score) {
@@ -1165,6 +1214,7 @@ module.exports = {
   getScore,
   writeEvents,
   getEvents,
+  removeEventsFromMetadata,
   removeMarket,
   removeMarkets,
   removeEvent,

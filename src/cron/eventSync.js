@@ -83,8 +83,10 @@ async function upsertEvents(events) {
          fancypause,betlock,is_redis_updated,in_play,fancylock,bookmaker,fancy,channel_id)
        VALUES ?
        ON DUPLICATE KEY UPDATE eventname=VALUES(eventname),seriesid=VALUES(seriesid),
-         sportid=VALUES(sportid),open_date=VALUES(open_date),in_play=VALUES(in_play),
-         isactive=VALUES(isactive),status=VALUES(status),updatedon=NOW()`,
+         sportid=VALUES(sportid),open_date=VALUES(open_date),
+         in_play=IF(status=0,0,VALUES(in_play)),
+         isactive=IF(status=0,0,VALUES(isactive)),
+         status=IF(status=0,0,VALUES(status)),updatedon=NOW()`,
       [values],
     );
     return {
@@ -94,6 +96,17 @@ async function upsertEvents(events) {
   } finally {
     connection.release();
   }
+}
+
+async function excludeTerminalEvents(events) {
+  if (!events.length) return [];
+  const ids = [...new Set(events.map((event) => Number(event.eventId)).filter(Number.isInteger))];
+  const [rows] = await getSourcePool().query(
+    `SELECT eventid FROM t_event WHERE status=? AND eventid IN (${ids.map(() => "?").join(",")})`,
+    [false, ...ids],
+  );
+  const terminalIds = new Set(rows.map((row) => Number(row.eventid)));
+  return events.filter((event) => !terminalIds.has(Number(event.eventId)));
 }
 
 async function retireCompletedEvents(events) {
@@ -185,7 +198,10 @@ async function syncEvents() {
     const events = eventRows(responses);
     // Populate the public read cache before MySQL writes. Database lock or storage
     // pressure must not prevent fresh provider events from reaching public APIs.
-    const cached = await redis.writeEvents(events, successfulSportIds);
+    // A terminal primary-market socket tick is authoritative for this process;
+    // do not let a lagging vendor event feed add that event back to Redis.
+    const cacheableEvents = await excludeTerminalEvents(events);
+    const cached = await redis.writeEvents(cacheableEvents, successfulSportIds);
     const persisted = await upsertEvents(events);
     const retired = await retireCompletedEvents(events);
     const result = {
@@ -227,6 +243,7 @@ function getEventSyncStatus() {
 module.exports = {
   eventRows,
   eventInsertValues,
+  excludeTerminalEvents,
   upsertEvents,
   retireCompletedEvents,
   syncEvents,
