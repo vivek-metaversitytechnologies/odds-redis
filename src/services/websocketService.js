@@ -320,7 +320,7 @@ async function persist(items, receivedAtMs = Date.now()) {
     try {
       await resultHandler([...resultedMarketIds]);
     } catch (error) {
-      logger.error("[ProviderWS] result unsubscribe handler failed", {
+      logger.error("[ProviderWS] game-over cleanup handler failed", {
         marketIds: [...resultedMarketIds],
         error: error.message,
       });

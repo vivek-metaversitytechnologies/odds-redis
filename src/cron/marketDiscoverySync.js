@@ -9,6 +9,7 @@ const { publishEventSnapshot } = require("../services/frontendSocketService");
 const { integer, csvIntegers } = require("../config/env");
 const { eventInWindow, eventWindowSql } = require("../utils/eventWindow");
 const { setBounded } = require("../utils/boundedMap");
+const { retryDeadlock } = require("../utils/dbRetry");
 const {
   FANCY_MARKET_TYPES,
   REGULAR_MARKET_TYPES,
@@ -262,6 +263,7 @@ function storedInFancyTable(market) {
 
 async function upsertFancies(fancies) {
   if (!fancies.length) return { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
+  fancies = [...fancies].sort((left, right) => String(left.marketId).localeCompare(String(right.marketId)));
   const connection = await getSourcePool().getConnection();
   let inserted = 0;
   let updated = 0;
@@ -316,7 +318,9 @@ async function upsertFancies(fancies) {
            issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
            sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
          ON DUPLICATE KEY UPDATE name=VALUES(name),oddstype=VALUES(oddstype),eventid=VALUES(eventid),
-           status=VALUES(status),isactive=VALUES(isactive),isshow=VALUES(isshow),is_show=VALUES(is_show),
+           status=IF(status='CLOSED','CLOSED',VALUES(status)),
+           isactive=IF(status='CLOSED',0,VALUES(isactive)),
+           isshow=IF(status='CLOSED',0,VALUES(isshow)),is_show=IF(status='CLOSED',0,VALUES(is_show)),
            matchname=VALUES(matchname),sportid=VALUES(sportid),mtype=VALUES(mtype),
            betdelay=VALUES(betdelay),minbet=VALUES(minbet),maxbet=VALUES(maxbet),
            maxliabilityper_market=VALUES(maxliabilityper_market),
@@ -350,6 +354,7 @@ async function upsertFancies(fancies) {
 
 async function upsertMarkets(markets) {
   if (!markets.length) return { inserted: 0, updated: 0, marketIds: [], deactivatedMarketIds: [] };
+  markets = [...markets].sort((left, right) => String(left.marketId).localeCompare(String(right.marketId)));
   const connection = await getSourcePool().getConnection();
   let inserted = 0;
   let updated = 0;
@@ -407,7 +412,7 @@ async function upsertMarkets(markets) {
          ON DUPLICATE KEY UPDATE marketname=VALUES(marketname),matchname=VALUES(matchname),
            opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
            seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
-           isactive=VALUES(isactive),betdelay=VALUES(betdelay),
+           isactive=IF(status=0,0,VALUES(isactive)),betdelay=VALUES(betdelay),
            display_message=VALUES(display_message),updatedon=NOW()`,
         [values],
       );
@@ -705,6 +710,7 @@ async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {
 }
 
 async function syncMarketDiscovery(events, lane = "active") {
+  if (liveCleanupRunning) return { skipped: true, reason: "live-cleanup-running" };
   if (running) {
     rerunRequested = true;
     return { skipped: true, reason: "already-running", rerunQueued: true };
@@ -943,7 +949,9 @@ async function fetchLiveEventsForMarketCleanup() {
 }
 
 async function syncLiveMarketCleanup() {
-  if (liveCleanupRunning) return { skipped: true, reason: "already-running" };
+  if (liveCleanupRunning || running) {
+    return { skipped: true, reason: liveCleanupRunning ? "already-running" : "market-discovery-running" };
+  }
   liveCleanupRunning = true;
   try {
     const events = await fetchLiveEventsForMarketCleanup();
@@ -970,8 +978,8 @@ async function syncLiveMarketCleanup() {
     const unique = [...new Map(inactive.map((market) => [market.marketId, market])).values()];
     const fancies = unique.filter(storedInFancyTable);
     const regular = unique.filter((market) => !storedInFancyTable(market));
-    const regularResult = await upsertMarkets(regular);
-    const fancyResult = await upsertFancies(fancies);
+    const regularResult = await retryDeadlock(() => upsertMarkets(regular));
+    const fancyResult = await retryDeadlock(() => upsertFancies(fancies));
     const marketIdsByEvent = new Map();
     for (const market of unique) {
       const eventId = String(market.eventId);
@@ -1007,10 +1015,10 @@ async function syncStoredEventMarkets(lane = "active") {
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
   const discoveryTask = cron.schedule(expression, () => {
-    if (!running) void syncStoredEventMarkets("active").catch(() => {});
+    if (!running && !liveCleanupRunning) void syncStoredEventMarkets("active").catch(() => {});
   });
   const futureTask = cron.schedule(cronConfig.futureMarketDiscovery.expression, () => {
-    if (!running) void syncStoredEventMarkets("future").catch(() => {});
+    if (!running && !liveCleanupRunning) void syncStoredEventMarkets("future").catch(() => {});
   });
   const cleanupTask = cron.schedule(cronConfig.liveMarketCleanup.expression, () => {
     void syncLiveMarketCleanup().catch((error) =>

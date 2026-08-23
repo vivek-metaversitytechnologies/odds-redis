@@ -6,7 +6,7 @@ const { fetchActiveMarkets, startMarketSync, syncMarketSubscriptions } = require
 const { startCompetitionSync, syncCompetitions } = require("./cron/competitionSync");
 const { startEventSync, syncEvents } = require("./cron/eventSync");
 const { startMarketDiscoverySync } = require("./cron/marketDiscoverySync");
-const { startResultSync, syncResults } = require("./cron/resultSync");
+const { startResultSync, syncResults, handleSocketGameOver } = require("./cron/resultSync");
 const { startRedisEventCleanup } = require("./cron/redisEventCleanup");
 const websocket = require("./services/websocketService");
 const subscriptions = require("./services/marketSubscriptionService");
@@ -28,7 +28,7 @@ async function startServer() {
   });
   frontendSocket.attachFrontendSocket(server);
   logger.info("HTTP server started", { port: server.address().port });
-  websocket.setResultHandler((marketIds) => subscriptions.unsubscribeResultMarkets(marketIds));
+  websocket.setResultHandler(handleSocketGameOver);
   // Establish the replacement socket before any optional provider cleanup. Redis remains
   // the durable frontend snapshot and must not be touched during a process restart.
   websocket.connectSocket();

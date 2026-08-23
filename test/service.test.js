@@ -78,6 +78,7 @@ const {
 const { responseRows: resultRows, fancyResultValue } = require("../src/cron/resultSync");
 const { integer, boolean, csvIntegers } = require("../src/config/env");
 const { setBounded } = require("../src/utils/boundedMap");
+const { isDeadlock, retryDeadlock } = require("../src/utils/dbRetry");
 const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
@@ -103,6 +104,24 @@ test("provider limiter recognizes the vendor temporary IP block", () => {
     true,
   );
   assert.equal(isVendorRateLimitResponse(403, "Forbidden"), false);
+});
+
+test("database deadlocks are recognized and retried with a bounded attempt count", async () => {
+  assert.equal(isDeadlock({ code: "ER_LOCK_DEADLOCK" }), true);
+  assert.equal(isDeadlock({ errno: 1213 }), true);
+  assert.equal(isDeadlock({ sqlState: "40001" }), true);
+  assert.equal(isDeadlock({ code: "ER_BAD_FIELD_ERROR" }), false);
+  let calls = 0;
+  const result = await retryDeadlock(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw Object.assign(new Error("deadlock"), { errno: 1213 });
+      return "saved";
+    },
+    { attempts: 3, delayMs: 0 },
+  );
+  assert.equal(result, "saved");
+  assert.equal(calls, 3);
 });
 
 test("health supervisor classifies failed and stuck pipelines", () => {
@@ -1541,6 +1560,20 @@ test("only confirmed game-over ticks trigger result unsubscription", () => {
   assert.equal(isResultTick({ mid: "1.2", go: true, res: "11", s: "CLOSED" }), true);
   assert.equal(isResultTick({ mid: "1.2", go: false, s: "OPEN" }), false);
   assert.equal(isResultTick({ go: true, res: "11" }), false);
+});
+
+test("socket game-over performs durable cleanup without dropping result candidates", () => {
+  const resultSource = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
+  const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
+  assert.match(serverSource, /setResultHandler\(handleSocketGameOver\)/);
+  assert.match(resultSource, /UPDATE t_market SET isactive=\?,status=\?,issubscribed=\?/);
+  assert.match(resultSource, /UPDATE t_matchfancy SET isactive=\?,status=\?,isshow=\?,is_show=\?,issubscribed=\?/);
+  assert.match(resultSource, /redis\.removeMarkets/);
+  assert.match(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
+  assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
+  assert.match(discoverySource, /isactive=IF\(status=0,0,VALUES\(isactive\)\)/);
+  assert.match(discoverySource, /status=IF\(status='CLOSED','CLOSED',VALUES\(status\)\)/);
 });
 
 test("socket classifier separates score envelopes from nested odds ticks", () => {

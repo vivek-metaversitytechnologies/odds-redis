@@ -7,6 +7,7 @@ const frontendSocket = require("../services/frontendSocketService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const { eventWindowSql } = require("../utils/eventWindow");
+const { retryDeadlock } = require("../utils/dbRetry");
 
 let running = false;
 let exceptionalTableAvailable;
@@ -68,25 +69,89 @@ async function loadCandidates() {
   const [markets] = await getSourcePool().query(
     `SELECT m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
-     WHERE m.isactive=? AND m.sportid IN (${placeholders})
+     WHERE (m.isactive=? OR (m.isactive=? AND m.status=?
+       AND m.updatedon >= DATE_SUB(NOW(), INTERVAL 48 HOUR)))
+       AND m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ORDER BY m.id DESC LIMIT ?`,
-    [true, ...sportIds, limit],
+    [true, false, false, ...sportIds, limit],
   );
   const [fancies] = await getSourcePool().query(
     `SELECT f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
-     WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
+     WHERE (f.isactive=? OR (f.isactive=? AND UPPER(f.status)='CLOSED'
+       AND f.updatedon >= DATE_SUB(NOW(), INTERVAL 48 HOUR)))
+       AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
-       AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
+       AND COALESCE(UPPER(f.status),'') <> 'SUSPENDED'
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
      ORDER BY f.id DESC LIMIT ?`,
-    [true, ...sportIds, limit],
+    [true, false, ...sportIds, limit],
   );
   return { markets, fancies };
+}
+
+async function handleSocketGameOver(marketIds) {
+  const ids = [...new Set((marketIds || []).map(String).map((id) => id.trim()).filter(redis.validMarketIdentifier))]
+    .sort((left, right) => left.localeCompare(right));
+  if (!ids.length) return { markets: 0, events: 0, removed: 0 };
+  const placeholders = ids.map(() => "?").join(",");
+  const closedRows = await retryDeadlock(async () => {
+    const connection = await getSourcePool().getConnection();
+    try {
+      await connection.beginTransaction();
+      const [markets] = await connection.query(
+        `SELECT marketid,eventid FROM t_market WHERE marketid IN (${placeholders})`,
+        ids,
+      );
+      const [fancies] = await connection.query(
+        `SELECT fancyid AS marketid,eventid FROM t_matchfancy WHERE fancyid IN (${placeholders})`,
+        ids,
+      );
+      await connection.query(
+        `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
+         WHERE marketid IN (${placeholders})`,
+        [false, false, false, ...ids],
+      );
+      await connection.query(
+        `UPDATE t_matchfancy SET isactive=?,status=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+         WHERE fancyid IN (${placeholders})`,
+        [false, "CLOSED", false, false, false, ...ids],
+      );
+      await connection.commit();
+      return [...markets, ...fancies];
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  });
+
+  const marketIdsByEvent = new Map();
+  for (const row of closedRows) {
+    const eventId = String(row.eventid);
+    if (!marketIdsByEvent.has(eventId)) marketIdsByEvent.set(eventId, []);
+    marketIdsByEvent.get(eventId).push(String(row.marketid));
+  }
+  const removals = await Promise.allSettled(
+    [...marketIdsByEvent].map(([eventId, idsForEvent]) => redis.removeMarkets(eventId, idsForEvent)),
+  );
+  const removed = removals.reduce(
+    (total, result) => total + (result.status === "fulfilled" ? result.value.size : 0),
+    0,
+  );
+  await subscriptions.unsubscribeResultMarkets(ids);
+  await Promise.allSettled([...marketIdsByEvent.keys()].map((eventId) => frontendSocket.publishEventSnapshot(eventId)));
+  logger.info("[ResultSync] socket game-over cleanup completed", {
+    markets: closedRows.length,
+    events: marketIdsByEvent.size,
+    removed,
+  });
+  return { markets: closedRows.length, events: marketIdsByEvent.size, removed };
 }
 
 async function persistExceptional(connection, market, result) {
@@ -338,6 +403,7 @@ module.exports = {
   responseRows,
   fancyResultValue,
   loadCandidates,
+  handleSocketGameOver,
   applyResults,
   syncResults,
   startResultSync,
