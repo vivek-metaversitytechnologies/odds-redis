@@ -82,6 +82,24 @@ const { subscriptionDiff } = require("../src/cron/marketSync");
 const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
 const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
 const { pipelineCheck } = require("../src/services/healthSupervisor");
+const { getProviderRateLimitStatus, isVendorRateLimitResponse } = require("../src/services/providerApi");
+
+test("provider limiter stays below the vendor rolling-window cap", () => {
+  const limit = getProviderRateLimitStatus();
+  assert.equal(limit.vendorWindowCap, 1000);
+  assert.equal(limit.safeWindowCap, 800);
+  assert.ok(limit.effectiveRequestsPerMinute <= 2400);
+  assert.ok(limit.minTimeMs >= 25);
+});
+
+test("provider limiter recognizes the vendor temporary IP block", () => {
+  assert.equal(isVendorRateLimitResponse(429, { message: "slow down" }), true);
+  assert.equal(
+    isVendorRateLimitResponse(403, "Access denied: IP is temporarily blocked due to exceeding 1000 requests"),
+    true,
+  );
+  assert.equal(isVendorRateLimitResponse(403, "Forbidden"), false);
+});
 
 test("health supervisor classifies failed and stuck pipelines", () => {
   const now = Date.parse("2026-08-22T12:00:00.000Z");

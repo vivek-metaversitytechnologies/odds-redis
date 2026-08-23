@@ -18,7 +18,7 @@ const { getMarketDiscoveryStatus } = require("./cron/marketDiscoverySync");
 const { getMarketSyncStatus } = require("./cron/marketSync");
 const { getResultSyncStatus } = require("./cron/resultSync");
 const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
-const { providerLimiter } = require("./services/providerApi");
+const { providerLimiter, getProviderRateLimitStatus } = require("./services/providerApi");
 const { getHealthStatus } = require("./services/healthSupervisor");
 
 function createApp() {
@@ -94,7 +94,7 @@ function createApp() {
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
-          providerQueue: providerLimiter.counts(),
+          providerQueue: { ...providerLimiter.counts(), rateLimit: getProviderRateLimitStatus() },
         },
       });
     } catch (error) {
@@ -112,7 +112,7 @@ function createApp() {
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
-          providerQueue: providerLimiter.counts(),
+          providerQueue: { ...providerLimiter.counts(), rateLimit: getProviderRateLimitStatus() },
         },
         message: error.message,
       });

@@ -2,15 +2,51 @@ const { writeProviderLog } = require("../utils/providerFileLogger");
 const Bottleneck = require("bottleneck");
 const { integer } = require("../config/env");
 
-const maxRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 15000, { min: 1 });
+const VENDOR_WINDOW_MS = 20000;
+const VENDOR_WINDOW_CAP = 1000;
+const VENDOR_SAFE_WINDOW_CAP = 800;
+const configuredRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 2400, { min: 1 });
+const vendorSafeRequestsPerMinute = Math.floor((VENDOR_SAFE_WINDOW_CAP * 60000) / VENDOR_WINDOW_MS);
+const maxRequestsPerMinute = Math.min(configuredRequestsPerMinute, vendorSafeRequestsPerMinute);
 const configuredMinTime = integer("PROVIDER_MIN_TIME_MS", 0, { min: 0 });
 const rateLimitMinTime = Math.ceil(60000 / maxRequestsPerMinute);
 const providerLimiter = new Bottleneck({
   maxConcurrent: integer("PROVIDER_MAX_CONCURRENT", 100, { min: 1, max: 100 }),
   minTime: Math.max(configuredMinTime, rateLimitMinTime),
+  reservoir: VENDOR_SAFE_WINDOW_CAP,
+  reservoirRefreshAmount: VENDOR_SAFE_WINDOW_CAP,
+  reservoirRefreshInterval: VENDOR_WINDOW_MS,
 });
 const activeControllers = new Set();
 let shuttingDown = false;
+let blockedUntil = 0;
+
+function isVendorRateLimitResponse(status, body) {
+  const message = typeof body === "string" ? body : JSON.stringify(body || "");
+  return status === 429 || (status === 403 && /temporarily blocked|exceed(?:ed|ing).*requests/i.test(message));
+}
+
+async function waitForVendorCooldown() {
+  const delayMs = blockedUntil - Date.now();
+  if (delayMs <= 0) return;
+  await new Promise((resolve) => {
+    const timer = setTimeout(resolve, delayMs);
+    timer.unref?.();
+  });
+}
+
+function getProviderRateLimitStatus() {
+  return {
+    vendorWindowMs: VENDOR_WINDOW_MS,
+    vendorWindowCap: VENDOR_WINDOW_CAP,
+    safeWindowCap: VENDOR_SAFE_WINDOW_CAP,
+    configuredRequestsPerMinute,
+    effectiveRequestsPerMinute: maxRequestsPerMinute,
+    minTimeMs: Math.max(configuredMinTime, rateLimitMinTime),
+    configurationClamped: configuredRequestsPerMinute > maxRequestsPerMinute,
+    blockedUntil: blockedUntil ? new Date(blockedUntil).toISOString() : null,
+  };
+}
 
 function providerUrl(path, query) {
   const url = new URL(path, process.env.PROVIDER_BASE_URL || "https://sportexchange-test-dev.rexgames.in/");
@@ -53,6 +89,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
   const url = providerUrl(path, query);
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     if (shuttingDown) throw new Error("Provider client is shutting down");
+    await waitForVendorCooldown();
     const startedAt = Date.now();
     try {
       const requestLog = {
@@ -103,6 +140,10 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
       };
       writeProviderLog("provider.response", responseLog);
       if (response.ok) return data;
+      if (isVendorRateLimitResponse(response.status, data)) {
+        const cooldownMs = integer("PROVIDER_BLOCK_COOLDOWN_MS", 60000, { min: 20000, max: 600000 });
+        blockedUntil = Math.max(blockedUntil, Date.now() + cooldownMs);
+      }
       const error = new Error(
         `Provider request failed (${response.status}): ${typeof data === "string" ? data : JSON.stringify(data)}`,
       );
@@ -147,6 +188,8 @@ function postIds(path, ids) {
 
 module.exports = {
   providerLimiter,
+  getProviderRateLimitStatus,
+  isVendorRateLimitResponse,
   request,
   closeProviderRequests,
   sports: () => request("/v1/sports"),

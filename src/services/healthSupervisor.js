@@ -3,7 +3,7 @@ const v8 = require("node:v8");
 const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
 const websocket = require("./websocketService");
-const { providerLimiter } = require("./providerApi");
+const { providerLimiter, getProviderRateLimitStatus } = require("./providerApi");
 const { getCompetitionSyncStatus } = require("../cron/competitionSync");
 const { getEventSyncStatus } = require("../cron/eventSync");
 const { getMarketDiscoveryStatus } = require("../cron/marketDiscoverySync");
@@ -134,7 +134,7 @@ function runtimeChecks(now) {
   checks.providerQueue = check(
     queued >= 1000 ? "critical" : queued >= 200 ? "degraded" : "healthy",
     "Provider request queue sampled",
-    { ...queue },
+    { ...queue, rateLimit: getProviderRateLimitStatus() },
   );
   return checks;
 }

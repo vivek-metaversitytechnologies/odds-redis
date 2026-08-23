@@ -709,7 +709,10 @@ async function syncMarketDiscovery(events, lane = "active") {
 
     // Second pass: fetch typed fallbacks needed for families the vendor can omit from
     // the unfiltered response. These no longer delay line-market deactivation.
-    const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 5000, { min: 1000 });
+    // Typed fallback discovery fans out into several /v1/markets calls per event.
+    // Live prices arrive over the socket, so repeating this metadata-only fan-out
+    // every five seconds adds no pricing freshness and can exhaust the vendor cap.
+    const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 60000, { min: 10000 });
     const fullDiscovery = Date.now() - (lastFullDiscoveryAt.get(lane) || 0) >= fullIntervalMs;
     const typedSettled = fullDiscovery
       ? await settleWithConcurrency(

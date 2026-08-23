@@ -34,7 +34,9 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - On startup and according to `MARKET_SYNC_CRON`, query active `t_market` rows.
 - Retry market IDs skipped by the provider every `PROVIDER_SKIPPED_RETRY_MS` (default: 1000 ms) until accepted.
 - Persist and publish final `go: true` result ticks, then unsubscribe those markets from the provider.
-- Route every provider request and retry through a shared process-wide limiter capped by `PROVIDER_MAX_REQUESTS_PER_MINUTE`.
+- Route every provider request and retry through a shared process-wide limiter. The
+  configured `PROVIDER_MAX_REQUESTS_PER_MINUTE` is hard-clamped to 800 requests per
+  20 seconds, leaving headroom below the vendor's 1000-request cap.
 - Subscribe new market IDs in bounded HTTP batches.
 - Connect to the provider Socket.IO endpoint and replay subscriptions after a reconnect.
 - Serialize incoming writes to preserve tick order and avoid unbounded Redis work.

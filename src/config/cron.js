@@ -14,7 +14,7 @@ module.exports = Object.freeze({
     runOnStart: booleanEnv("RUN_EVENT_SYNC_ON_START"),
   }),
   marketDiscovery: Object.freeze({
-    expression: process.env.MARKET_DISCOVERY_CRON || "*/5 * * * * *",
+    expression: process.env.MARKET_DISCOVERY_CRON || "*/15 * * * * *",
   }),
   futureMarketDiscovery: Object.freeze({
     expression: process.env.FUTURE_MARKET_DISCOVERY_CRON || "0 */10 * * * *",
