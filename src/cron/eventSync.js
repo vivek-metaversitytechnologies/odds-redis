@@ -44,6 +44,28 @@ function eventRows(responses) {
     );
 }
 
+function eventInsertValues(event) {
+  return [
+    event.seriesId,
+    event.sportId,
+    event.eventId,
+    event.eventName,
+    event.openDate,
+    !event.gameOver,
+    !event.gameOver,
+    new Date(),
+    new Date(),
+    false,
+    false,
+    true,
+    event.gameOver ? false : event.inPlay,
+    false,
+    true,
+    true,
+    "1",
+  ];
+}
+
 async function upsertEvents(events) {
   if (!events.length) return { inserted: 0, updated: 0 };
   const connection = await getSourcePool().getConnection();
@@ -54,25 +76,7 @@ async function upsertEvents(events) {
       ids,
     );
     const existing = new Set(existingRows.map((row) => Number(row.eventid)));
-    const values = events.map((event) => [
-      event.seriesId,
-      event.sportId,
-      event.eventId,
-      event.eventName,
-      event.openDate,
-      !event.gameOver,
-      !event.gameOver,
-      new Date(),
-      new Date(),
-      false,
-      false,
-      true,
-      event.gameOver ? false : event.inPlay,
-      true,
-      true,
-      true,
-      "1",
-    ]);
+    const values = events.map(eventInsertValues);
     await connection.query(
       `INSERT INTO t_event
         (seriesid,sportid,eventid,eventname,open_date,status,isactive,createdon,updatedon,
@@ -222,6 +226,7 @@ function getEventSyncStatus() {
 
 module.exports = {
   eventRows,
+  eventInsertValues,
   upsertEvents,
   retireCompletedEvents,
   syncEvents,

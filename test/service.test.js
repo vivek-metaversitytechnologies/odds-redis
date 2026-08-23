@@ -50,7 +50,7 @@ const {
   selectDashboardRows,
 } = require("../src/services/dashboardService");
 const { competitionRows } = require("../src/cron/competitionSync");
-const { eventRows } = require("../src/cron/eventSync");
+const { eventRows, eventInsertValues } = require("../src/cron/eventSync");
 const {
   MARKET_TYPES,
   REGULAR_MARKET_TYPES,
@@ -634,6 +634,19 @@ test("event sync keeps supported events including completed lifecycle updates", 
   );
   assert.equal(rows[0].openDate, "2026-08-02 17:30:00");
   assert.equal(rows[1].gameOver, true);
+});
+
+test("new event rows default fancylock to false", () => {
+  const values = eventInsertValues({
+    seriesId: 10,
+    sportId: 4,
+    eventId: 20,
+    eventName: "A v B",
+    openDate: "2026-08-23 12:00:00",
+    inPlay: true,
+    gameOver: false,
+  });
+  assert.equal(values[13], false);
 });
 
 test("market discovery maps active unfinished markets with Java betting defaults", () => {
