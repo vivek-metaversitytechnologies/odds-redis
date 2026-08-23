@@ -68,6 +68,10 @@ const {
   inactiveLineMarkets,
   missingLineMarketIds,
   discoveryEventBatchSize,
+  prioritizedDiscoveryEvents,
+  discoveryEventBatches,
+  typedDiscoveryRequests,
+  discoveryPriority,
   oddsType,
   storedInFancyTable,
 } = require("../src/cron/marketDiscoverySync");
@@ -296,6 +300,22 @@ test("active market discovery isolates events while future discovery remains bat
   assert.equal(discoveryEventBatchSize("future"), 20);
   if (previousFuture === undefined) delete process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
   else process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE = previousFuture;
+});
+
+test("market discovery prioritizes cricket and limits non-cricket typed fan-out", () => {
+  const events = [
+    { eventId: 11, sportId: 1 },
+    { eventId: 12, sportId: 2 },
+    { eventId: 13, sportId: 4 },
+  ];
+  const prioritized = prioritizedDiscoveryEvents(events, "active", Date.now());
+  assert.equal(prioritized[0].sportId, 4);
+  assert.deepEqual(discoveryEventBatches(prioritized, "active")[0], { eids: [13], sportId: 4 });
+  assert.equal(typedDiscoveryRequests(4).length, 1 + FANCY_MARKET_REQUESTS.length);
+  assert.deepEqual(typedDiscoveryRequests(1), [["match-odd", "winner-market", "goals"]]);
+  assert.deepEqual(typedDiscoveryRequests(2), [["match-odd", "winner-market", "goals"]]);
+  assert.ok(discoveryPriority(4) < discoveryPriority(1));
+  assert.ok(discoveryPriority(1, "active") < discoveryPriority(1, "future"));
 });
 
 test("bounded maps evict their oldest entry", () => {

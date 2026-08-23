@@ -195,7 +195,7 @@ module.exports = {
   sports: () => request("/v1/sports"),
   competitions: (query) => request("/v1/competitions", { query }),
   events: (query) => request("/v1/events", { query }),
-  markets: (body) => request("/v1/markets", { method: "POST", body }),
+  markets: (body, { priority = 5 } = {}) => request("/v1/markets", { method: "POST", body, priority }),
   runners: (marketId) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`),
   // Results must not sit behind the much larger discovery queue indefinitely.
   results: (body) => request("/v1/markets/results", { method: "POST", body, priority: 2 }),

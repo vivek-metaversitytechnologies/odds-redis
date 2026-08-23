@@ -20,9 +20,11 @@ let running = false;
 let rerunRequested = false;
 let liveCleanupRunning = false;
 const runnerMisses = new Map();
+const tossSeeded = new Map();
 const missingLineMarketPasses = new Map();
 const discoveryFingerprints = new Map();
 const lastFullDiscoveryAt = new Map();
+const lastPrimaryDiscoveryAt = new Map();
 const state = {
   running: false,
   lastStartedAt: null,
@@ -60,6 +62,49 @@ function discoveryEventBatchSize(lane) {
   // events can silently truncate the snapshot and leave valid markets hidden.
   if (lane === "active") return 1;
   return integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
+}
+
+function cricketSportId() {
+  return integer("CRICKET_SPORT_ID", 4, { min: 1 });
+}
+
+function prioritizedDiscoveryEvents(events, lane = "active", now = Date.now()) {
+  const cricketId = cricketSportId();
+  const nonCricketIntervalMs = integer("NON_CRICKET_DISCOVERY_MS", 30000, { min: 15000 });
+  return (events || [])
+    .filter((event) => {
+      const sportId = Number(event.sportId);
+      if (lane !== "active" || sportId === cricketId) return true;
+      return now - (lastPrimaryDiscoveryAt.get(`${lane}:${sportId}`) || 0) >= nonCricketIntervalMs;
+    })
+    .sort((left, right) => {
+      const leftPriority = Number(left.sportId) === cricketId ? 0 : 1;
+      const rightPriority = Number(right.sportId) === cricketId ? 0 : 1;
+      return leftPriority - rightPriority || Number(left.eventId) - Number(right.eventId);
+    });
+}
+
+function discoveryEventBatches(events, lane) {
+  const batchSize = discoveryEventBatchSize(lane);
+  const bySport = new Map();
+  for (const event of events || []) {
+    const sportId = Number(event.sportId);
+    if (!bySport.has(sportId)) bySport.set(sportId, []);
+    bySport.get(sportId).push(Number(event.eventId));
+  }
+  return [...bySport.entries()].flatMap(([sportId, eventIds]) =>
+    chunks(eventIds, batchSize).map((eids) => ({ eids, sportId })),
+  );
+}
+
+function typedDiscoveryRequests(sportId) {
+  if (Number(sportId) === cricketSportId()) return [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS];
+  return [["match-odd", "winner-market", "goals"]];
+}
+
+function discoveryPriority(sportId, lane = "active") {
+  if (Number(sportId) === cricketSportId()) return 3;
+  return lane === "active" ? 6 : 8;
 }
 
 function chunks(items, size = DB_WRITE_BATCH_SIZE) {
@@ -431,32 +476,43 @@ async function marketsMissingRunners(marketIds) {
 
 async function fetchAndStoreRunners(marketIds) {
   const missing = await marketsMissingRunners(marketIds);
+  const marketsBySource = new Map();
+  for (const marketId of missing) {
+    const sourceMarketId = runnerSourceMarketId(marketId);
+    if (!marketsBySource.has(sourceMarketId)) marketsBySource.set(sourceMarketId, []);
+    marketsBySource.get(sourceMarketId).push(marketId);
+  }
   const responses = await settleWithConcurrency(
-    missing,
-    async (marketId) => ({
-      marketId,
-      response: await provider.runners(runnerSourceMarketId(marketId)),
+    [...marketsBySource.entries()],
+    async ([sourceMarketId, targetMarketIds]) => ({
+      sourceMarketId,
+      targetMarketIds,
+      response: await provider.runners(sourceMarketId),
     }),
   );
   const runners = responses.flatMap((result) => {
     if (result.status !== "fulfilled") return [];
-    const { marketId, response } = result.value;
+    const { targetMarketIds, response } = result.value;
     const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-    return rows
-      .map((runner) => ({
-        marketId,
-        selectionId: Number(runner?.runnerId ?? runner?.selectionId),
-        runnerName: String(runner?.name ?? runner?.nation ?? "").trim(),
-      }))
-      .filter((runner) => Number.isInteger(runner.selectionId) && runner.runnerName);
+    return targetMarketIds.flatMap((marketId) =>
+      rows
+        .map((runner) => ({
+          marketId,
+          selectionId: Number(runner?.runnerId ?? runner?.selectionId),
+          runnerName: String(runner?.name ?? runner?.nation ?? "").trim(),
+        }))
+        .filter((runner) => Number.isInteger(runner.selectionId) && runner.runnerName),
+    );
   });
   const missTtlMs = integer("RUNNER_MISS_CACHE_MS", 300000, { min: 10000 });
   for (const result of responses) {
     if (result.status !== "fulfilled") continue;
-    const { marketId, response } = result.value;
+    const { targetMarketIds, response } = result.value;
     const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-    if (!rows.length) runnerMisses.set(String(marketId), Date.now() + missTtlMs);
-    else runnerMisses.delete(String(marketId));
+    for (const marketId of targetMarketIds) {
+      if (!rows.length) runnerMisses.set(String(marketId), Date.now() + missTtlMs);
+      else runnerMisses.delete(String(marketId));
+    }
   }
   if (runners.length) {
     const connection = await getSourcePool().getConnection();
@@ -524,14 +580,15 @@ async function seedTossMarkets(markets) {
         .trim()
         .toUpperCase() === "TOSS" &&
       market.isActive &&
-      !market.gameOver,
+      !market.gameOver &&
+      !tossSeeded.has(String(market.marketId)),
   );
   const results = await Promise.allSettled(
     tossMarkets.map(async (market) => {
       const response = await provider.runners(market.marketId);
       const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
       if (!rows.length) return false;
-      return redisStore.writeTick({
+      const written = await redisStore.writeTick({
         eid: market.eventId,
         mid: market.marketId,
         s: true,
@@ -547,6 +604,8 @@ async function seedTossMarkets(markets) {
           sb: runner.sb,
         })),
       });
+      if (written) setBounded(tossSeeded, String(market.marketId), true, DISCOVERY_CACHE_LIMIT);
+      return written;
     }),
   );
   return {
@@ -655,21 +714,21 @@ async function syncMarketDiscovery(events, lane = "active") {
   state.lastStartedAt = new Date().toISOString();
   state.lastError = null;
   try {
-    const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
+    const selectedEvents = prioritizedDiscoveryEvents(events, lane);
+    const eventsById = new Map(selectedEvents.map((event) => [String(event.eventId), event]));
     const eventIds = [...eventsById.keys()].map(Number);
     // Active events use isolated snapshots to avoid the provider's response cap.
     // Future events retain configurable batching because they run less frequently.
-    const batchSize = discoveryEventBatchSize(lane);
     const discovered = [];
-    const eventBatches = chunks(eventIds, batchSize);
+    const eventBatches = discoveryEventBatches(selectedEvents, lane);
 
     // First pass: one unfiltered request per event batch. Inactive line markets are
     // reconciled immediately instead of waiting for every fancy family and thousands
     // of database upserts in the full discovery pass.
     const primarySettled = await settleWithConcurrency(
       eventBatches,
-      async (eids) => {
-        const response = await provider.markets({ eids });
+      async ({ eids, sportId }) => {
+        const response = await provider.markets({ eids }, { priority: discoveryPriority(sportId, lane) });
         return { valid: isMarketSnapshotResponse(response), rows: marketRows(response, eventsById) };
       },
     );
@@ -680,7 +739,6 @@ async function syncMarketDiscovery(events, lane = "active") {
     // Commit the useful primary snapshot immediately. Typed-family discovery and runner
     // hydration are independent stages and must not prevent core markets from appearing.
     const primaryUnique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(primaryRows));
-    const primaryRegular = primaryUnique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const primaryStoredRegular = primaryUnique.filter((market) => !storedInFancyTable(market));
     const primaryStoredFancies = primaryUnique.filter(storedInFancyTable);
     // Both writers can touch t_market (fancy persistence removes migrated rows), so
@@ -692,13 +750,10 @@ async function syncMarketDiscovery(events, lane = "active") {
       ...primaryPersisted.deactivatedMarketIds,
       ...primaryFancyPersisted.fancyIds,
     ]);
-    const primaryRunnerPromise = fetchAndStoreRunners(
-      primaryRegular.filter((market) => market.isActive && !market.gameOver).map((market) => market.marketId),
-    );
     const fastLineReconciliation = await reconcileInactiveLineMarkets(primaryRows);
     // Reconcile only batches with a successful, structurally valid response. A timeout,
     // error response, or malformed body must never be interpreted as an empty market list.
-    const validPrimaryEventIds = eventBatches.flatMap((eids, index) =>
+    const validPrimaryEventIds = eventBatches.flatMap(({ eids }, index) =>
       primarySettled[index]?.status === "fulfilled" && primarySettled[index].value.valid ? eids : [],
     );
     const validPrimaryEventIdSet = new Set(validPrimaryEventIds.map(Number));
@@ -712,15 +767,28 @@ async function syncMarketDiscovery(events, lane = "active") {
     // Typed fallback discovery fans out into several /v1/markets calls per event.
     // Live prices arrive over the socket, so repeating this metadata-only fan-out
     // every five seconds adds no pricing freshness and can exhaust the vendor cap.
-    const fullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 60000, { min: 10000 });
-    const fullDiscovery = Date.now() - (lastFullDiscoveryAt.get(lane) || 0) >= fullIntervalMs;
+    const cricketFullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 60000, { min: 10000 });
+    const otherFullIntervalMs = integer("NON_CRICKET_FULL_DISCOVERY_MS", 300000, { min: 60000 });
+    const typedQueueLimit = integer("MARKET_TYPED_DISCOVERY_QUEUE_LIMIT", 200, { min: 1 });
+    const providerQueue = provider.providerLimiter.counts();
+    const typedWork =
+      Number(providerQueue.QUEUED || 0) < typedQueueLimit
+        ? eventBatches.flatMap(({ eids, sportId }) => {
+            const intervalMs = sportId === cricketSportId() ? cricketFullIntervalMs : otherFullIntervalMs;
+            const key = `${lane}:${sportId}`;
+            if (Date.now() - (lastFullDiscoveryAt.get(key) || 0) < intervalMs) return [];
+            return typedDiscoveryRequests(sportId).map((type) => ({ eids, type, sportId }));
+          })
+        : [];
+    const fullDiscovery = typedWork.length > 0;
     const typedSettled = fullDiscovery
       ? await settleWithConcurrency(
-          eventBatches.flatMap((eids) =>
-            [REGULAR_MARKET_TYPES, ...FANCY_MARKET_REQUESTS].map((type) => ({ eids, type })),
-          ),
-          async ({ eids, type }) => {
-            const response = await provider.markets({ eids, type });
+          typedWork,
+          async ({ eids, type, sportId }) => {
+            const response = await provider.markets(
+              { eids, type },
+              { priority: discoveryPriority(sportId, lane) },
+            );
             return marketRows(response, eventsById);
           },
         )
@@ -747,16 +815,7 @@ async function syncMarketDiscovery(events, lane = "active") {
     const activeRegularIds = regularMarkets
       .filter((market) => market.isActive && !market.gameOver)
       .map((market) => market.marketId);
-    const primaryRunnerResult = await primaryRunnerPromise;
-    const remainingRunnerResult = await fetchAndStoreRunners(activeRegularIds);
-    const runnerResult = {
-      requestedMarkets: primaryRunnerResult.requestedMarkets + remainingRunnerResult.requestedMarkets,
-      storedRunners: primaryRunnerResult.storedRunners + remainingRunnerResult.storedRunners,
-      storedMarketIds: [
-        ...new Set([...primaryRunnerResult.storedMarketIds, ...remainingRunnerResult.storedMarketIds]),
-      ],
-      failedMarkets: primaryRunnerResult.failedMarkets + remainingRunnerResult.failedMarkets,
-    };
+    const runnerResult = await fetchAndStoreRunners(activeRegularIds);
     const redisRegularIds = new Set([...changedIds, ...(runnerResult.storedMarketIds || [])]);
     const redisRegularMarkets = regularMarkets.filter((market) => redisRegularIds.has(market.marketId));
     const regularDefinitions = await redisStore.reconcileRegularDefinitions(
@@ -776,7 +835,11 @@ async function syncMarketDiscovery(events, lane = "active") {
     const activeFancies = fancies.filter((fancy) => fancy.isActive && !fancy.gameOver).length;
     for (const market of unique)
       setBounded(discoveryFingerprints, market.marketId, marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
-    if (fullDiscovery) lastFullDiscoveryAt.set(lane, Date.now());
+    const completedAt = Date.now();
+    for (const event of selectedEvents) lastPrimaryDiscoveryAt.set(`${lane}:${event.sportId}`, completedAt);
+    if (fullDiscovery) {
+      for (const { sportId } of typedWork) lastFullDiscoveryAt.set(`${lane}:${sportId}`, completedAt);
+    }
     const result = {
       skipped: false,
       lane,
@@ -997,6 +1060,10 @@ module.exports = {
   inactiveLineMarkets,
   missingLineMarketIds,
   discoveryEventBatchSize,
+  prioritizedDiscoveryEvents,
+  discoveryEventBatches,
+  typedDiscoveryRequests,
+  discoveryPriority,
   reconcileMissingLineMarkets,
   fetchActiveEventsForMarketDiscovery,
   fetchLiveEventsForMarketCleanup,
