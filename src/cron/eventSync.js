@@ -239,11 +239,11 @@ async function syncEvents() {
         terminal: event.gameOver,
         evidence: event.gameOver ? { eventGameOver: true } : null,
       });
-      if (decision.execute) confirmedVendorTerminalIds.add(event.eventId);
+      if (decision.confirmed) confirmedVendorTerminalIds.add(event.eventId);
     }
+    const terminalDryRun = lifecycle.dryRun();
     const effectiveEvents = events.map((event) =>
-      (!lifecycle.dryRun() && terminalEventIds.has(event.eventId)) ||
-      confirmedVendorTerminalIds.has(event.eventId)
+      terminalEventIds.has(event.eventId) || confirmedVendorTerminalIds.has(event.eventId)
         ? { ...event, gameOver: true, inPlay: false }
         : { ...event, gameOver: false },
     );
@@ -253,9 +253,16 @@ async function syncEvents() {
     // the public cache, while a corrected active row can reopen a previously closed event.
     const cacheableEvents = effectiveEvents.filter((event) => !event.gameOver);
     const cached = await redis.writeEvents(cacheableEvents, successfulSportIds);
-    const persisted = await upsertEvents(effectiveEvents);
-    const restoredMarketEligibility = await restoreActiveEventMarkets(effectiveEvents);
-    const retired = await retireCompletedEvents(effectiveEvents);
+    // Dry-run suppresses confirmed terminal events from public metadata but does
+    // not mutate their database lifecycle or delete Redis payloads.
+    const writableEvents = terminalDryRun
+      ? effectiveEvents.filter((event) => !event.gameOver)
+      : effectiveEvents;
+    const persisted = await upsertEvents(writableEvents);
+    const restoredMarketEligibility = await restoreActiveEventMarkets(writableEvents);
+    const retired = terminalDryRun
+      ? { events: 0, markets: 0, dryRunCandidates: effectiveEvents.length - writableEvents.length }
+      : await retireCompletedEvents(effectiveEvents);
     const result = {
       skipped: false,
       received,
@@ -265,7 +272,7 @@ async function syncEvents() {
       cached,
       restoredMarketEligibility,
       terminalMarketEvents: terminalEventIds.size,
-      terminalDryRun: lifecycle.dryRun(),
+      terminalDryRun,
       confirmedVendorTerminalEvents: confirmedVendorTerminalIds.size,
       retired,
       failedSports: responseResults.filter((item) => item.status === "rejected").length,
