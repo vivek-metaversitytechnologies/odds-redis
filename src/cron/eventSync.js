@@ -243,7 +243,9 @@ async function syncEvents() {
     }
     const terminalDryRun = lifecycle.dryRun();
     const effectiveEvents = events.map((event) =>
-      terminalEventIds.has(event.eventId) || confirmedVendorTerminalIds.has(event.eventId)
+      terminalEventIds.has(event.eventId) ||
+      confirmedVendorTerminalIds.has(event.eventId) ||
+      lifecycle.isConfirmed(event.eventId)
         ? { ...event, gameOver: true, inPlay: false }
         : { ...event, gameOver: false },
     );
