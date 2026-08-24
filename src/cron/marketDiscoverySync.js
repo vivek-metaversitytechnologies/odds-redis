@@ -448,7 +448,7 @@ async function upsertMarkets(markets) {
          ON DUPLICATE KEY UPDATE marketname=VALUES(marketname),matchname=VALUES(matchname),
            opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
            seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
-           isactive=VALUES(isactive),betdelay=VALUES(betdelay),
+           status=VALUES(status),isactive=VALUES(isactive),betdelay=VALUES(betdelay),
            display_message=VALUES(display_message),updatedon=NOW()`,
         [values],
       );

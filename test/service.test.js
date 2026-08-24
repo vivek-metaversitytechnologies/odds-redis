@@ -1699,6 +1699,7 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /UPPER\(f\.status\) IN \('SUSPENDED','CLOSED'\)/);
   assert.match(discoverySource, /isactive=VALUES\(isactive\)/);
+  assert.match(discoverySource, /status=VALUES\(status\),isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\)/);
   assert.match(eventSource, /isactive=VALUES\(isactive\),status=VALUES\(status\)/);
   assert.match(eventSource, /restoreMarketEligibility/);
