@@ -8,6 +8,7 @@ const subscriptions = require("../services/marketSubscriptionService");
 const frontendSocket = require("../services/frontendSocketService");
 const cronConfig = require("../config/cron");
 const { utcToIstSql } = require("../utils/dateTime");
+const lifecycle = require("../services/eventLifecyclePolicy");
 
 let running = false;
 const state = {
@@ -230,8 +231,21 @@ async function syncEvents() {
     // has emitted gameOver. Preserve that terminal state until discovery sees a
     // replacement active Match Odds or Bookmaker market.
     const terminalEventIds = await terminalPrimaryEventIds(events);
+    const confirmedVendorTerminalIds = new Set();
+    for (const event of events) {
+      const decision = lifecycle.observe({
+        eventId: event.eventId,
+        source: "event-feed",
+        terminal: event.gameOver,
+        evidence: event.gameOver ? { eventGameOver: true } : null,
+      });
+      if (decision.execute) confirmedVendorTerminalIds.add(event.eventId);
+    }
     const effectiveEvents = events.map((event) =>
-      terminalEventIds.has(event.eventId) ? { ...event, gameOver: true, inPlay: false } : event,
+      (!lifecycle.dryRun() && terminalEventIds.has(event.eventId)) ||
+      confirmedVendorTerminalIds.has(event.eventId)
+        ? { ...event, gameOver: true, inPlay: false }
+        : { ...event, gameOver: false },
     );
     // Populate the public read cache before MySQL writes. Database lock or storage
     // pressure must not prevent fresh provider events from reaching public APIs.
@@ -251,6 +265,8 @@ async function syncEvents() {
       cached,
       restoredMarketEligibility,
       terminalMarketEvents: terminalEventIds.size,
+      terminalDryRun: lifecycle.dryRun(),
+      confirmedVendorTerminalEvents: confirmedVendorTerminalIds.size,
       retired,
       failedSports: responseResults.filter((item) => item.status === "rejected").length,
     };

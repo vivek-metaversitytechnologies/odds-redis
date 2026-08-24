@@ -4,6 +4,7 @@ const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const { csvIntegers, integer } = require("../config/env");
+const lifecycle = require("../services/eventLifecyclePolicy");
 
 let running = false;
 const state = {
@@ -77,15 +78,22 @@ async function reconcileRedisEvents() {
     const active = await activeEventIds();
     const scanned = await redisEventIds();
     const stale = [...scanned.ids].filter((eventId) => !active.has(eventId));
-    const results = await Promise.allSettled(stale.map((eventId) => redisStore.removeEvent(eventId)));
-    const removedEventIds = stale.filter((_, index) => results[index].status === "fulfilled");
-    const failed = results.length - removedEventIds.length;
+    const cleanupDryRun = lifecycle.dryRun();
+    const results = cleanupDryRun
+      ? []
+      : await Promise.allSettled(stale.map((eventId) => redisStore.removeEvent(eventId)));
+    const removedEventIds = cleanupDryRun
+      ? []
+      : stale.filter((_, index) => results[index].status === "fulfilled");
+    const failed = cleanupDryRun ? 0 : results.length - removedEventIds.length;
     const result = {
       skipped: false,
       activeEvents: active.size,
       redisEvents: scanned.ids.size,
       keysScanned: scanned.keysScanned,
       staleEvents: stale.length,
+      dryRun: cleanupDryRun,
+      candidates: cleanupDryRun ? stale : [],
       removed: removedEventIds.length,
       failed,
       removedEventIds,

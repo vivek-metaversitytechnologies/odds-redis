@@ -8,6 +8,7 @@ const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const { eventWindowSql } = require("../utils/eventWindow");
 const { retryDeadlock } = require("../utils/dbRetry");
+const lifecycle = require("../services/eventLifecyclePolicy");
 
 let running = false;
 let exceptionalTableAvailable;
@@ -117,10 +118,22 @@ async function handleSocketGameOver(marketIds) {
          WHERE fancyid IN (${placeholders})`,
         ids,
       );
-      const terminalEventIds = [...new Set([...markets, ...fancies]
+      const candidateTerminalEventIds = [...new Set([...markets, ...fancies]
         .filter((market) => isEventTerminalMarketName(market.marketname))
         .map((market) => Number(market.eventid))
         .filter(Number.isInteger))].sort((left, right) => left - right);
+      const terminalEventIds = candidateTerminalEventIds.filter((eventId) =>
+        lifecycle.observe({
+          eventId,
+          source: "socket-primary-game-over",
+          terminal: true,
+          evidence: {
+            marketIds: [...markets, ...fancies]
+              .filter((market) => Number(market.eventid) === eventId)
+              .map((market) => String(market.marketid)),
+          },
+        }).execute,
+      );
       await connection.query(
         `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
          WHERE marketid IN (${placeholders})`,

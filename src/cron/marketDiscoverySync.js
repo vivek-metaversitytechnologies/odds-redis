@@ -11,6 +11,7 @@ const { eventInWindow, eventWindowSql } = require("../utils/eventWindow");
 const { setBounded } = require("../utils/boundedMap");
 const { retryDeadlock } = require("../utils/dbRetry");
 const { handleSocketGameOver } = require("./resultSync");
+const lifecycle = require("../services/eventLifecyclePolicy");
 const {
   FANCY_MARKET_TYPES,
   REGULAR_MARKET_TYPES,
@@ -280,7 +281,7 @@ function storedInFancyTable(market) {
   return FANCY_MARKET_TYPES.has(market?.marketType) || market?.marketType === "line-market";
 }
 
-function terminalPrimaryMarketIds(markets) {
+function primaryMarketLifecycle(markets) {
   const byEvent = new Map();
   for (const market of markets || []) {
     const name = String(market?.marketName || "").trim().toLowerCase();
@@ -291,12 +292,21 @@ function terminalPrimaryMarketIds(markets) {
     if (!byEvent.has(market.eventId)) byEvent.set(market.eventId, []);
     byEvent.get(market.eventId).push(market);
   }
-  return [...byEvent.values()].flatMap((primaryMarkets) => {
+  return [...byEvent.entries()].map(([eventId, primaryMarkets]) => {
     const hasActivePrimary = primaryMarkets.some((market) => market.isActive && !market.gameOver);
-    if (hasActivePrimary) return [];
     const terminal = primaryMarkets.find((market) => market.gameOver);
-    return terminal ? [terminal.marketId] : [];
+    return {
+      eventId: Number(eventId),
+      active: hasActivePrimary,
+      terminalMarketId: hasActivePrimary ? null : terminal?.marketId || null,
+    };
   });
+}
+
+function terminalPrimaryMarketIds(markets) {
+  return primaryMarketLifecycle(markets)
+    .map((state) => state.terminalMarketId)
+    .filter(Boolean);
 }
 
 async function upsertFancies(fancies) {
@@ -794,7 +804,27 @@ async function syncMarketDiscovery(events, lane = "active") {
     // An authoritative snapshot with no active primary market and a completed
     // Match Odds/Bookmaker record is event-terminal. Historical completed
     // primaries cannot close an event while another primary remains active.
-    const terminalCleanup = await handleSocketGameOver(terminalPrimaryMarketIds(primaryRows));
+    const terminalMarketIds = [];
+    for (const primaryState of primaryMarketLifecycle(primaryRows)) {
+      if (primaryState.active) {
+        lifecycle.observe({
+          eventId: primaryState.eventId,
+          source: "market-discovery",
+          terminal: false,
+        });
+        lifecycle.clearConfirmed(primaryState.eventId, "active-primary-market");
+        continue;
+      }
+      if (!primaryState.terminalMarketId) continue;
+      const decision = lifecycle.observe({
+        eventId: primaryState.eventId,
+        source: "market-discovery",
+        terminal: true,
+        evidence: { marketId: primaryState.terminalMarketId },
+      });
+      if (decision.execute) terminalMarketIds.push(primaryState.terminalMarketId);
+    }
+    const terminalCleanup = await handleSocketGameOver(terminalMarketIds);
     redisStore.invalidateMarkets([
       ...primaryPersisted.marketIds,
       ...primaryPersisted.deactivatedMarketIds,
@@ -1108,6 +1138,7 @@ module.exports = {
   oddsType,
   storedInFancyTable,
   terminalPrimaryMarketIds,
+  primaryMarketLifecycle,
   upsertMarkets,
   upsertFancies,
   fetchAndStoreRunners,

@@ -20,6 +20,7 @@ const { getResultSyncStatus } = require("./cron/resultSync");
 const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
 const { providerLimiter, getProviderRateLimitStatus } = require("./services/providerApi");
 const { getHealthStatus } = require("./services/healthSupervisor");
+const eventLifecycle = require("./services/eventLifecyclePolicy");
 
 function createApp() {
   const app = express();
@@ -94,6 +95,7 @@ function createApp() {
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
+          eventLifecycle: eventLifecycle.getStatus(),
           providerQueue: { ...providerLimiter.counts(), rateLimit: getProviderRateLimitStatus() },
         },
       });
@@ -112,6 +114,7 @@ function createApp() {
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
+          eventLifecycle: eventLifecycle.getStatus(),
           providerQueue: { ...providerLimiter.counts(), rateLimit: getProviderRateLimitStatus() },
         },
         message: error.message,

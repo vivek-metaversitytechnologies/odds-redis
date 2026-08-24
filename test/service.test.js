@@ -77,7 +77,9 @@ const {
   oddsType,
   storedInFancyTable,
   terminalPrimaryMarketIds,
+  primaryMarketLifecycle,
 } = require("../src/cron/marketDiscoverySync");
+const lifecycle = require("../src/services/eventLifecyclePolicy");
 const {
   responseRows: resultRows,
   fancyResultValue,
@@ -1681,6 +1683,65 @@ test("authoritative discovery closes an event only when no primary market remain
     ]),
     ["1.10"],
   );
+});
+
+test("event lifecycle requires consecutive terminal evidence and supports dry-run", () => {
+  const previousConfirmations = process.env.EVENT_TERMINAL_CONFIRMATIONS;
+  const previousDryRun = process.env.EVENT_TERMINAL_DRY_RUN;
+  process.env.EVENT_TERMINAL_CONFIRMATIONS = "2";
+  process.env.EVENT_TERMINAL_DRY_RUN = "false";
+  lifecycle.resetForTests();
+  assert.equal(lifecycle.observe({ eventId: 99, source: "test", terminal: true }).execute, false);
+  assert.equal(lifecycle.observe({ eventId: 99, source: "test", terminal: true }).execute, true);
+  assert.equal(lifecycle.isConfirmed(99), true);
+  lifecycle.observe({ eventId: 99, source: "test", terminal: false });
+  lifecycle.clearConfirmed(99);
+  assert.equal(lifecycle.isConfirmed(99), false);
+  process.env.EVENT_TERMINAL_DRY_RUN = "true";
+  lifecycle.resetForTests();
+  lifecycle.observe({ eventId: 100, source: "test", terminal: true });
+  const dryRunDecision = lifecycle.observe({ eventId: 100, source: "test", terminal: true });
+  assert.equal(dryRunDecision.confirmed, true);
+  assert.equal(dryRunDecision.execute, false);
+  if (previousConfirmations === undefined) delete process.env.EVENT_TERMINAL_CONFIRMATIONS;
+  else process.env.EVENT_TERMINAL_CONFIRMATIONS = previousConfirmations;
+  if (previousDryRun === undefined) delete process.env.EVENT_TERMINAL_DRY_RUN;
+  else process.env.EVENT_TERMINAL_DRY_RUN = previousDryRun;
+  lifecycle.resetForTests();
+});
+
+test("active primary markets override historical terminal and TOSS records", () => {
+  assert.deepEqual(
+    primaryMarketLifecycle([
+      { eventId: 20, marketId: "1.20", marketName: "Match Odds", marketType: "match-odd", isActive: true, gameOver: false },
+      { eventId: 20, marketId: "4.20-BM", marketName: "Bookmaker", marketType: "bookmaker", isActive: false, gameOver: true },
+      { eventId: 20, marketId: "4.21-BM", marketName: "TOSS", marketType: "bookmaker", isActive: false, gameOver: true },
+    ]),
+    [{ eventId: 20, active: true, terminalMarketId: null }],
+  );
+});
+
+test("a corrected active discovery pass cancels a pending terminal decision", () => {
+  const previousConfirmations = process.env.EVENT_TERMINAL_CONFIRMATIONS;
+  const previousDryRun = process.env.EVENT_TERMINAL_DRY_RUN;
+  process.env.EVENT_TERMINAL_CONFIRMATIONS = "2";
+  process.env.EVENT_TERMINAL_DRY_RUN = "false";
+  lifecycle.resetForTests();
+  const terminal = primaryMarketLifecycle([
+    { eventId: 30, marketId: "1.30", marketName: "Match Odds", marketType: "match-odd", isActive: false, gameOver: true },
+  ])[0];
+  assert.equal(lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: Boolean(terminal.terminalMarketId) }).execute, false);
+  const corrected = primaryMarketLifecycle([
+    { eventId: 30, marketId: "1.30", marketName: "Match Odds", marketType: "match-odd", isActive: true, gameOver: false },
+  ])[0];
+  lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: !corrected.active });
+  assert.equal(lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: true }).execute, false);
+  assert.equal(lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: true }).execute, true);
+  if (previousConfirmations === undefined) delete process.env.EVENT_TERMINAL_CONFIRMATIONS;
+  else process.env.EVENT_TERMINAL_CONFIRMATIONS = previousConfirmations;
+  if (previousDryRun === undefined) delete process.env.EVENT_TERMINAL_DRY_RUN;
+  else process.env.EVENT_TERMINAL_DRY_RUN = previousDryRun;
+  lifecycle.resetForTests();
 });
 
 test("socket game-over cleans up immediately while corrected vendor state can restore an event", () => {
