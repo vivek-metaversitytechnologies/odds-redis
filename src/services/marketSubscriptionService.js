@@ -121,6 +121,14 @@ async function unsubscribeResultMarkets(ids) {
   return flushResultUnsubscriptions();
 }
 
+function restoreMarketEligibility(ids) {
+  for (const id of ids || []) {
+    const marketId = String(id);
+    completedMarketIds.delete(marketId);
+    pendingResultUnsubscriptions.delete(marketId);
+  }
+}
+
 async function unsubscribeEventMarkets(ids) {
   const marketIds = [
     ...new Set(
@@ -307,6 +315,7 @@ module.exports = {
   startSkippedRetries,
   stopSkippedRetries,
   unsubscribeResultMarkets,
+  restoreMarketEligibility,
   unsubscribeEventMarkets,
   reconcileProviderSubscriptions,
   refreshMarkets,

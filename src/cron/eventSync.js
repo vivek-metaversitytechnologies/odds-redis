@@ -91,10 +91,8 @@ async function upsertEvents(events) {
          fancypause,betlock,is_redis_updated,in_play,fancylock,bookmaker,fancy,channel_id)
        VALUES ?
        ON DUPLICATE KEY UPDATE eventname=VALUES(eventname),seriesid=VALUES(seriesid),
-         sportid=VALUES(sportid),open_date=VALUES(open_date),
-         in_play=IF(status=0,0,VALUES(in_play)),
-         isactive=IF(status=0,0,VALUES(isactive)),
-         status=IF(status=0,0,VALUES(status)),updatedon=NOW()`,
+         sportid=VALUES(sportid),open_date=VALUES(open_date),in_play=VALUES(in_play),
+         isactive=VALUES(isactive),status=VALUES(status),updatedon=NOW()`,
       [values],
     );
     return {
@@ -106,15 +104,21 @@ async function upsertEvents(events) {
   }
 }
 
-async function excludeTerminalEvents(events) {
-  if (!events.length) return [];
-  const ids = [...new Set(events.map((event) => Number(event.eventId)).filter(Number.isInteger))];
-  const [rows] = await getSourcePool().query(
-    `SELECT eventid FROM t_event WHERE status=? AND eventid IN (${ids.map(() => "?").join(",")})`,
-    [false, ...ids],
+async function restoreActiveEventMarkets(events) {
+  const eventIds = [...new Set((events || [])
+    .filter((event) => !event.gameOver)
+    .map((event) => Number(event.eventId))
+    .filter(Number.isInteger))];
+  if (!eventIds.length) return 0;
+  const placeholders = eventIds.map(() => "?").join(",");
+  const [markets] = await getSourcePool().query(
+    `SELECT marketid FROM t_market WHERE eventid IN (${placeholders})
+     UNION SELECT fancyid AS marketid FROM t_matchfancy WHERE eventid IN (${placeholders})`,
+    [...eventIds, ...eventIds],
   );
-  const terminalIds = new Set(rows.map((row) => Number(row.eventid)));
-  return events.filter((event) => !terminalIds.has(Number(event.eventId)));
+  const marketIds = markets.map((market) => String(market.marketid));
+  subscriptions.restoreMarketEligibility(marketIds);
+  return marketIds.length;
 }
 
 async function retireCompletedEvents(events) {
@@ -206,11 +210,12 @@ async function syncEvents() {
     const events = eventRows(responses);
     // Populate the public read cache before MySQL writes. Database lock or storage
     // pressure must not prevent fresh provider events from reaching public APIs.
-    // A terminal primary-market socket tick is authoritative for this process;
-    // do not let a lagging vendor event feed add that event back to Redis.
-    const cacheableEvents = await excludeTerminalEvents(events.filter((event) => !event.gameOver));
+    // Current vendor lifecycle state is authoritative. Completed rows never enter
+    // the public cache, while a corrected active row can reopen a previously closed event.
+    const cacheableEvents = events.filter((event) => !event.gameOver);
     const cached = await redis.writeEvents(cacheableEvents, successfulSportIds);
     const persisted = await upsertEvents(events);
+    const restoredMarketEligibility = await restoreActiveEventMarkets(events);
     const retired = await retireCompletedEvents(events);
     const result = {
       skipped: false,
@@ -219,6 +224,7 @@ async function syncEvents() {
       sportIds,
       ...persisted,
       cached,
+      restoredMarketEligibility,
       retired,
       failedSports: responseResults.filter((item) => item.status === "rejected").length,
     };
@@ -251,7 +257,7 @@ function getEventSyncStatus() {
 module.exports = {
   eventRows,
   eventInsertValues,
-  excludeTerminalEvents,
+  restoreActiveEventMarkets,
   upsertEvents,
   retireCompletedEvents,
   syncEvents,

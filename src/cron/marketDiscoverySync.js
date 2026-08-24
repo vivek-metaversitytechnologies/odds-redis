@@ -57,11 +57,12 @@ async function settleWithConcurrency(items, mapper, concurrency = DISCOVERY_CONC
   return results;
 }
 
-function discoveryEventBatchSize(lane) {
+function discoveryEventBatchSize(lane, sportId) {
   // The provider caps large market responses. A single cricket event can contain
-  // more than a thousand current and historical markets, so batching active
-  // events can silently truncate the snapshot and leave valid markets hidden.
-  if (lane === "active") return 1;
+  // more than a thousand current and historical markets, so batching cricket
+  // events can silently truncate both future and active snapshots and leave
+  // valid markets hidden until the event enters the active discovery window.
+  if (lane === "active" || Number(sportId) === cricketSportId()) return 1;
   return integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
 }
 
@@ -86,7 +87,6 @@ function prioritizedDiscoveryEvents(events, lane = "active", now = Date.now()) {
 }
 
 function discoveryEventBatches(events, lane) {
-  const batchSize = discoveryEventBatchSize(lane);
   const bySport = new Map();
   for (const event of events || []) {
     const sportId = Number(event.sportId);
@@ -94,7 +94,7 @@ function discoveryEventBatches(events, lane) {
     bySport.get(sportId).push(Number(event.eventId));
   }
   return [...bySport.entries()].flatMap(([sportId, eventIds]) =>
-    chunks(eventIds, batchSize).map((eids) => ({ eids, sportId })),
+    chunks(eventIds, discoveryEventBatchSize(lane, sportId)).map((eids) => ({ eids, sportId })),
   );
 }
 
@@ -318,9 +318,7 @@ async function upsertFancies(fancies) {
            issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
            sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
          ON DUPLICATE KEY UPDATE name=VALUES(name),oddstype=VALUES(oddstype),eventid=VALUES(eventid),
-           status=IF(status='CLOSED','CLOSED',VALUES(status)),
-           isactive=IF(status='CLOSED',0,VALUES(isactive)),
-           isshow=IF(status='CLOSED',0,VALUES(isshow)),is_show=IF(status='CLOSED',0,VALUES(is_show)),
+           status=VALUES(status),isactive=VALUES(isactive),isshow=VALUES(isshow),is_show=VALUES(is_show),
            matchname=VALUES(matchname),sportid=VALUES(sportid),mtype=VALUES(mtype),
            betdelay=VALUES(betdelay),minbet=VALUES(minbet),maxbet=VALUES(maxbet),
            maxliabilityper_market=VALUES(maxliabilityper_market),
@@ -412,7 +410,7 @@ async function upsertMarkets(markets) {
          ON DUPLICATE KEY UPDATE marketname=VALUES(marketname),matchname=VALUES(matchname),
            opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
            seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
-           isactive=IF(status=0,0,VALUES(isactive)),betdelay=VALUES(betdelay),
+           isactive=VALUES(isactive),betdelay=VALUES(betdelay),
            display_message=VALUES(display_message),updatedon=NOW()`,
         [values],
       );

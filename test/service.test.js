@@ -314,16 +314,37 @@ test("environment helpers reject invalid values and normalize lists", () => {
   }
 });
 
-test("active market discovery isolates events while future discovery remains batched", () => {
+test("market discovery isolates cricket events in both active and future lanes", () => {
   const previousFuture = process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
   delete process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
-  assert.equal(discoveryEventBatchSize("active"), 1);
-  assert.equal(discoveryEventBatchSize("future"), 10);
+  assert.equal(discoveryEventBatchSize("active", 4), 1);
+  assert.equal(discoveryEventBatchSize("future", 4), 1);
+  assert.equal(discoveryEventBatchSize("future", 1), 10);
   process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE = "20";
-  assert.equal(discoveryEventBatchSize("active"), 1);
-  assert.equal(discoveryEventBatchSize("future"), 20);
+  assert.equal(discoveryEventBatchSize("active", 1), 1);
+  assert.equal(discoveryEventBatchSize("future", 4), 1);
+  assert.equal(discoveryEventBatchSize("future", 1), 20);
   if (previousFuture === undefined) delete process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE;
   else process.env.MARKET_DISCOVERY_EVENT_BATCH_SIZE = previousFuture;
+});
+
+test("future discovery creates one request batch per cricket event", () => {
+  const batches = discoveryEventBatches(
+    [
+      { eventId: 41, sportId: 4 },
+      { eventId: 42, sportId: 4 },
+      { eventId: 11, sportId: 1 },
+      { eventId: 12, sportId: 1 },
+    ],
+    "future",
+  );
+  assert.deepEqual(batches.filter(({ sportId }) => sportId === 4), [
+    { eids: [41], sportId: 4 },
+    { eids: [42], sportId: 4 },
+  ]);
+  assert.deepEqual(batches.filter(({ sportId }) => sportId === 1), [
+    { eids: [11, 12], sportId: 1 },
+  ]);
 });
 
 test("market discovery prioritizes cricket and limits non-cricket typed fan-out", () => {
@@ -1641,9 +1662,10 @@ test("Match Odds and Bookmaker game-over ticks are event-terminal signals", () =
   assert.equal(isEventTerminalMarketName("15 Over Run LF"), false);
 });
 
-test("socket game-over performs durable cleanup without dropping result candidates", () => {
+test("socket game-over cleans up immediately while corrected vendor state can restore an event", () => {
   const resultSource = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  const eventSource = fs.readFileSync(path.join(__dirname, "../src/cron/eventSync.js"), "utf8");
   const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
   assert.match(serverSource, /setResultHandler\(handleSocketGameOver\)/);
   assert.match(resultSource, /UPDATE t_market SET isactive=\?,status=\?,issubscribed=\?/);
@@ -1655,8 +1677,10 @@ test("socket game-over performs durable cleanup without dropping result candidat
   assert.match(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /UPPER\(f\.status\) IN \('SUSPENDED','CLOSED'\)/);
-  assert.match(discoverySource, /isactive=IF\(status=0,0,VALUES\(isactive\)\)/);
-  assert.match(discoverySource, /status=IF\(status='CLOSED','CLOSED',VALUES\(status\)\)/);
+  assert.match(discoverySource, /isactive=VALUES\(isactive\)/);
+  assert.match(discoverySource, /status=VALUES\(status\)/);
+  assert.match(eventSource, /isactive=VALUES\(isactive\),status=VALUES\(status\)/);
+  assert.match(eventSource, /restoreMarketEligibility/);
 });
 
 test("socket classifier separates score envelopes from nested odds ticks", () => {
