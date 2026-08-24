@@ -73,6 +73,7 @@ const {
   discoveryEventBatches,
   typedDiscoveryRequests,
   discoveryPriority,
+  nextDiscoveryLane,
   oddsType,
   storedInFancyTable,
 } = require("../src/cron/marketDiscoverySync");
@@ -345,6 +346,12 @@ test("future discovery creates one request batch per cricket event", () => {
   assert.deepEqual(batches.filter(({ sportId }) => sportId === 1), [
     { eids: [11, 12], sportId: 1 },
   ]);
+});
+
+test("queued future discovery takes priority after a scheduler collision", () => {
+  assert.equal(nextDiscoveryLane(new Set(["active", "future"])), "future");
+  assert.equal(nextDiscoveryLane(new Set(["active"])), "active");
+  assert.equal(nextDiscoveryLane(new Set()), null);
 });
 
 test("market discovery prioritizes cricket and limits non-cricket typed fan-out", () => {

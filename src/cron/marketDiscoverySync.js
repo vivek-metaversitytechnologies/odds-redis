@@ -18,8 +18,8 @@ const {
   DISCOVERABLE_MARKET_TYPES,
 } = require("../config/marketTypes");
 let running = false;
-let rerunRequested = false;
 let liveCleanupRunning = false;
+const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
 const tossSeeded = new Map();
 const missingLineMarketPasses = new Map();
@@ -106,6 +106,24 @@ function typedDiscoveryRequests(sportId) {
 function discoveryPriority(sportId, lane = "active") {
   if (Number(sportId) === cricketSportId()) return 3;
   return lane === "active" ? 6 : 8;
+}
+
+function nextDiscoveryLane(lanes) {
+  if (lanes.has("future")) return "future";
+  if (lanes.has("active")) return "active";
+  return null;
+}
+
+function queueDiscoveryLane(lane) {
+  queuedDiscoveryLanes.add(lane === "future" ? "future" : "active");
+}
+
+function drainQueuedDiscovery() {
+  if (running || liveCleanupRunning) return;
+  const lane = nextDiscoveryLane(queuedDiscoveryLanes);
+  if (!lane) return;
+  queuedDiscoveryLanes.delete(lane);
+  setImmediate(() => void requestStoredEventMarkets(lane).catch(() => {}));
 }
 
 function chunks(items, size = DB_WRITE_BATCH_SIZE) {
@@ -708,10 +726,14 @@ async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {
 }
 
 async function syncMarketDiscovery(events, lane = "active") {
-  if (liveCleanupRunning) return { skipped: true, reason: "live-cleanup-running" };
-  if (running) {
-    rerunRequested = true;
-    return { skipped: true, reason: "already-running", rerunQueued: true };
+  if (liveCleanupRunning || running) {
+    queueDiscoveryLane(lane);
+    return {
+      skipped: true,
+      reason: liveCleanupRunning ? "live-cleanup-running" : "already-running",
+      rerunQueued: true,
+      queuedLane: lane,
+    };
   }
   running = true;
   state.running = true;
@@ -721,8 +743,8 @@ async function syncMarketDiscovery(events, lane = "active") {
     const selectedEvents = prioritizedDiscoveryEvents(events, lane);
     const eventsById = new Map(selectedEvents.map((event) => [String(event.eventId), event]));
     const eventIds = [...eventsById.keys()].map(Number);
-    // Active events use isolated snapshots to avoid the provider's response cap.
-    // Future events retain configurable batching because they run less frequently.
+    // Cricket events use isolated snapshots in both lanes to avoid the provider's
+    // response cap. Other future sports retain configurable batching.
     const discovered = [];
     const eventBatches = discoveryEventBatches(selectedEvents, lane);
 
@@ -880,10 +902,7 @@ async function syncMarketDiscovery(events, lane = "active") {
   } finally {
     running = false;
     state.running = false;
-    if (rerunRequested) {
-      rerunRequested = false;
-      setImmediate(() => void syncStoredEventMarkets().catch(() => {}));
-    }
+    drainQueuedDiscovery();
   }
 }
 
@@ -1002,6 +1021,7 @@ async function syncLiveMarketCleanup() {
     };
   } finally {
     liveCleanupRunning = false;
+    drainQueuedDiscovery();
   }
 }
 
@@ -1010,13 +1030,21 @@ async function syncStoredEventMarkets(lane = "active") {
   return syncMarketDiscovery(events, lane);
 }
 
+async function requestStoredEventMarkets(lane = "active") {
+  if (running || liveCleanupRunning) {
+    queueDiscoveryLane(lane);
+    return { skipped: true, reason: "discovery-busy", rerunQueued: true, queuedLane: lane };
+  }
+  return syncStoredEventMarkets(lane);
+}
+
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
   const discoveryTask = cron.schedule(expression, () => {
-    if (!running && !liveCleanupRunning) void syncStoredEventMarkets("active").catch(() => {});
+    void requestStoredEventMarkets("active").catch(() => {});
   });
   const futureTask = cron.schedule(cronConfig.futureMarketDiscovery.expression, () => {
-    if (!running && !liveCleanupRunning) void syncStoredEventMarkets("future").catch(() => {});
+    void requestStoredEventMarkets("future").catch(() => {});
   });
   const cleanupTask = cron.schedule(cronConfig.liveMarketCleanup.expression, () => {
     void syncLiveMarketCleanup().catch((error) =>
@@ -1028,7 +1056,7 @@ function startMarketDiscoverySync() {
   logger.info("[MarketDiscovery] future lane scheduled", {
     expression: cronConfig.futureMarketDiscovery.expression,
   });
-  setImmediate(() => void syncStoredEventMarkets("active").catch(() => {}));
+  setImmediate(() => void requestStoredEventMarkets("active").catch(() => {}));
   return {
     stop: () => {
       discoveryTask.stop();
@@ -1070,6 +1098,7 @@ module.exports = {
   discoveryEventBatches,
   typedDiscoveryRequests,
   discoveryPriority,
+  nextDiscoveryLane,
   reconcileMissingLineMarkets,
   fetchActiveEventsForMarketDiscovery,
   fetchLiveEventsForMarketCleanup,
