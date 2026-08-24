@@ -121,6 +121,23 @@ async function restoreActiveEventMarkets(events) {
   return marketIds.length;
 }
 
+async function terminalPrimaryEventIds(events) {
+  const eventIds = [...new Set((events || []).map((event) => Number(event.eventId)).filter(Number.isInteger))];
+  if (!eventIds.length) return new Set();
+  const placeholders = eventIds.map(() => "?").join(",");
+  const [rows] = await getSourcePool().query(
+    `SELECT eventid
+       FROM t_market
+      WHERE eventid IN (${placeholders})
+        AND (LOWER(marketname)='match odds' OR LOWER(marketname) LIKE '%bookmaker%')
+      GROUP BY eventid
+     HAVING SUM(CASE WHEN isactive=? AND status=? THEN 1 ELSE 0 END)=0
+        AND SUM(CASE WHEN isactive=? AND status=? THEN 1 ELSE 0 END)>0`,
+    [...eventIds, true, true, false, false],
+  );
+  return new Set(rows.map((row) => Number(row.eventid)).filter(Number.isInteger));
+}
+
 async function retireCompletedEvents(events) {
   const completed = events.filter((event) => event.gameOver);
   if (!completed.length) return { events: 0, markets: 0 };
@@ -208,15 +225,23 @@ async function syncEvents() {
       0,
     );
     const events = eventRows(responses);
+    // Market lifecycle is more specific than the event feed. Some completed
+    // matches remain inPlay=true at event level after their only primary market
+    // has emitted gameOver. Preserve that terminal state until discovery sees a
+    // replacement active Match Odds or Bookmaker market.
+    const terminalEventIds = await terminalPrimaryEventIds(events);
+    const effectiveEvents = events.map((event) =>
+      terminalEventIds.has(event.eventId) ? { ...event, gameOver: true, inPlay: false } : event,
+    );
     // Populate the public read cache before MySQL writes. Database lock or storage
     // pressure must not prevent fresh provider events from reaching public APIs.
     // Current vendor lifecycle state is authoritative. Completed rows never enter
     // the public cache, while a corrected active row can reopen a previously closed event.
-    const cacheableEvents = events.filter((event) => !event.gameOver);
+    const cacheableEvents = effectiveEvents.filter((event) => !event.gameOver);
     const cached = await redis.writeEvents(cacheableEvents, successfulSportIds);
-    const persisted = await upsertEvents(events);
-    const restoredMarketEligibility = await restoreActiveEventMarkets(events);
-    const retired = await retireCompletedEvents(events);
+    const persisted = await upsertEvents(effectiveEvents);
+    const restoredMarketEligibility = await restoreActiveEventMarkets(effectiveEvents);
+    const retired = await retireCompletedEvents(effectiveEvents);
     const result = {
       skipped: false,
       received,
@@ -225,6 +250,7 @@ async function syncEvents() {
       ...persisted,
       cached,
       restoredMarketEligibility,
+      terminalMarketEvents: terminalEventIds.size,
       retired,
       failedSports: responseResults.filter((item) => item.status === "rejected").length,
     };
@@ -257,6 +283,7 @@ function getEventSyncStatus() {
 module.exports = {
   eventRows,
   eventInsertValues,
+  terminalPrimaryEventIds,
   restoreActiveEventMarkets,
   upsertEvents,
   retireCompletedEvents,

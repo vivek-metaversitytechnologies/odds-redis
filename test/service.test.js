@@ -76,6 +76,7 @@ const {
   nextDiscoveryLane,
   oddsType,
   storedInFancyTable,
+  terminalPrimaryMarketIds,
 } = require("../src/cron/marketDiscoverySync");
 const {
   responseRows: resultRows,
@@ -1669,6 +1670,18 @@ test("Match Odds and Bookmaker game-over ticks are event-terminal signals", () =
   assert.equal(isEventTerminalMarketName("15 Over Run LF"), false);
 });
 
+test("authoritative discovery closes an event only when no primary market remains active", () => {
+  assert.deepEqual(
+    terminalPrimaryMarketIds([
+      { eventId: 10, marketId: "1.10", marketType: "match-odd", isActive: false, gameOver: true },
+      { eventId: 11, marketId: "4.11-BM", marketType: "bookmaker", isActive: false, gameOver: true },
+      { eventId: 11, marketId: "1.11", marketType: "match-odd", isActive: true, gameOver: false },
+      { eventId: 12, marketId: "4.12-F2", marketType: "session", isActive: false, gameOver: true },
+    ]),
+    ["1.10"],
+  );
+});
+
 test("socket game-over cleans up immediately while corrected vendor state can restore an event", () => {
   const resultSource = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
@@ -1688,6 +1701,7 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(discoverySource, /status=VALUES\(status\)/);
   assert.match(eventSource, /isactive=VALUES\(isactive\),status=VALUES\(status\)/);
   assert.match(eventSource, /restoreMarketEligibility/);
+  assert.match(eventSource, /terminalPrimaryEventIds/);
 });
 
 test("socket classifier separates score envelopes from nested odds ticks", () => {

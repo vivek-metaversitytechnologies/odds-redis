@@ -10,6 +10,7 @@ const { integer, csvIntegers } = require("../config/env");
 const { eventInWindow, eventWindowSql } = require("../utils/eventWindow");
 const { setBounded } = require("../utils/boundedMap");
 const { retryDeadlock } = require("../utils/dbRetry");
+const { handleSocketGameOver } = require("./resultSync");
 const {
   FANCY_MARKET_TYPES,
   REGULAR_MARKET_TYPES,
@@ -277,6 +278,21 @@ function oddsType(marketId) {
 
 function storedInFancyTable(market) {
   return FANCY_MARKET_TYPES.has(market?.marketType) || market?.marketType === "line-market";
+}
+
+function terminalPrimaryMarketIds(markets) {
+  const byEvent = new Map();
+  for (const market of markets || []) {
+    if (!["match-odd", "bookmaker"].includes(market?.marketType)) continue;
+    if (!byEvent.has(market.eventId)) byEvent.set(market.eventId, []);
+    byEvent.get(market.eventId).push(market);
+  }
+  return [...byEvent.values()].flatMap((primaryMarkets) => {
+    const hasActivePrimary = primaryMarkets.some((market) => market.isActive && !market.gameOver);
+    if (hasActivePrimary) return [];
+    const terminal = primaryMarkets.find((market) => market.gameOver);
+    return terminal ? [terminal.marketId] : [];
+  });
 }
 
 async function upsertFancies(fancies) {
@@ -771,6 +787,10 @@ async function syncMarketDiscovery(events, lane = "active") {
     // serialize them to avoid cross-transaction lock waits during busy discovery runs.
     const primaryPersisted = await upsertMarkets(primaryStoredRegular);
     const primaryFancyPersisted = await upsertFancies(primaryStoredFancies);
+    // An authoritative snapshot with no active primary market and a completed
+    // Match Odds/Bookmaker record is event-terminal. Historical completed
+    // primaries cannot close an event while another primary remains active.
+    const terminalCleanup = await handleSocketGameOver(terminalPrimaryMarketIds(primaryRows));
     redisStore.invalidateMarkets([
       ...primaryPersisted.marketIds,
       ...primaryPersisted.deactivatedMarketIds,
@@ -889,6 +909,7 @@ async function syncMarketDiscovery(events, lane = "active") {
       tossDefinitions,
       runners: runnerResult,
       subscription: { delegatedToMarketSync: true },
+      terminalCleanup,
     };
     state.lastResult = result;
     state.lastCompletedAt = new Date().toISOString();
@@ -1082,6 +1103,7 @@ module.exports = {
   mergeDiscoveredMarkets,
   oddsType,
   storedInFancyTable,
+  terminalPrimaryMarketIds,
   upsertMarkets,
   upsertFancies,
   fetchAndStoreRunners,
