@@ -283,7 +283,11 @@ function storedInFancyTable(market) {
 function terminalPrimaryMarketIds(markets) {
   const byEvent = new Map();
   for (const market of markets || []) {
-    if (!["match-odd", "bookmaker"].includes(market?.marketType)) continue;
+    const name = String(market?.marketName || "").trim().toLowerCase();
+    const eventTerminalPrimary =
+      market?.marketType === "match-odd" ||
+      (market?.marketType === "bookmaker" && name.includes("bookmaker"));
+    if (!eventTerminalPrimary) continue;
     if (!byEvent.has(market.eventId)) byEvent.set(market.eventId, []);
     byEvent.get(market.eventId).push(market);
   }

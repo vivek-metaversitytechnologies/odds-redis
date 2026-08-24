@@ -1674,9 +1674,10 @@ test("authoritative discovery closes an event only when no primary market remain
   assert.deepEqual(
     terminalPrimaryMarketIds([
       { eventId: 10, marketId: "1.10", marketType: "match-odd", isActive: false, gameOver: true },
-      { eventId: 11, marketId: "4.11-BM", marketType: "bookmaker", isActive: false, gameOver: true },
+      { eventId: 11, marketId: "4.11-BM", marketName: "Bookmaker", marketType: "bookmaker", isActive: false, gameOver: true },
       { eventId: 11, marketId: "1.11", marketType: "match-odd", isActive: true, gameOver: false },
       { eventId: 12, marketId: "4.12-F2", marketType: "session", isActive: false, gameOver: true },
+      { eventId: 13, marketId: "4.13-BM", marketName: "TOSS", marketType: "bookmaker", isActive: false, gameOver: true },
     ]),
     ["1.10"],
   );
