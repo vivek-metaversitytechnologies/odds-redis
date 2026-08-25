@@ -75,7 +75,11 @@ function eventMetadataKey(sportId) {
   return `${process.env.REDIS_EVENT_METADATA_KEY_PREFIX || "Events-Rs:"}${sportId}`;
 }
 
-async function writeEvents(events, sportIds = []) {
+function discoveryEventMetadataKey(sportId) {
+  return `${process.env.REDIS_DISCOVERY_EVENT_METADATA_KEY_PREFIX || "Discovery-Events-Rs:"}${sportId}`;
+}
+
+async function writeEventMetadata(events, sportIds, keyForSport, lockNamespace) {
   const redis = await getRedisClient();
   if (!redis?.isOpen) return { sports: 0, events: 0 };
   const requestedSports = [...new Set((sportIds || []).map(Number).filter(Number.isInteger))];
@@ -96,8 +100,8 @@ async function writeEvents(events, sportIds = []) {
   if (!bySport.size) return { sports: 0, events: 0 };
   await Promise.all(
     [...bySport].map(([sportId, rows]) =>
-      withEventMetadataLock(sportId, () =>
-        redis.set(eventMetadataKey(sportId), JSON.stringify(rows), {
+      withEventMetadataLock(`${lockNamespace}:${sportId}`, () =>
+        redis.set(keyForSport(sportId), JSON.stringify(rows), {
           EX: EVENT_METADATA_TTL_SECONDS,
         }),
       ),
@@ -109,12 +113,20 @@ async function writeEvents(events, sportIds = []) {
   };
 }
 
-async function getEvents(sportId) {
+async function writeEvents(events, sportIds = []) {
+  return writeEventMetadata(events, sportIds, eventMetadataKey, "public");
+}
+
+async function writeDiscoveryEvents(events, sportIds = []) {
+  return writeEventMetadata(events, sportIds, discoveryEventMetadataKey, "discovery");
+}
+
+async function getEventMetadata(sportId, keyForSport) {
   const normalized = Number(sportId);
   if (!Number.isInteger(normalized) || normalized <= 0) return null;
   const redis = await getRedisReadClient();
   if (!redis?.isOpen) return null;
-  const value = await redis.get(eventMetadataKey(normalized));
+  const value = await redis.get(keyForSport(normalized));
   if (value == null) return null;
   try {
     const events = JSON.parse(value);
@@ -122,6 +134,14 @@ async function getEvents(sportId) {
   } catch {
     return null;
   }
+}
+
+async function getEvents(sportId) {
+  return getEventMetadata(sportId, eventMetadataKey);
+}
+
+async function getDiscoveryEvents(sportId) {
+  return getEventMetadata(sportId, discoveryEventMetadataKey);
 }
 
 async function removeEventsFromMetadata(events) {
@@ -1214,6 +1234,8 @@ module.exports = {
   getScore,
   writeEvents,
   getEvents,
+  writeDiscoveryEvents,
+  getDiscoveryEvents,
   removeEventsFromMetadata,
   removeMarket,
   removeMarkets,

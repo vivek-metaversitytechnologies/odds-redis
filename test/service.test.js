@@ -1766,6 +1766,8 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(eventSource, /restoreMarketEligibility/);
   assert.match(eventSource, /terminalPrimaryEventIds/);
   assert.match(eventSource, /lifecycle\.isConfirmed\(event\.eventId\)/);
+  assert.match(eventSource, /redis\.writeDiscoveryEvents/);
+  assert.match(discoverySource, /redisStore\.getDiscoveryEvents/);
   assert.match(eventSource, /const cacheableEvents = effectiveEvents\.filter\(\(event\) => !event\.gameOver\)/);
   assert.match(eventSource, /terminalDryRun[\s\S]*effectiveEvents\.filter\(\(event\) => !event\.gameOver\)/);
   assert.match(eventSource, /dryRunCandidates/);

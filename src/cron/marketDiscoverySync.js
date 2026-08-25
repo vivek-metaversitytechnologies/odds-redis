@@ -964,7 +964,9 @@ async function syncMarketDiscovery(events, lane = "active") {
 async function fetchActiveEventsForMarketDiscovery(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   if (!sportIds.length) return [];
-  const cachedBySport = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  const cachedBySport = await Promise.all(
+    sportIds.map((sportId) => redisStore.getDiscoveryEvents(sportId)),
+  );
   if (cachedBySport.every((events) => events !== null)) {
     return cachedBySport
       .flat()
@@ -994,7 +996,9 @@ async function fetchActiveEventsForMarketDiscovery(lane = "active") {
 async function fetchLiveEventsForMarketCleanup() {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   if (!sportIds.length) return [];
-  const cachedBySport = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  const cachedBySport = await Promise.all(
+    sportIds.map((sportId) => redisStore.getDiscoveryEvents(sportId)),
+  );
   if (cachedBySport.every((events) => events !== null)) {
     return cachedBySport
       .flat()

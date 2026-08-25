@@ -254,6 +254,10 @@ async function syncEvents() {
     // Current vendor lifecycle state is authoritative. Completed rows never enter
     // the public cache, while a corrected active row can reopen a previously closed event.
     const cacheableEvents = effectiveEvents.filter((event) => !event.gameOver);
+    const discoveryCached = await redis.writeDiscoveryEvents(
+      events.filter((event) => !event.gameOver),
+      successfulSportIds,
+    );
     const cached = await redis.writeEvents(cacheableEvents, successfulSportIds);
     // Dry-run suppresses confirmed terminal events from public metadata but does
     // not mutate their database lifecycle or delete Redis payloads.
@@ -272,6 +276,7 @@ async function syncEvents() {
       sportIds,
       ...persisted,
       cached,
+      discoveryCached,
       restoredMarketEligibility,
       terminalMarketEvents: terminalEventIds.size,
       terminalDryRun,
