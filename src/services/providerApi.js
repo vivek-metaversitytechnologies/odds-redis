@@ -84,7 +84,10 @@ function loggedPayload(value) {
   return { truncated: true, originalCharacters: serialized.length, preview: serialized.slice(0, maxLength) };
 }
 
-async function request(path, { method = "GET", query, body, retries = 2, priority = 5 } = {}) {
+async function request(
+  path,
+  { method = "GET", query, body, retries = 2, priority = 5, timeoutMs } = {},
+) {
   if (shuttingDown) throw new Error("Provider client is shutting down");
   const url = providerUrl(path, query);
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -105,7 +108,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
         activeControllers.add(controller);
         const timer = setTimeout(
           () => controller.abort(),
-          integer("PROVIDER_HTTP_TIMEOUT_MS", 60000, { min: 1000 }),
+          timeoutMs ?? integer("PROVIDER_HTTP_TIMEOUT_MS", 60000, { min: 1000 }),
         );
         try {
           return await fetch(url, {
@@ -183,7 +186,17 @@ function postIds(path, ids) {
   if (!Array.isArray(ids) || !ids.length) return null;
   // Subscription control is latency-sensitive and must not sit behind the much
   // larger discovery queue. Bottleneck priority 1 runs before default priority 5.
-  return request(path, { method: "POST", body: { data: ids }, priority: 1 });
+  // Batches within a sync run are processed sequentially (see marketSync.js), so a
+  // slow provider response here stalls every other market in that run — fail fast
+  // and let marketSubscriptionService's background retry queue pick it up instead
+  // of retrying with the generic 60s*3 budget.
+  return request(path, {
+    method: "POST",
+    body: { data: ids },
+    priority: 1,
+    retries: 1,
+    timeoutMs: integer("PROVIDER_SUBSCRIBE_TIMEOUT_MS", 15000, { min: 1000 }),
+  });
 }
 
 module.exports = {
