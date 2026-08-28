@@ -23,7 +23,7 @@ let running = false;
 let liveCleanupRunning = false;
 const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
-const tossSeeded = new Map();
+const initialPriceSeeded = new Map();
 const missingLineMarketPasses = new Map();
 const discoveryFingerprints = new Map();
 const lastFullDiscoveryAt = new Map();
@@ -624,18 +624,28 @@ async function regularMarketsWithRunners(markets) {
   });
 }
 
-async function seedTossMarkets(markets) {
-  const tossMarkets = (markets || []).filter(
+// Match Odds/Bookmaker only start ticking once the live socket subscription opens
+// (inside the active window), which can leave them hidden as WAITING placeholders
+// for hours on far-future cricket events. Seed an initial runners() snapshot as
+// soon as discovery finds them, the same way TOSS was always seeded early, so a
+// real price shows immediately instead of waiting for the subscription window.
+function isSeedableRegularMarket(market) {
+  const group = redisStore.payloadGroup({ mid: market.marketId }, { marketname: market.marketName });
+  return group === "Odds" || group === "Bookmaker";
+}
+
+async function seedInitialMarketPrices(markets) {
+  const seedableMarkets = (markets || []).filter(
     (market) =>
-      String(market.marketName || "")
-        .trim()
-        .toUpperCase() === "TOSS" &&
       market.isActive &&
       !market.gameOver &&
-      !tossSeeded.has(String(market.marketId)),
+      !initialPriceSeeded.has(String(market.marketId)) &&
+      // Already receiving live ticks (or a prior seed already landed) — no vendor call needed.
+      !redisStore.getTickActivity(String(market.marketId)) &&
+      isSeedableRegularMarket(market),
   );
   const results = await Promise.allSettled(
-    tossMarkets.map(async (market) => {
+    seedableMarkets.map(async (market) => {
       const response = await provider.runners(market.marketId);
       const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
       if (!rows.length) return false;
@@ -655,12 +665,12 @@ async function seedTossMarkets(markets) {
           sb: runner.sb,
         })),
       });
-      if (written) setBounded(tossSeeded, String(market.marketId), true, DISCOVERY_CACHE_LIMIT);
+      if (written) setBounded(initialPriceSeeded, String(market.marketId), true, DISCOVERY_CACHE_LIMIT);
       return written;
     }),
   );
   return {
-    requested: tossMarkets.length,
+    requested: seedableMarkets.length,
     seeded: results.filter((result) => result.status === "fulfilled" && result.value).length,
     failed: results.filter((result) => result.status === "rejected").length,
   };
@@ -911,7 +921,7 @@ async function syncMarketDiscovery(events, lane = "active") {
       ]),
     ];
     await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
-    const tossDefinitions = await seedTossMarkets(regularMarkets);
+    const seededInitialPrices = await seedInitialMarketPrices(regularMarkets);
     const activeFancies = fancies.filter((fancy) => fancy.isActive && !fancy.gameOver).length;
     for (const market of unique)
       setBounded(discoveryFingerprints, market.marketId, marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
@@ -940,7 +950,7 @@ async function syncMarketDiscovery(events, lane = "active") {
       missingLineReconciliation,
       redisDefinitions,
       regularDefinitions,
-      tossDefinitions,
+      seededInitialPrices,
       runners: runnerResult,
       subscription: { delegatedToMarketSync: true },
       terminalCleanup,
@@ -1151,7 +1161,8 @@ module.exports = {
   runnerLookupMarketIds,
   enforceBookmaker2Eligibility,
   regularMarketsWithRunners,
-  seedTossMarkets,
+  seedInitialMarketPrices,
+  isSeedableRegularMarket,
   inactiveLineMarkets,
   missingLineMarketIds,
   discoveryEventBatchSize,

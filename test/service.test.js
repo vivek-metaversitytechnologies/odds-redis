@@ -78,6 +78,7 @@ const {
   storedInFancyTable,
   terminalPrimaryMarketIds,
   primaryMarketLifecycle,
+  isSeedableRegularMarket,
 } = require("../src/cron/marketDiscoverySync");
 const lifecycle = require("../src/services/eventLifecyclePolicy");
 const {
@@ -1021,6 +1022,11 @@ test("undocumented vendor families are classified instead of dropped", () => {
   assert.equal(REGULAR_MARKET_TYPES.includes("line-market"), true);
   assert.equal(storedInFancyTable({ marketType: "line-market" }), true);
   assert.equal(storedInFancyTable({ marketType: "match-odd" }), false);
+  assert.equal(isSeedableRegularMarket({ marketId: "1.261569136", marketName: "Match Odds" }), true);
+  assert.equal(isSeedableRegularMarket({ marketId: "4.1-BM", marketName: "Bookmaker" }), true);
+  assert.equal(isSeedableRegularMarket({ marketId: "4.1-BM", marketName: "TOSS" }), true);
+  assert.equal(isSeedableRegularMarket({ marketId: "1.261569138", marketName: "Tied Match" }), true);
+  assert.equal(isSeedableRegularMarket({ marketId: "4.1-F2", marketName: "Session" }), false);
   assert.equal(oddsType("1.261062382"), "LINE");
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
   const rows = marketRows(

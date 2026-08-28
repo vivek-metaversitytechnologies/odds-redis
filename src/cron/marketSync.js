@@ -57,10 +57,15 @@ function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
 async function fetchActiveMarkets(lane = "active") {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   const cricketSportId = integer("CRICKET_SPORT_ID", 4, { min: 1 });
+  // Bookmaker/TOSS carry their own vendor-managed book independent of the exchange
+  // Match Odds market, so they can subscribe to the live socket as soon as they're
+  // discovered instead of waiting for the pre-match window — Match Odds and other
+  // exchange-style markets still wait, since there are far more of them and they
+  // depend on the event actually being near/live.
   const [rows] = await getSourcePool().query(
     `SELECT m.* FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
-       AND ${subscriptionEventWindowSql("m.sportid", "e", lane)}
+       AND (${subscriptionEventWindowSql("m.sportid", "e", lane)} OR m.marketname IN ('TOSS','Bookmaker'))
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ORDER BY CASE WHEN m.sportid=${cricketSportId} THEN 0 ELSE 1 END, m.sportid ASC, m.id DESC`,
     [true, ...sportIds],
