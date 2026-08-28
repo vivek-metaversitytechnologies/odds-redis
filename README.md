@@ -77,9 +77,16 @@ Market discovery uses a fast primary pass on `MARKET_DISCOVERY_CRON` and a full 
 pass every `MARKET_FULL_DISCOVERY_MS` (default: 30000). Unchanged definitions are not rewritten.
 Events already in play or starting within `ACTIVE_EVENT_LEAD_MINUTES` (60 by default) use the
 fast discovery lane. Later events use definition-only discovery every 10 minutes through
-`FUTURE_MARKET_DISCOVERY_CRON`. Cricket is subscribed inside the active window; non-cricket events
-can be subscribed earlier with `NON_CRICKET_SUBSCRIPTION_LEAD_MINUTES` (12 hours by default), so
-their initial provider ticks replace frontend-hidden `WAITING` placeholders before kickoff.
+`FUTURE_MARKET_DISCOVERY_CRON`.
+
+Provider socket subscription has no fixed pre-match lead time. Every active, non-resulted
+market is a subscription candidate, ordered cricket-first, in-play-first, then soonest-kickoff-first.
+In-play markets are always subscribed. Not-yet-live future markets are admitted in that same
+order only while the process has resource headroom (event-loop delay and heap usage, sampled by
+`resourceMonitor`/`healthSupervisor`); the moment either looks unhealthy, remaining future markets
+are simply deferred to the next `MARKET_SYNC_CRON` cycle rather than starving live coverage. This
+lets far-future events pick up their first live tick — replacing the frontend-hidden `WAITING`
+placeholder seeded at discovery time — as early as spare capacity allows, without a static cutoff.
 Active discovery and live cleanup request one event at a time by default, preventing the provider's
 market-response limit from truncating large cricket events. Future discovery remains batched.
 

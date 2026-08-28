@@ -629,9 +629,14 @@ async function regularMarketsWithRunners(markets) {
 // for hours on far-future cricket events. Seed an initial runners() snapshot as
 // soon as discovery finds them, the same way TOSS was always seeded early, so a
 // real price shows immediately instead of waiting for the subscription window.
+// Scoped to actual per-fixture market types only (by vendor marketType, not name
+// guessing) — a name-based check also swept in season-long outright markets like
+// "Winner"/"Winner Bookmaker.", which stay isActive for a whole tournament and
+// then never stop showing once seeded with real prices.
+const SEEDABLE_MARKET_TYPES = new Set(["match-odd", "bookmaker", "toss"]);
+
 function isSeedableRegularMarket(market) {
-  const group = redisStore.payloadGroup({ mid: market.marketId }, { marketname: market.marketName });
-  return group === "Odds" || group === "Bookmaker";
+  return SEEDABLE_MARKET_TYPES.has(String(market.marketType || "").toLowerCase());
 }
 
 async function seedInitialMarketPrices(markets) {
@@ -652,7 +657,8 @@ async function seedInitialMarketPrices(markets) {
       const written = await redisStore.writeTick({
         eid: market.eventId,
         mid: market.marketId,
-        s: true,
+        // No top-level status from a runners() snapshot — leave it unset so oddsPayload's
+        // status() resolves to "" instead of stringifying a boolean into "true".
         r: rows.map((runner) => ({
           rid: runner.runnerId ?? runner.selectionId,
           na: runner.name ?? runner.nation,

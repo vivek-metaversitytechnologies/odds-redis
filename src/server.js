@@ -58,7 +58,7 @@ async function startServer() {
     setImmediate(() => {
       void (async () => {
         if (reconcileOnStart) {
-          const markets = await fetchActiveMarkets("active");
+          const markets = await fetchActiveMarkets();
           await subscriptions.reconcileProviderSubscriptions(
             markets.map((market) => market.marketid).filter(Boolean),
           );

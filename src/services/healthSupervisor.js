@@ -1,5 +1,5 @@
-const { monitorEventLoopDelay } = require("node:perf_hooks");
 const v8 = require("node:v8");
+const resourceMonitor = require("./resourceMonitor");
 const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
 const websocket = require("./websocketService");
@@ -17,7 +17,6 @@ const severityRank = { healthy: 0, degraded: 1, critical: 2 };
 const incidents = [];
 const previousChecks = new Map();
 const recoveryAt = new Map();
-const loopDelay = monitorEventLoopDelay({ resolution: 20 });
 let timer;
 let running = false;
 let startedAt;
@@ -86,24 +85,17 @@ function runtimeChecks(now) {
   const checks = {};
   const memory = process.memoryUsage();
   const heapLimit = v8.getHeapStatistics().heap_size_limit;
-  const heapRatio = heapLimit ? memory.heapUsed / heapLimit : 0;
-  checks.memory = check(
-    heapRatio >= 0.9 ? "critical" : heapRatio >= 0.75 ? "degraded" : "healthy",
-    "Process memory sampled",
-    {
-      heapUsedMb: Number((memory.heapUsed / 1048576).toFixed(1)),
-      heapLimitMb: Number((heapLimit / 1048576).toFixed(1)),
-      heapPercent: Number((heapRatio * 100).toFixed(1)),
-      rssMb: Number((memory.rss / 1048576).toFixed(1)),
-    },
-  );
-  const p95Ms = Number(loopDelay.percentile(95) / 1e6);
-  checks.eventLoop = check(
-    p95Ms >= 1000 ? "critical" : p95Ms >= 250 ? "degraded" : "healthy",
-    "Event-loop delay sampled",
-    { p95Ms: Number(p95Ms.toFixed(1)) },
-  );
-  loopDelay.reset();
+  const heapRatio = resourceMonitor.currentHeapRatio();
+  checks.memory = check(resourceMonitor.memoryStatus(heapRatio), "Process memory sampled", {
+    heapUsedMb: Number((memory.heapUsed / 1048576).toFixed(1)),
+    heapLimitMb: Number((heapLimit / 1048576).toFixed(1)),
+    heapPercent: Number((heapRatio * 100).toFixed(1)),
+    rssMb: Number((memory.rss / 1048576).toFixed(1)),
+  });
+  const p95Ms = resourceMonitor.currentEventLoopP95Ms();
+  checks.eventLoop = check(resourceMonitor.eventLoopStatus(p95Ms), "Event-loop delay sampled", {
+    p95Ms: Number(p95Ms.toFixed(1)),
+  });
   const socket = websocket.getSocketStatus();
   const startupGraceMs = integer("HEALTH_STARTUP_GRACE_MS", 30000, { min: 5000 });
   const silenceMs = integer("HEALTH_SOCKET_SILENCE_MS", 120000, { min: 30000 });
@@ -209,7 +201,7 @@ async function runHealthCheck() {
 function startHealthSupervisor() {
   if (timer) return;
   startedAt = Date.now();
-  loopDelay.enable();
+  resourceMonitor.start();
   const intervalMs = integer("HEALTH_CHECK_INTERVAL_MS", 15000, { min: 5000 });
   timer = setInterval(() => void runHealthCheck().catch((error) => logger.error("[HealthSupervisor] check failed", { error: error.message })), intervalMs);
   timer.unref?.();
@@ -219,7 +211,7 @@ function startHealthSupervisor() {
 function stopHealthSupervisor() {
   if (timer) clearInterval(timer);
   timer = undefined;
-  loopDelay.disable();
+  resourceMonitor.stop();
 }
 
 function getHealthStatus() {

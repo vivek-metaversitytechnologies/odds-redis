@@ -92,8 +92,8 @@ const { isDeadlock, retryDeadlock } = require("../src/utils/dbRetry");
 const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
-const { eventInWindow, eventWindowSql, subscriptionEventWindowSql } = require("../src/utils/eventWindow");
-const { subscriptionDiff } = require("../src/cron/marketSync");
+const { eventInWindow, eventWindowSql } = require("../src/utils/eventWindow");
+const { subscriptionDiff, admissionBatches } = require("../src/cron/marketSync");
 const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
 const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
 const { pipelineCheck } = require("../src/services/healthSupervisor");
@@ -412,14 +412,6 @@ test("event workload lanes use mutually exclusive start-time predicates", () => 
   assert.equal(eventInWindow({ openDate: "2026-08-21 16:31:00", inPlay: true }, "future", now), false);
 });
 
-test("subscriptions use a wider lead only for non-cricket active markets", () => {
-  const sql = subscriptionEventWindowSql("m.sportid", "e", "active");
-  assert.match(sql, /\(m\.sportid\)=4.*INTERVAL 390 MINUTE/);
-  assert.match(sql, /\(m\.sportid\)<>4.*INTERVAL 1050 MINUTE/);
-  assert.equal(subscriptionEventWindowSql("m.sportid", "e", "all"), "1=1");
-  assert.match(subscriptionEventWindowSql("m.sportid", "e", "future"), /open_date > DATE_ADD/);
-});
-
 test("market subscription batches retain cricket priority", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketSync.js"), "utf8");
   assert.match(source, /CASE WHEN m\.sportid=.*THEN 0 ELSE 1 END/);
@@ -448,6 +440,49 @@ test("active subscription reconciliation finds missing and stale market IDs", ()
     pending: ["valid"],
     stale: ["stale"],
   });
+});
+
+test("live markets are always admitted; future markets only while resources are healthy", () => {
+  const isLive = (id) => id.startsWith("live");
+  const alwaysHealthy = () => true;
+  const neverHealthy = () => false;
+
+  // Healthy: every pending market is admitted, live tier first.
+  const healthy = admissionBatches(
+    ["future1", "live1", "future2", "live2"],
+    isLive,
+    50,
+    alwaysHealthy,
+  );
+  assert.deepEqual(
+    healthy.batches.map((entry) => entry.tier),
+    ["live", "future"],
+  );
+  assert.deepEqual(healthy.batches[0].batch, ["live1", "live2"]);
+  assert.deepEqual(healthy.batches[1].batch, ["future1", "future2"]);
+  assert.equal(healthy.deferredFuture, 0);
+
+  // Unhealthy: live markets still admitted, every future market deferred.
+  const unhealthy = admissionBatches(["future1", "live1", "future2"], isLive, 50, neverHealthy);
+  assert.deepEqual(
+    unhealthy.batches.map((entry) => entry.tier),
+    ["live"],
+  );
+  assert.deepEqual(unhealthy.batches[0].batch, ["live1"]);
+  assert.equal(unhealthy.deferredFuture, 2);
+
+  // Headroom runs out partway: earlier (nearer-kickoff) future batches admitted,
+  // later ones deferred, preserving the caller's priority order.
+  let calls = 0;
+  const healthyOnceThenNot = () => calls++ === 0;
+  const partial = admissionBatches(
+    ["f1", "f2", "f3"],
+    () => false,
+    1,
+    healthyOnceThenNot,
+  );
+  assert.deepEqual(partial.batches, [{ batch: ["f1"], tier: "future" }]);
+  assert.equal(partial.deferredFuture, 2);
 });
 
 test("migration runner discovers ordered SQL files and produces stable checksums", () => {
@@ -1022,11 +1057,12 @@ test("undocumented vendor families are classified instead of dropped", () => {
   assert.equal(REGULAR_MARKET_TYPES.includes("line-market"), true);
   assert.equal(storedInFancyTable({ marketType: "line-market" }), true);
   assert.equal(storedInFancyTable({ marketType: "match-odd" }), false);
-  assert.equal(isSeedableRegularMarket({ marketId: "1.261569136", marketName: "Match Odds" }), true);
-  assert.equal(isSeedableRegularMarket({ marketId: "4.1-BM", marketName: "Bookmaker" }), true);
-  assert.equal(isSeedableRegularMarket({ marketId: "4.1-BM", marketName: "TOSS" }), true);
-  assert.equal(isSeedableRegularMarket({ marketId: "1.261569138", marketName: "Tied Match" }), true);
-  assert.equal(isSeedableRegularMarket({ marketId: "4.1-F2", marketName: "Session" }), false);
+  assert.equal(isSeedableRegularMarket({ marketType: "match-odd" }), true);
+  assert.equal(isSeedableRegularMarket({ marketType: "bookmaker" }), true);
+  assert.equal(isSeedableRegularMarket({ marketType: "toss" }), true);
+  assert.equal(isSeedableRegularMarket({ marketType: "winner-market" }), false);
+  assert.equal(isSeedableRegularMarket({ marketType: "tied-match" }), false);
+  assert.equal(isSeedableRegularMarket({ marketType: "session" }), false);
   assert.equal(oddsType("1.261062382"), "LINE");
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
   const rows = marketRows(

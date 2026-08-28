@@ -3,11 +3,11 @@ const { getSourcePool } = require("../config/sourceDb");
 const Market = require("../models/Market");
 const subscriptions = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
+const resourceMonitor = require("../services/resourceMonitor");
 const logger = require("../utils/logger");
 const redisStore = require("../config/redis");
 const cronConfig = require("../config/cron");
 const { integer, csvIntegers } = require("../config/env");
-const { subscriptionEventWindowSql } = require("../utils/eventWindow");
 
 const activeMarketIds = new Set();
 const noTickRecovery = new Map();
@@ -37,6 +37,30 @@ function subscriptionDiff(desiredIds, subscribedIds, isSuppressed = () => false)
   };
 }
 
+function chunk(ids, size) {
+  const result = [];
+  for (let index = 0; index < ids.length; index += size) result.push(ids.slice(index, index + size));
+  return result;
+}
+
+// Live/in-play markets are always admitted. Not-yet-live future markets are admitted
+// in priority order (pending is expected pre-sorted nearest-kickoff-first, see
+// fetchActiveMarkets) only while isHealthy() reports resource headroom; the moment it
+// doesn't, the remaining future markets are deferred to the next sync cycle instead of
+// starving live coverage or spending headroom that live ticks need.
+function admissionBatches(pending, isLive, batchSize, isHealthy) {
+  const livePending = pending.filter((id) => isLive(id));
+  const futurePending = pending.filter((id) => !isLive(id));
+  const batches = chunk(livePending, batchSize).map((batch) => ({ batch, tier: "live" }));
+  let deferredFuture = futurePending.length;
+  for (const batch of chunk(futurePending, batchSize)) {
+    if (!isHealthy()) break;
+    batches.push({ batch, tier: "future" });
+    deferredFuture -= batch.length;
+  }
+  return { batches, deferredFuture };
+}
+
 function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
   const subscribed = new Set((subscribedIds || []).map(String));
   const graceMs = integer("MARKET_FIRST_TICK_GRACE_MS", 60000, { min: 10000 });
@@ -54,20 +78,19 @@ function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
   });
 }
 
-async function fetchActiveMarkets(lane = "active") {
+async function fetchActiveMarkets() {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   const cricketSportId = integer("CRICKET_SPORT_ID", 4, { min: 1 });
-  // Bookmaker/TOSS carry their own vendor-managed book independent of the exchange
-  // Match Odds market, so they can subscribe to the live socket as soon as they're
-  // discovered instead of waiting for the pre-match window — Match Odds and other
-  // exchange-style markets still wait, since there are far more of them and they
-  // depend on the event actually being near/live.
+  // Subscription eligibility is no longer gated by a static pre-match lead time —
+  // every non-resulted active market/fancy is a candidate, and syncMarketSubscriptions
+  // decides how far down this priority-ordered list it can actually admit based on
+  // live resource headroom.
   const [rows] = await getSourcePool().query(
     `SELECT m.* FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
-       AND (${subscriptionEventWindowSql("m.sportid", "e", lane)} OR m.marketname IN ('TOSS','Bookmaker'))
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
-     ORDER BY CASE WHEN m.sportid=${cricketSportId} THEN 0 ELSE 1 END, m.sportid ASC, m.id DESC`,
+     ORDER BY CASE WHEN m.sportid=${cricketSportId} THEN 0 ELSE 1 END,
+       COALESCE(e.in_play,0) DESC, e.open_date ASC, m.id DESC`,
     [true, ...sportIds],
   );
   const [fancyRows] = await getSourcePool().query(
@@ -76,11 +99,10 @@ async function fetchActiveMarkets(lane = "active") {
        e.open_date AS opendate, e.in_play AS inplay
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${sportIds.map(() => "?").join(",")})
-       AND ${subscriptionEventWindowSql("COALESCE(f.sportid,e.sportid)", "e", lane)}
        AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
      ORDER BY CASE WHEN COALESCE(f.sportid,e.sportid)=${cricketSportId} THEN 0 ELSE 1 END,
-       sportid ASC, f.id DESC`,
+       COALESCE(e.in_play,0) DESC, e.open_date ASC, f.id DESC`,
     [true, ...sportIds],
   );
   return [...rows, ...fancyRows].map(Market.fromRow);
@@ -94,8 +116,9 @@ async function syncMarketSubscriptions(lane = "active") {
   syncState.lastError = null;
   record("sync.started");
   try {
-    const markets = await fetchActiveMarkets(lane);
+    const markets = await fetchActiveMarkets();
     record("source.loaded", { markets: markets.length });
+    const marketsById = new Map(markets.map((market) => [String(market.marketid), market]));
     const discovered = [
       ...new Set(
         markets
@@ -108,19 +131,29 @@ async function syncMarketSubscriptions(lane = "active") {
     const initialDiff = subscriptionDiff(discovered, currentSubscriptions, subscriptions.isMarketSuppressed);
     // Subscribe missing live markets before doing slow stale cleanup. Provider calls
     // are kept sequential, but new markets no longer wait for an unsubscribe round trip.
+    // `pending` is already priority-ordered by fetchActiveMarkets (cricket first, live
+    // events first, then soonest kickoff first). In-play markets always get admitted;
+    // not-yet-live future markets are admitted in that same order only while
+    // resourceMonitor reports headroom, so a busy moment simply defers the furthest-out
+    // events to the next cycle instead of starving live coverage.
     const pending = initialDiff.pending;
     const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
-    const batches = [];
-    for (let index = 0; index < pending.length; index += batchSize) {
-      batches.push(pending.slice(index, index + batchSize));
-    }
-    batches.forEach((batch, index) => record("batch.started", { batch: index + 1, size: batch.length }));
+    const isLive = (id) => Number(marketsById.get(id)?.inplay) === 1;
+    const { batches, deferredFuture } = admissionBatches(
+      pending,
+      isLive,
+      batchSize,
+      resourceMonitor.isHealthyForAdmission,
+    );
+    batches.forEach(({ batch, tier }, index) =>
+      record("batch.started", { batch: index + 1, size: batch.length, tier }),
+    );
     const accepted = [];
     const skipped = [];
     // Keep provider registration batches ordered. Concurrent subscribe requests can
     // overwrite one another on providers that replace registration state per request.
     for (let index = 0; index < batches.length; index += 1) {
-      const batch = batches[index];
+      const { batch, tier } = batches[index];
       try {
         const result = await subscriptions.subscribeMarkets(batch);
         const subscribedIds = Array.isArray(result.subscribed) ? result.subscribed : [];
@@ -133,10 +166,11 @@ async function syncMarketSubscriptions(lane = "active") {
           requested: batch.length,
           subscribed: subscribedIds.length,
           skipped: skippedIds.length,
+          tier,
         });
       } catch (error) {
         skipped.push(...batch);
-        record("batch.failed", { batch: index + 1, size: batch.length, error: error.message });
+        record("batch.failed", { batch: index + 1, size: batch.length, error: error.message, tier });
       }
     }
     let unsubscribed = [];
@@ -186,6 +220,7 @@ async function syncMarketSubscriptions(lane = "active") {
       unsubscribed: unsubscribed.length,
       newlySubscribed: accepted.length,
       providerSkipped: skipped.length,
+      deferredForResourceHeadroom: Math.max(0, deferredFuture),
       activeMarketIds: currentActiveMarketIds,
       skippedMarketIds: [...new Set(skipped)],
       noTickRecovery: {
@@ -202,6 +237,7 @@ async function syncMarketSubscriptions(lane = "active") {
       total: result.total,
       subscribed: result.newlySubscribed,
       providerSkipped: result.providerSkipped,
+      deferredForResourceHeadroom: result.deferredForResourceHeadroom,
     });
     return result;
   } catch (error) {
@@ -245,6 +281,7 @@ function startMarketSync() {
 module.exports = {
   fetchActiveMarkets,
   subscriptionDiff,
+  admissionBatches,
   noTickRecoveryCandidates,
   syncMarketSubscriptions,
   startMarketSync,
