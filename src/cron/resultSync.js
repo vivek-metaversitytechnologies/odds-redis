@@ -140,9 +140,9 @@ async function handleSocketGameOver(marketIds) {
         [false, false, false, ...ids],
       );
       await connection.query(
-        `UPDATE t_matchfancy SET isactive=?,status=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+        `UPDATE t_matchfancy SET isactive=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
          WHERE fancyid IN (${placeholders})`,
-        [false, "CLOSED", false, false, false, ...ids],
+        [false, false, false, false, ...ids],
       );
       let terminalEvents = [];
       let eventMarkets = [];
@@ -173,9 +173,9 @@ async function handleSocketGameOver(marketIds) {
           [false, false, false, ...terminalEventIds],
         );
         await connection.query(
-          `UPDATE t_matchfancy SET isactive=?,status=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+          `UPDATE t_matchfancy SET isactive=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
            WHERE eventid IN (${eventPlaceholders})`,
-          [false, "CLOSED", false, false, false, ...terminalEventIds],
+          [false, false, false, false, ...terminalEventIds],
         );
       }
       await connection.commit();
@@ -311,8 +311,8 @@ async function persistMarketResult(connection, market, result) {
 async function persistFancyResult(connection, fancy, result) {
   if (result.isAbandoned) {
     await connection.execute(
-      "UPDATE t_matchfancy SET status=?, isactive=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
-      ["SUSPENDED", false, false, false, false, fancy.marketid],
+      "UPDATE t_matchfancy SET isactive=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
+      [false, false, false, false, fancy.marketid],
     );
     return true;
   }

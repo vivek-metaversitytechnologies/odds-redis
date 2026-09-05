@@ -145,6 +145,7 @@ function marketFingerprint(market) {
     market.inPlay,
     market.gameOver,
     market.isActive,
+    market.status,
     market.betDelay,
     market.displayMessage,
     market.seriesId,
@@ -183,6 +184,13 @@ function fallbackMarketName(marketType, marketId) {
   return names[marketType] || `Market ${marketId}`;
 }
 
+function vendorMarketStatus(item) {
+  const value = String(item?.status ?? item?.sb ?? "")
+    .trim()
+    .toUpperCase();
+  return ["OPEN", "SUSPENDED"].includes(value) ? value : null;
+}
+
 function marketRows(response, eventsById) {
   const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
   return rows
@@ -217,6 +225,7 @@ function marketRows(response, eventsById) {
         inPlay: Boolean(event?.inPlay),
         gameOver: Boolean(item?.gameOver),
         isActive: item?.isActive !== false,
+        status: vendorMarketStatus(item),
         betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3,
         minBet: 100,
         maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
@@ -316,13 +325,17 @@ async function upsertFancies(fancies) {
   let inserted = 0;
   let updated = 0;
   try {
-    await connection.beginTransaction();
     const ids = fancies.map((fancy) => fancy.marketId);
     const [existingRows] = await connection.query(
-      `SELECT fancyid,isactive FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      `SELECT fancyid,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
-    const existing = new Map(existingRows.map((row) => [String(row.fancyid), Number(row.isactive) === 1]));
+    const existing = new Map(
+      existingRows.map((row) => [
+        String(row.fancyid),
+        { isActive: Number(row.isactive) === 1, status: row.status },
+      ]),
+    );
     const writable = fancies.filter(
       (fancy) =>
         existing.has(fancy.marketId) ||
@@ -332,51 +345,57 @@ async function upsertFancies(fancies) {
     inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
     updated = writable.length - inserted;
     for (const batch of chunks(writable)) {
-      const values = batch.map((fancy) => {
-        const active = fancy.isActive && !fancy.gameOver;
-        return [
-          fancy.marketId,
-          fancy.marketName,
-          oddsType(fancy.marketId),
-          active ? "OPEN" : "SUSPENDED",
-          fancy.maxBet,
-          fancy.betDelay,
-          fancy.minBet,
-          fancy.maxBet,
-          fancy.eventId,
-          false,
-          active,
-          fancy.marketType,
-          active,
-          active,
-          "",
-          fancy.displayMessage,
-          new Date(),
-          fancy.matchName,
-          fancy.sportId,
-          "RS",
-          1,
-          fancy.inPlay,
-          fancy.maxBet,
-        ];
-      });
-      await connection.query(
-        `INSERT INTO t_matchfancy
-          (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
-           issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
-           sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
-         ON DUPLICATE KEY UPDATE name=VALUES(name),oddstype=VALUES(oddstype),eventid=VALUES(eventid),
-           status=VALUES(status),isactive=VALUES(isactive),isshow=VALUES(isshow),is_show=VALUES(is_show),
-           matchname=VALUES(matchname),sportid=VALUES(sportid),mtype=VALUES(mtype),
-           betdelay=VALUES(betdelay),minbet=VALUES(minbet),maxbet=VALUES(maxbet),
-           maxliabilityper_market=VALUES(maxliabilityper_market),
-           maxliabilityperbet=VALUES(maxliabilityperbet),remarks=VALUES(remarks),updatedon=NOW()`,
-        [values],
-      );
+      await connection.beginTransaction();
+      try {
+        const values = batch.map((fancy) => {
+          const active = fancy.isActive && !fancy.gameOver;
+          const marketStatus = fancy.status || existing.get(fancy.marketId)?.status || "OPEN";
+          return [
+            fancy.marketId,
+            fancy.marketName,
+            oddsType(fancy.marketId),
+            marketStatus,
+            fancy.maxBet,
+            fancy.betDelay,
+            fancy.minBet,
+            fancy.maxBet,
+            fancy.eventId,
+            false,
+            active,
+            fancy.marketType,
+            active,
+            active,
+            "",
+            fancy.displayMessage,
+            new Date(),
+            fancy.matchName,
+            fancy.sportId,
+            "RS",
+            1,
+            fancy.inPlay,
+            fancy.maxBet,
+          ];
+        });
+        await connection.query(
+          `INSERT INTO t_matchfancy
+            (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
+             issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
+             sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
+           ON DUPLICATE KEY UPDATE
+             updatedon=IF(
+               NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
+               NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
+               NOW(),updatedon
+             ),
+             status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
+          [values],
+        );
+        await connection.commit();
+      } catch (error) {
+        await connection.rollback();
+        throw error;
+      }
     }
-    // Migrate only IDs positively identified as provider session markets in this response.
-    await connection.query(`DELETE FROM t_market WHERE marketid IN (${ids.map(() => "?").join(",")})`, ids);
-    await connection.commit();
     return {
       inserted,
       updated,
@@ -385,14 +404,11 @@ async function upsertFancies(fancies) {
         .filter(
           (fancy) =>
             (!fancy.isActive || fancy.gameOver) &&
-            (existing.get(fancy.marketId) ||
+              (existing.get(fancy.marketId)?.isActive ||
               (!existing.has(fancy.marketId) && fancy.marketType === "line-market")),
         )
         .map((fancy) => fancy.marketId),
     };
-  } catch (error) {
-    await connection.rollback();
-    throw error;
   } finally {
     connection.release();
   }

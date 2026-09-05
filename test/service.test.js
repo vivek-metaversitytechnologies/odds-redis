@@ -979,6 +979,69 @@ test("fancy discovery uses Java-compatible betting limits", () => {
   assert.equal(row.betDelay, 0);
 });
 
+test("market discovery keeps vendor status independent from active and game-over flags", () => {
+  const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
+  const rows = marketRows(
+    {
+      data: [
+        { id: "4.1-F2", eventId: "10", sportId: 4, type: "session", isActive: true, status: "SUSPENDED" },
+        { id: "4.2-F2", eventId: "10", sportId: 4, type: "session", isActive: false, status: "OPEN" },
+        { id: "4.3-F2", eventId: "10", sportId: 4, type: "session", isActive: false, status: "CLOSED" },
+      ],
+    },
+    events,
+  );
+  assert.deepEqual(
+    rows.map(({ isActive, status }) => ({ isActive, status })),
+    [
+      { isActive: true, status: "SUSPENDED" },
+      { isActive: false, status: "OPEN" },
+      { isActive: false, status: null },
+    ],
+  );
+});
+
+test("fancy rediscovery updates only vendor-owned mutable columns", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  const duplicateClause = source.match(
+    /INSERT INTO t_matchfancy[\s\S]*?ON DUPLICATE KEY UPDATE([\s\S]*?)`,\n\s*\[values\]/,
+  )?.[1];
+  assert.ok(duplicateClause);
+  for (const column of ["status", "isactive", "isplay", "remarks"]) {
+    assert.match(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
+  }
+  for (const column of [
+    "name",
+    "oddstype",
+    "eventid",
+    "isshow",
+    "is_show",
+    "matchname",
+    "sportid",
+    "mtype",
+    "betdelay",
+    "minbet",
+    "maxbet",
+    "maxliabilityper_market",
+    "maxliabilityperbet",
+  ]) {
+    assert.doesNotMatch(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
+  }
+  assert.match(duplicateClause, /updatedon=IF\(/);
+  assert.doesNotMatch(duplicateClause, /updatedon=NOW\(\)/);
+});
+
+test("fancy upserts commit bounded batches without deleting regular markets", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  const upsertSource = source.match(/async function upsertFancies[\s\S]*?\n}\n\nasync function upsertMarkets/)?.[0];
+  assert.ok(upsertSource);
+  assert.match(
+    upsertSource,
+    /for \(const batch of chunks\(writable\)\) \{[\s\S]*?beginTransaction\(\)[\s\S]*?commit\(\)/,
+  );
+  assert.doesNotMatch(upsertSource, /DELETE FROM t_market/);
+});
+
 test("inactive sessions remain available for fancy-table deactivation", () => {
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
   const rows = marketRows(
@@ -1793,7 +1856,14 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
   assert.match(serverSource, /setResultHandler\(handleSocketGameOver\)/);
   assert.match(resultSource, /UPDATE t_market SET isactive=\?,status=\?,issubscribed=\?/);
-  assert.match(resultSource, /UPDATE t_matchfancy SET isactive=\?,status=\?,isshow=\?,is_show=\?,issubscribed=\?/);
+  assert.match(resultSource, /UPDATE t_matchfancy SET isactive=\?,isshow=\?,is_show=\?,issubscribed=\?/);
+  assert.doesNotMatch(resultSource, /UPDATE t_matchfancy SET status=\?/);
+  assert.doesNotMatch(resultSource, /UPDATE t_matchfancy SET isactive=\?,status=\?/);
+  assert.doesNotMatch(eventSource, /UPDATE t_matchfancy[\s\S]*?status = \?, updatedon/);
+  assert.doesNotMatch(resultSource, /\[false, "CLOSED", false, false, false,/);
+  assert.doesNotMatch(eventSource, /\[false, false, false, false, "CLOSED",/);
+  assert.doesNotMatch(resultSource, /\[false, "SUSPENDED", false, false, false,/);
+  assert.doesNotMatch(eventSource, /\[false, false, false, false, "SUSPENDED",/);
   assert.match(resultSource, /redis\.removeMarkets/);
   assert.match(resultSource, /redis\.removeEvent/);
   assert.match(resultSource, /redis\.removeEventsFromMetadata/);

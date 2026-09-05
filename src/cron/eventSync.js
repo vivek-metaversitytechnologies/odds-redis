@@ -167,8 +167,8 @@ async function retireCompletedEvents(events) {
       );
       await connection.query(
         `UPDATE t_matchfancy SET isactive = ?, isshow = ?, is_show = ?, issubscribed = ?,
-           status = ?, updatedon = NOW() WHERE eventid IN (${placeholders})`,
-        [false, false, false, false, "CLOSED", ...eventIds],
+           updatedon = NOW() WHERE eventid IN (${placeholders})`,
+        [false, false, false, false, ...eventIds],
       );
       await connection.commit();
     }
