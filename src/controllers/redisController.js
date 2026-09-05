@@ -86,4 +86,27 @@ async function activeMatches(req, res, next) {
   }
 }
 
-module.exports = { list, market, eventSnapshot, eventScore, activeMatches };
+async function activeMatchesRedisOnly(req, res, next) {
+  try {
+    disableCaching(res);
+    const sportId = Number(req.params.sportId);
+    if (!Number.isInteger(sportId) || sportId <= 0) {
+      return res
+        .status(400)
+        .json({ status: false, message: "A positive numeric sport ID is required", data: [] });
+    }
+    const data = await dashboard.activeMatchesFromRedis(sportId);
+    if (data === null) {
+      return res.status(503).json({
+        status: false,
+        message: "Active-match data is not available in Redis",
+        data: [],
+      });
+    }
+    res.json({ status: true, message: "Data Fetch Successfully", data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = { list, market, eventSnapshot, eventScore, activeMatches, activeMatchesRedisOnly };

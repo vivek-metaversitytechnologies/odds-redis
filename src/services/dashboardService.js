@@ -64,7 +64,10 @@ function cachedDashboardRow(event, snapshot) {
   const odds = Array.isArray(snapshot?.Odds) ? snapshot.Odds : [];
   const bookmaker = Array.isArray(snapshot?.Bookmaker) ? snapshot.Bookmaker : [];
   const matchOdds = odds.find(
-    (market) => String(market?.Name || "").trim().toLowerCase() === "match odds",
+    (market) =>
+      String(market?.Name || "")
+        .trim()
+        .toLowerCase() === "match odds",
   );
   const bookmakerMarket = bookmaker.find((market) => /bookmaker/i.test(String(market?.t || "")));
   const winnerMarket = [...odds, ...bookmaker].find((market) =>
@@ -84,9 +87,7 @@ function cachedDashboardRow(event, snapshot) {
     sportid: event.sportId,
     seriesid: event.seriesId,
     isBookmaker: bookmaker.length > 0,
-    isGoal: [...odds, ...bookmaker].some((market) =>
-      /goal/i.test(String(market?.Name ?? market?.t ?? "")),
-    ),
+    isGoal: [...odds, ...bookmaker].some((market) => /goal/i.test(String(market?.Name ?? market?.t ?? ""))),
     isOutright: !matchOdds && Boolean(winnerMarket),
   };
 }
@@ -163,13 +164,18 @@ function selectDashboardRows(rows) {
   return selected;
 }
 
-async function activeMatches(sportId) {
+async function activeMatchesFromRedis(sportId) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const cachedEvents = await redisStore.getEvents(sportId);
-  if (cachedEvents !== null) {
-    const snapshots = await redisStore.getEventSnapshots(cachedEvents.map((event) => event.eventId));
-    return activeMatchesFromCache(cachedEvents, snapshots, maxAgeHours);
-  }
+  if (cachedEvents === null) return null;
+  const snapshots = await redisStore.getEventSnapshots(cachedEvents.map((event) => event.eventId));
+  return activeMatchesFromCache(cachedEvents, snapshots, maxAgeHours);
+}
+
+async function activeMatches(sportId) {
+  const cached = await activeMatchesFromRedis(sportId);
+  if (cached !== null) return cached;
+  const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const [rows] = await getSourcePool().query(
     `SELECT t.matchname, t.opendate, t.inplay, t.eventid, t.marketid, t.marketname,
       t.sportid, t.seriesid, r.marketid AS settled_marketid
@@ -193,6 +199,7 @@ async function activeMatches(sportId) {
 
 module.exports = {
   activeMatches,
+  activeMatchesFromRedis,
   activeMatchesFromCache,
   cachedDashboardRow,
   eventOnlyDashboardEntry,

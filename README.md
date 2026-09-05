@@ -14,6 +14,10 @@ cp .env.example .env
 npm start
 ```
 
+Start the isolated public REST process separately with `npm run start:api`. It serves only
+the three `/betfair_api` endpoints and its own `/health`; it does not start vendor ingestion,
+cron jobs, MySQL access, or either Socket.IO server.
+
 Configure `.env` before starting. The service uses only the read-only source database
 configured through the `SOURCE_DB_*` variables; application state is stored in Redis.
 Redis reconnect errors are logged and ticks are counted as failed
@@ -64,6 +68,11 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - `GET /betfair_api/fancy/:eventId` - public frontend-ready Redis snapshot (legacy-compatible shape)
 - `GET /betfair_api/fancy/score/:eventId` - latest provider HTML scorecard for an event
 - `GET /betfair_api/active_match/:sportId` - public active-event dashboard list (legacy-compatible shape)
+
+The public API process reads all three endpoints from Redis. If the `Events-Rs:<sportId>`
+metadata required by `active_match` is absent, it returns `503` instead of falling back to
+MySQL. The original process retains its existing routes and database fallback during proxy
+cutover; route production traffic to `PUBLIC_API_PORT` before removing that compatibility path.
 
 Run tests with `npm test`.
 
@@ -147,8 +156,8 @@ use an HTTPS domain through Nginx rather than public unencrypted port `5673`.
 
 ## PM2
 
-Run exactly one backend instance because subscription and completed-market state is
-process-local:
+Run exactly one ingestion instance because subscription and completed-market state is
+process-local. The PM2 configuration also starts the independent `odds-public-api` process:
 
 ```bash
 npm install -g pm2@latest
@@ -157,5 +166,6 @@ pm2 save
 pm2 startup
 ```
 
-Run the command printed by `pm2 startup`, then use `pm2 status` and
-`pm2 logs odds-redis` to verify the process.
+Run the command printed by `pm2 startup`, then use `pm2 status`, `pm2 logs odds-redis`, and
+`pm2 logs odds-public-api` to verify both processes. Point the three `/betfair_api/` Nginx
+locations to `127.0.0.1:$PUBLIC_API_PORT`; keep `/socket.io/` on the ingestion service port.
