@@ -164,12 +164,23 @@ function selectDashboardRows(rows) {
   return selected;
 }
 
-async function activeMatchesFromRedis(sportId) {
+function elapsedMs(startedAt) {
+  return Number(process.hrtime.bigint() - startedAt) / 1e6;
+}
+
+async function activeMatchesFromRedis(sportId, timings) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
+  const eventsStartedAt = process.hrtime.bigint();
   const cachedEvents = await redisStore.getEvents(sportId);
+  if (timings) timings.redisEventsMs = elapsedMs(eventsStartedAt);
   if (cachedEvents === null) return null;
+  const snapshotsStartedAt = process.hrtime.bigint();
   const snapshots = await redisStore.getEventSnapshots(cachedEvents.map((event) => event.eventId));
-  return activeMatchesFromCache(cachedEvents, snapshots, maxAgeHours);
+  if (timings) timings.redisSnapshotsMs = elapsedMs(snapshotsStartedAt);
+  const transformStartedAt = process.hrtime.bigint();
+  const data = activeMatchesFromCache(cachedEvents, snapshots, maxAgeHours);
+  if (timings) timings.transformMs = elapsedMs(transformStartedAt);
+  return data;
 }
 
 async function activeMatches(sportId) {

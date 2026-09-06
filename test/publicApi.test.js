@@ -3,6 +3,7 @@ const test = require("node:test");
 const request = require("supertest");
 const { createPublicApiApp } = require("../src/publicApiApp");
 const { publicApiPort } = require("../src/publicApiServer");
+const redis = require("../src/config/redis");
 
 test("public API exposes only the split service routes", async () => {
   const app = createPublicApiApp();
@@ -20,4 +21,21 @@ test("public API rejects an invalid listen port", () => {
   assert.throws(() => publicApiPort(), /PUBLIC_API_PORT/);
   if (original === undefined) delete process.env.PUBLIC_API_PORT;
   else process.env.PUBLIC_API_PORT = original;
+});
+
+test("active-match response exposes its Redis and application timings", async (t) => {
+  const originalGetEvents = redis.getEvents;
+  const originalGetEventSnapshots = redis.getEventSnapshots;
+  t.after(() => {
+    redis.getEvents = originalGetEvents;
+    redis.getEventSnapshots = originalGetEventSnapshots;
+  });
+  redis.getEvents = async () => [];
+  redis.getEventSnapshots = async () => new Map();
+
+  const response = await request(createPublicApiApp()).get("/betfair_api/active_match/4").expect(200);
+  assert.match(response.headers["server-timing"], /redis-events;dur=/);
+  assert.match(response.headers["server-timing"], /redis-snapshots;dur=/);
+  assert.match(response.headers["server-timing"], /transform;dur=/);
+  assert.match(response.headers["server-timing"], /controller;dur=/);
 });

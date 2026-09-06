@@ -87,6 +87,8 @@ async function activeMatches(req, res, next) {
 }
 
 async function activeMatchesRedisOnly(req, res, next) {
+  const startedAt = process.hrtime.bigint();
+  const timings = {};
   try {
     disableCaching(res);
     const sportId = Number(req.params.sportId);
@@ -95,7 +97,17 @@ async function activeMatchesRedisOnly(req, res, next) {
         .status(400)
         .json({ status: false, message: "A positive numeric sport ID is required", data: [] });
     }
-    const data = await dashboard.activeMatchesFromRedis(sportId);
+    const data = await dashboard.activeMatchesFromRedis(sportId, timings);
+    timings.controllerMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    res.set(
+      "Server-Timing",
+      [
+        `redis-events;dur=${(timings.redisEventsMs || 0).toFixed(1)}`,
+        `redis-snapshots;dur=${(timings.redisSnapshotsMs || 0).toFixed(1)}`,
+        `transform;dur=${(timings.transformMs || 0).toFixed(1)}`,
+        `controller;dur=${timings.controllerMs.toFixed(1)}`,
+      ].join(", "),
+    );
     if (data === null) {
       return res.status(503).json({
         status: false,
