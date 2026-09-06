@@ -267,20 +267,17 @@ async function closeProviderRequests() {
   await providerLimiter.stop({ dropWaitingJobs: true, dropErrorMessage: "Provider client is shutting down" });
 }
 
-function postIds(path, ids, timeoutName = "PROVIDER_SUBSCRIBE_TIMEOUT_MS", defaultTimeoutMs = 5000) {
+function postIds(path, ids) {
   if (!Array.isArray(ids) || !ids.length) return null;
   // Subscription control is latency-sensitive and must not sit behind the much
   // larger discovery queue. Bottleneck priority 1 runs before default priority 5.
-  // Batches within a sync run are processed sequentially (see marketSync.js), so a
-  // slow provider response here stalls every other market in that run — fail fast
-  // and let marketSubscriptionService's background retry queue pick it up instead
-  // of retrying with the generic 60s*3 budget.
+  // Subscribe and unsubscribe use the common provider HTTP timeout so every vendor
+  // request follows the same operational timeout policy.
   return request(path, {
     method: "POST",
     body: { data: ids },
     priority: 1,
     retries: 0,
-    timeoutMs: integer(timeoutName, defaultTimeoutMs, { min: 1000 }),
   });
 }
 
@@ -298,11 +295,5 @@ module.exports = {
   // Results must not sit behind the much larger discovery queue indefinitely.
   results: (body) => request("/v1/markets/results", { method: "POST", body, priority: 2 }),
   subscribe: (ids) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids),
-  unsubscribe: (ids) =>
-    postIds(
-      process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe",
-      ids,
-      "PROVIDER_UNSUBSCRIBE_TIMEOUT_MS",
-      15000,
-    ),
+  unsubscribe: (ids) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids),
 };
