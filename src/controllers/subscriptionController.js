@@ -5,7 +5,8 @@ const { getMarketSyncStatus } = require("../cron/marketSync");
 const { leadMinutes } = require("../utils/eventWindow");
 
 function isFutureMarket(market, now = Date.now()) {
-  if (Number(market.inplay) === 1) return false;
+  const bit = (value) => (Buffer.isBuffer(value) ? value.length > 0 && value[0] === 1 : Number(value) === 1);
+  if (bit(market.inplay) || bit(market.market_inplay)) return false;
   const startsAt = new Date(market.opendate).getTime();
   return Number.isFinite(startsAt) && startsAt > now + leadMinutes() * 60_000;
 }
@@ -19,7 +20,8 @@ async function listSubscriptions(req, res, next) {
     const placeholders = sportIds.map(() => "?").join(",");
     const [regular] = await getSourcePool().query(
       `SELECT m.id,m.marketid,m.marketname,m.eventid,m.matchname,m.sportid,
-              e.open_date AS opendate,e.in_play AS inplay
+              e.open_date AS opendate,CAST(e.in_play AS UNSIGNED) AS inplay,
+              CAST(m.inplay AS UNSIGNED) AS market_inplay
        FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
        WHERE m.isactive=? AND m.sportid IN (${placeholders})
          AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
@@ -29,7 +31,8 @@ async function listSubscriptions(req, res, next) {
     const [fancies] = await getSourcePool().query(
       `SELECT f.id,f.fancyid AS marketid,f.name AS marketname,f.eventid,
               COALESCE(f.matchname,e.eventname) AS matchname,COALESCE(f.sportid,e.sportid) AS sportid,
-              e.open_date AS opendate,e.in_play AS inplay
+              e.open_date AS opendate,CAST(e.in_play AS UNSIGNED) AS inplay,
+              CAST(f.isplay AS UNSIGNED) AS market_inplay
        FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
        WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
          AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')

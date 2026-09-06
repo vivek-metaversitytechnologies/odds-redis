@@ -32,6 +32,14 @@ test("subscription admin separates future markets from actionable pending market
   assert.equal(isFutureMarket({ inplay: 0, opendate: "2026-08-15T11:01:00.000Z" }, now), true);
   assert.equal(isFutureMarket({ inplay: 0, opendate: "2026-08-15T11:00:00.000Z" }, now), false);
   assert.equal(isFutureMarket({ inplay: 1, opendate: "2026-08-16T11:00:00.000Z" }, now), false);
+  assert.equal(
+    isFutureMarket({ inplay: Buffer.from([1]), opendate: "2026-08-16T11:00:00.000Z" }, now),
+    false,
+  );
+  assert.equal(
+    isFutureMarket({ inplay: Buffer.from([0]), market_inplay: Buffer.from([1]), opendate: "2026-08-16T11:00:00.000Z" }, now),
+    false,
+  );
 });
 const {
   collectOddsTicks,
