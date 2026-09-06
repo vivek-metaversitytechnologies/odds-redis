@@ -492,10 +492,13 @@ test("active suspended fancies remain eligible for vendor subscription", () => {
   assert.match(source, /COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
 });
 
-test("only recently inactive open fancies are eligible for vendor result polling", () => {
+test("all inactive open fancies without results are eligible for vendor result polling", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   assert.match(source, /WHERE f\.isactive=\? AND UPPER\(f\.status\)=\?/);
-  assert.match(source, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
+  assert.doesNotMatch(
+    source,
+    /WHERE f\.isactive=\? AND UPPER\(f\.status\)=\?\s+AND f\.updatedon >= DATE_SUB/,
+  );
   assert.match(source, /\[false, "OPEN", \.\.\.sportIds, limit\]/);
 });
 
@@ -2051,7 +2054,7 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(resultSource, /redis\.removeEventsFromMetadata/);
   assert.match(resultSource, /publishEventRemoved\(eventId, "primary-market-game-over"\)/);
   assert.match(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
-  assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
+  assert.doesNotMatch(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.doesNotMatch(resultSource, /f\.isactive=\? AND UPPER\(f\.status\) IN/);
   assert.match(resultSource, /ORDER BY f\.isactive ASC, f\.updatedon DESC, f\.id DESC/);
   assert.match(discoverySource, /isactive=VALUES\(isactive\)/);

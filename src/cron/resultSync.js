@@ -99,7 +99,6 @@ async function loadCandidates() {
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND UPPER(f.status)=?
-       AND f.updatedon >= DATE_SUB(NOW(), INTERVAL 48 HOUR)
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
