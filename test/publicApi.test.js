@@ -35,7 +35,10 @@ test("active-match response exposes its Redis and application timings", async (t
 
   const response = await request(createPublicApiApp()).get("/betfair_api/active_match/4").expect(200);
   assert.match(response.headers["server-timing"], /redis-events;dur=/);
+  assert.match(response.headers["server-timing"], /redis-events-command;dur=/);
   assert.match(response.headers["server-timing"], /redis-snapshots;dur=/);
+  assert.match(response.headers["server-timing"], /redis-snapshots-command;dur=/);
+  assert.match(response.headers["server-timing"], /snapshots-parse;dur=/);
   assert.match(response.headers["server-timing"], /transform;dur=/);
   assert.match(response.headers["server-timing"], /controller;dur=/);
 });

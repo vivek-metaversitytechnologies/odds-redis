@@ -171,11 +171,14 @@ function elapsedMs(startedAt) {
 async function activeMatchesFromRedis(sportId, timings) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const eventsStartedAt = process.hrtime.bigint();
-  const cachedEvents = await redisStore.getEvents(sportId);
+  const cachedEvents = await redisStore.getEvents(sportId, timings);
   if (timings) timings.redisEventsMs = elapsedMs(eventsStartedAt);
   if (cachedEvents === null) return null;
   const snapshotsStartedAt = process.hrtime.bigint();
-  const snapshots = await redisStore.getEventSnapshots(cachedEvents.map((event) => event.eventId));
+  const snapshots = await redisStore.getEventSnapshots(
+    cachedEvents.map((event) => event.eventId),
+    timings,
+  );
   if (timings) timings.redisSnapshotsMs = elapsedMs(snapshotsStartedAt);
   const transformStartedAt = process.hrtime.bigint();
   const data = activeMatchesFromCache(cachedEvents, snapshots, maxAgeHours);

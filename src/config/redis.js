@@ -121,23 +121,34 @@ async function writeDiscoveryEvents(events, sportIds = []) {
   return writeEventMetadata(events, sportIds, discoveryEventMetadataKey, "discovery");
 }
 
-async function getEventMetadata(sportId, keyForSport) {
+function recordDuration(timings, name, startedAt) {
+  if (timings) timings[name] = Number(process.hrtime.bigint() - startedAt) / 1e6;
+}
+
+async function getEventMetadata(sportId, keyForSport, timings) {
   const normalized = Number(sportId);
   if (!Number.isInteger(normalized) || normalized <= 0) return null;
+  const clientStartedAt = process.hrtime.bigint();
   const redis = await getRedisReadClient();
+  recordDuration(timings, "redisClientMs", clientStartedAt);
   if (!redis?.isOpen) return null;
+  const commandStartedAt = process.hrtime.bigint();
   const value = await redis.get(keyForSport(normalized));
+  recordDuration(timings, "redisEventsCommandMs", commandStartedAt);
   if (value == null) return null;
+  const parseStartedAt = process.hrtime.bigint();
   try {
     const events = JSON.parse(value);
     return Array.isArray(events) ? events : null;
   } catch {
     return null;
+  } finally {
+    recordDuration(timings, "eventsParseMs", parseStartedAt);
   }
 }
 
-async function getEvents(sportId) {
-  return getEventMetadata(sportId, eventMetadataKey);
+async function getEvents(sportId, timings) {
+  return getEventMetadata(sportId, eventMetadataKey, timings);
 }
 
 async function getDiscoveryEvents(sportId) {
@@ -1135,13 +1146,18 @@ async function getEventSnapshot(eventId) {
   }
 }
 
-async function getEventSnapshots(eventIds) {
+async function getEventSnapshots(eventIds, timings) {
+  const clientStartedAt = process.hrtime.bigint();
   const redis = await getRedisReadClient();
+  recordDuration(timings, "snapshotRedisClientMs", clientStartedAt);
   const ids = [...new Set((eventIds || []).map(String).filter(Boolean))];
   const snapshots = new Map();
   if (!redis?.isOpen || !ids.length) return snapshots;
   const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+  const commandStartedAt = process.hrtime.bigint();
   const values = await redis.mGet(ids.map((eventId) => `${prefix}${eventId}`));
+  recordDuration(timings, "redisSnapshotsCommandMs", commandStartedAt);
+  const parseStartedAt = process.hrtime.bigint();
   ids.forEach((eventId, index) => {
     try {
       snapshots.set(eventId, values[index] ? frontendEventPayload(JSON.parse(values[index])) : null);
@@ -1149,6 +1165,7 @@ async function getEventSnapshots(eventIds) {
       snapshots.set(eventId, null);
     }
   });
+  recordDuration(timings, "snapshotsParseMs", parseStartedAt);
   return snapshots;
 }
 

@@ -103,7 +103,11 @@ async function activeMatchesRedisOnly(req, res, next) {
       "Server-Timing",
       [
         `redis-events;dur=${(timings.redisEventsMs || 0).toFixed(1)}`,
+        `redis-events-command;dur=${(timings.redisEventsCommandMs || 0).toFixed(1)}`,
+        `events-parse;dur=${(timings.eventsParseMs || 0).toFixed(1)}`,
         `redis-snapshots;dur=${(timings.redisSnapshotsMs || 0).toFixed(1)}`,
+        `redis-snapshots-command;dur=${(timings.redisSnapshotsCommandMs || 0).toFixed(1)}`,
+        `snapshots-parse;dur=${(timings.snapshotsParseMs || 0).toFixed(1)}`,
         `transform;dur=${(timings.transformMs || 0).toFixed(1)}`,
         `controller;dur=${timings.controllerMs.toFixed(1)}`,
       ].join(", "),
