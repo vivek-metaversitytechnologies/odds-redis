@@ -20,6 +20,78 @@ const providerLimiter = new Bottleneck({
 const activeControllers = new Set();
 let shuttingDown = false;
 let blockedUntil = 0;
+const requestAttempts = [];
+const requestLifetime = {
+  startedAt: new Date().toISOString(),
+  attempts: 0,
+  succeeded: 0,
+  failed: 0,
+  aborted: 0,
+};
+
+function metricRoute(pathname) {
+  if (/^\/v1\/markets\/[^/]+\/runners$/.test(pathname)) return "/v1/markets/:marketId/runners";
+  return pathname;
+}
+
+function pruneRequestAttempts(now = Date.now()) {
+  const cutoff = now - 60_000;
+  while (requestAttempts.length && requestAttempts[0].startedAt < cutoff) requestAttempts.shift();
+}
+
+function startRequestAttempt(method, url) {
+  const entry = {
+    startedAt: Date.now(),
+    method,
+    path: url.pathname,
+    route: metricRoute(url.pathname),
+    status: null,
+    outcome: "running",
+    durationMs: null,
+  };
+  requestAttempts.push(entry);
+  requestLifetime.attempts += 1;
+  pruneRequestAttempts(entry.startedAt);
+  return entry;
+}
+
+function finishRequestAttempt(entry, { status = null, error } = {}) {
+  if (!entry || entry.outcome !== "running") return;
+  entry.status = status;
+  entry.durationMs = Date.now() - entry.startedAt;
+  if (!error && status >= 200 && status < 400) {
+    entry.outcome = "succeeded";
+    requestLifetime.succeeded += 1;
+  } else {
+    entry.outcome = error?.name === "AbortError" || /aborted/i.test(error?.message || "") ? "aborted" : "failed";
+    requestLifetime.failed += 1;
+    if (entry.outcome === "aborted") requestLifetime.aborted += 1;
+  }
+}
+
+function requestWindow(windowMs, now = Date.now()) {
+  const rows = requestAttempts.filter((entry) => entry.startedAt >= now - windowMs);
+  const byEndpoint = {};
+  for (const entry of rows) {
+    const key = `${entry.method} ${entry.route}`;
+    const current = byEndpoint[key] || { attempts: 0, succeeded: 0, failed: 0, aborted: 0 };
+    current.attempts += 1;
+    if (entry.outcome === "succeeded") current.succeeded += 1;
+    else if (entry.outcome === "aborted") {
+      current.failed += 1;
+      current.aborted += 1;
+    } else if (entry.outcome === "failed") current.failed += 1;
+    byEndpoint[key] = current;
+  }
+  return {
+    attempts: rows.length,
+    succeeded: rows.filter((entry) => entry.outcome === "succeeded").length,
+    failed: rows.filter((entry) => ["failed", "aborted"].includes(entry.outcome)).length,
+    aborted: rows.filter((entry) => entry.outcome === "aborted").length,
+    running: rows.filter((entry) => entry.outcome === "running").length,
+    byEndpoint,
+  };
+}
 
 function isVendorRateLimitResponse(status, body) {
   const message = typeof body === "string" ? body : JSON.stringify(body || "");
@@ -38,6 +110,8 @@ async function waitForVendorCooldown() {
 }
 
 function getProviderRateLimitStatus() {
+  const now = Date.now();
+  pruneRequestAttempts(now);
   return {
     vendorWindowMs: VENDOR_WINDOW_MS,
     vendorWindowCap: VENDOR_WINDOW_CAP,
@@ -47,6 +121,11 @@ function getProviderRateLimitStatus() {
     minTimeMs: Math.max(configuredMinTime, rateLimitMinTime),
     configurationClamped: configuredRequestsPerMinute > maxRequestsPerMinute,
     blockedUntil: blockedUntil ? new Date(blockedUntil).toISOString() : null,
+    requests: {
+      last20Seconds: requestWindow(20_000, now),
+      last60Seconds: requestWindow(60_000, now),
+      lifetime: { ...requestLifetime },
+    },
   };
 }
 
@@ -93,6 +172,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
     if (shuttingDown) throw new Error("Provider client is shutting down");
     await waitForVendorCooldown();
     const startedAt = Date.now();
+    let metricEntry;
     try {
       const requestLog = {
         method,
@@ -103,6 +183,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
       };
       writeProviderLog("provider.request", requestLog);
       const response = await providerLimiter.schedule({ priority }, async () => {
+        metricEntry = startRequestAttempt(method, url);
         const controller = new AbortController();
         activeControllers.add(controller);
         const timer = setTimeout(
@@ -126,6 +207,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
         }
       });
       const text = await response.text();
+      finishRequestAttempt(metricEntry, { status: response.status });
       let data = text;
       try {
         data = text ? JSON.parse(text) : null;
@@ -156,6 +238,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
         setTimeout(resolve, Number.isFinite(retryAfter) ? retryAfter * 1000 : 300 * 2 ** attempt),
       );
     } catch (error) {
+      finishRequestAttempt(metricEntry, { status: error.statusCode || null, error });
       const errorLog = {
         method,
         url: url.toString(),
