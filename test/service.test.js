@@ -19,12 +19,16 @@ const {
   regularDefinitionEntries,
   normalizeEventPayload,
   frontendEventPayload,
+  hasAuthoritativeOddsName,
   validMarketIdentifier,
   writeTicks,
   reconcileFancyDefinitions,
   __testing__: redisTesting,
 } = require("../src/config/redis");
-const { normalizeProviderAcknowledgement } = require("../src/services/marketSubscriptionService");
+const {
+  normalizeProviderAcknowledgement,
+  unsubscribeEventMarkets,
+} = require("../src/services/marketSubscriptionService");
 const { isFutureMarket } = require("../src/controllers/subscriptionController");
 
 test("subscription admin separates future markets from actionable pending markets", () => {
@@ -127,6 +131,31 @@ test("provider limiter recognizes the vendor temporary IP block", () => {
     true,
   );
   assert.equal(isVendorRateLimitResponse(403, "Forbidden"), false);
+});
+
+test("automatic cleanup unsubscribes only locally tracked markets at the vendor", async () => {
+  const provider = require("../src/services/providerApi");
+  const websocket = require("../src/services/websocketService");
+  const originalProviderUnsubscribe = provider.unsubscribe;
+  const originalSocketUnsubscribe = websocket.unsubscribeMarkets;
+  const calls = [];
+  provider.unsubscribe = async (ids) => {
+    calls.push(ids);
+    return { message: "OK" };
+  };
+  websocket.unsubscribeMarkets = (ids) => ids.filter((id) => id === "tracked-market");
+  try {
+    const result = await unsubscribeEventMarkets(
+      ["tracked-market", "inactive-market", "inactive-market"],
+      { trackedOnly: true, source: "test-cleanup" },
+    );
+    assert.deepEqual(calls, [["tracked-market"]]);
+    assert.deepEqual(result.unsubscribed, ["tracked-market"]);
+    assert.deepEqual(result.skippedUntracked, ["inactive-market"]);
+  } finally {
+    provider.unsubscribe = originalProviderUnsubscribe;
+    websocket.unsubscribeMarkets = originalSocketUnsubscribe;
+  }
 });
 
 test("provider metrics aggregate Redis minute fields by endpoint", () => {
@@ -1625,9 +1654,9 @@ test("invalid sentinel market IDs are rejected and removed from snapshots", () =
 test("frontend snapshots hide waiting markets but retain live and suspended markets", () => {
   const payload = frontendEventPayload({
     Odds: [
-      { marketId: "1.waiting", status: "WAITING" },
-      { marketId: "1.open", status: "OPEN" },
-      { marketId: "1.suspended", status: "SUSPENDED" },
+      { marketId: "1.waiting", Name: "Match Odds", status: "WAITING" },
+      { marketId: "1.open", Name: "Match Odds", status: "OPEN" },
+      { marketId: "1.suspended", Name: "Tied Match", status: "SUSPENDED" },
     ],
     Fancy2: [
       { mid: "4.waiting-F2", gstatus: "waiting" },
@@ -1642,6 +1671,23 @@ test("frontend snapshots hide waiting markets but retain live and suspended mark
   assert.deepEqual(
     payload.Fancy2.map((market) => market.mid),
     ["4.open-F2"],
+  );
+});
+
+test("frontend snapshots hide unidentified standard odds without discarding stored ticks", () => {
+  assert.equal(hasAuthoritativeOddsName({ marketId: "1.2", Name: "Market 1.2" }), false);
+  assert.equal(hasAuthoritativeOddsName({ marketId: "1.2", Name: "Match Odds" }), true);
+  const stored = {
+    Odds: [
+      { marketId: "1.2", Name: "Market 1.2", status: "OPEN", runners: [{ name: "Total Runs" }] },
+      { marketId: "1.3", Name: "Match Odds", status: "OPEN", runners: [] },
+    ],
+  };
+  const visible = frontendEventPayload(stored);
+  assert.equal(stored.Odds.length, 2);
+  assert.deepEqual(
+    visible.Odds.map((market) => market.marketId),
+    ["1.3"],
   );
 });
 
@@ -1983,7 +2029,8 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(resultSource, /publishEventRemoved\(eventId, "primary-market-game-over"\)/);
   assert.match(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.match(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
-  assert.match(resultSource, /UPPER\(f\.status\) IN \('SUSPENDED','CLOSED'\)/);
+  assert.doesNotMatch(resultSource, /f\.isactive=\? AND UPPER\(f\.status\) IN/);
+  assert.match(resultSource, /ORDER BY f\.isactive ASC, f\.updatedon DESC, f\.id DESC/);
   assert.match(discoverySource, /isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\),isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\)/);

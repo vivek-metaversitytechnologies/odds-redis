@@ -1100,7 +1100,13 @@ async function syncLiveMarketCleanup() {
     const removedCount = removals.reduce((total, removedIds) => total + removedIds.size, 0);
     const marketIds = unique.map((market) => market.marketId);
     redisStore.invalidateMarkets(marketIds);
-    await unsubscribeEventMarkets(marketIds);
+    // Inactive definitions are rediscovered on every cleanup pass. Only call the
+    // vendor for markets this process still tracks as subscribed; otherwise the
+    // same inactive IDs create hundreds of duplicate unsubscribe requests.
+    const providerUnsubscribe = await unsubscribeEventMarkets(marketIds, {
+      trackedOnly: true,
+      source: "live-market-cleanup",
+    });
     const changedEventIds = [...new Set(unique.map((market) => String(market.eventId)))];
     await Promise.allSettled(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
     return {
@@ -1108,6 +1114,8 @@ async function syncLiveMarketCleanup() {
       inactive: unique.length,
       deactivated: regularResult.updated + fancyResult.updated,
       removed: removedCount + missingLines.removed,
+      providerUnsubscribed: providerUnsubscribe.unsubscribed.length,
+      providerUnsubscribeSkipped: providerUnsubscribe.skippedUntracked.length,
       missingLines,
     };
   } finally {

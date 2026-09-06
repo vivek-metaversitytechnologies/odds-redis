@@ -89,12 +89,11 @@ async function loadCandidates() {
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE ((f.isactive=? AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED'))
-       OR (f.isactive=? AND UPPER(f.status) IN ('SUSPENDED','CLOSED')
-         AND f.updatedon >= DATE_SUB(NOW(), INTERVAL 48 HOUR)))
+       OR (f.isactive=? AND f.updatedon >= DATE_SUB(NOW(), INTERVAL 48 HOUR)))
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
-     ORDER BY f.id DESC LIMIT ?`,
+     ORDER BY f.isactive ASC, f.updatedon DESC, f.id DESC LIMIT ?`,
     [true, false, ...sportIds, limit],
   );
   return { markets, fancies };
@@ -356,12 +355,18 @@ async function applyResults(results, candidates) {
   const regularById = new Map(candidates.markets.map((market) => [String(market.marketid), market]));
   const fancyById = new Map(candidates.fancies.map((market) => [String(market.marketid), market]));
   const settled = [];
+  let regularSettled = 0;
+  let fancySettled = 0;
+  let unmatchedResults = 0;
   let persistenceFailures = 0;
   let rejectedResults = 0;
   const changedEventIds = new Set();
   for (const result of results) {
     const market = regularById.get(result.marketId) || fancyById.get(result.marketId);
-    if (!market) continue;
+    if (!market) {
+      unmatchedResults += 1;
+      continue;
+    }
     const connection = await getSourcePool().getConnection();
     let saved = false;
     try {
@@ -377,6 +382,7 @@ async function applyResults(results, candidates) {
       await connection.commit();
     } catch (error) {
       await connection.rollback();
+      saved = false;
       persistenceFailures += 1;
       logger.error("[ResultSync] result persistence failed", {
         marketId: result.marketId,
@@ -393,6 +399,8 @@ async function applyResults(results, candidates) {
     }
     changedEventIds.add(String(market.eventid));
     settled.push(result.marketId);
+    if (fancyById.has(result.marketId)) fancySettled += 1;
+    else regularSettled += 1;
   }
   for (const eventId of changedEventIds) {
     try {
@@ -402,7 +410,14 @@ async function applyResults(results, candidates) {
     }
   }
   if (settled.length) await subscriptions.unsubscribeResultMarkets(settled);
-  return { settled, persistenceFailures, rejectedResults };
+  return {
+    settled,
+    regularSettled,
+    fancySettled,
+    unmatchedResults,
+    persistenceFailures,
+    rejectedResults,
+  };
 }
 
 async function syncResults() {
@@ -434,6 +449,9 @@ async function syncResults() {
       failedCalls: responses.filter((response) => response.status === "rejected").length,
       results: results.length,
       settled: applied.settled.length,
+      regularSettled: applied.regularSettled,
+      fancySettled: applied.fancySettled,
+      unmatchedResults: applied.unmatchedResults,
       settledMarketIds: applied.settled,
       persistenceFailures: applied.persistenceFailures,
       rejectedResults: applied.rejectedResults,

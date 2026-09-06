@@ -150,7 +150,7 @@ function restoreMarketEligibility(ids) {
   }
 }
 
-async function unsubscribeEventMarkets(ids) {
+async function unsubscribeEventMarkets(ids, { trackedOnly = false, source = "manual" } = {}) {
   const marketIds = [
     ...new Set(
       (ids || [])
@@ -159,21 +159,37 @@ async function unsubscribeEventMarkets(ids) {
         .filter(redisStore.validMarketIdentifier),
     ),
   ];
-  if (!marketIds.length) return { requested: [], unsubscribed: [] };
-  websocket.unsubscribeMarkets(marketIds);
+  if (!marketIds.length) return { requested: [], unsubscribed: [], skippedUntracked: [] };
+  const locallyUnsubscribed = websocket.unsubscribeMarkets(marketIds);
+  const providerMarketIds = trackedOnly ? locallyUnsubscribed : marketIds;
+
+  if (!providerMarketIds.length) {
+    logger.info("[MarketSubscription] vendor unsubscribe skipped", {
+      source,
+      requested: marketIds.length,
+      reason: "no-locally-tracked-markets",
+    });
+    return { requested: marketIds, unsubscribed: [], skippedUntracked: marketIds };
+  }
 
   const batchSize = providerBatchSize();
   const unsubscribed = [];
-  for (let index = 0; index < marketIds.length; index += batchSize) {
-    const batch = marketIds.slice(index, index + batchSize);
+  for (let index = 0; index < providerMarketIds.length; index += batchSize) {
+    const batch = providerMarketIds.slice(index, index + batchSize);
     await provider.unsubscribe(batch);
     unsubscribed.push(...batch);
   }
-  logger.info("[MarketSubscription] event markets manually unsubscribed", {
+  logger.info("[MarketSubscription] event markets unsubscribed", {
+    source,
     count: unsubscribed.length,
     marketIds: unsubscribed,
   });
-  return { requested: marketIds, unsubscribed };
+  const unsubscribedSet = new Set(unsubscribed);
+  return {
+    requested: marketIds,
+    unsubscribed,
+    skippedUntracked: trackedOnly ? marketIds.filter((id) => !unsubscribedSet.has(id)) : [],
+  };
 }
 
 async function reconcileProviderSubscriptions(ids) {

@@ -383,6 +383,13 @@ function normalizeEventPayload(payload) {
   return moveTiedMatchLast(normalized);
 }
 
+function hasAuthoritativeOddsName(entry) {
+  const marketId = entryMarketId(entry).trim();
+  const name = String(entry?.Name ?? entry?.name ?? "").trim();
+  if (!name) return false;
+  return name.toLowerCase() !== `market ${marketId}`.toLowerCase();
+}
+
 function frontendEventPayload(payload) {
   const normalized = normalizeEventPayload(payload);
   return Object.fromEntries(
@@ -392,7 +399,12 @@ function frontendEventPayload(payload) {
         const state = String(entry?.status ?? entry?.gstatus ?? entry?.s ?? "")
           .trim()
           .toUpperCase();
-        return state !== "WAITING";
+        if (state === "WAITING") return false;
+        // Socket odds can arrive before the vendor exposes market/runner metadata.
+        // Keep those ticks in Redis, but do not present a generic "Market <id>"
+        // as a bettable market until discovery supplies its authoritative name.
+        if (group === "Odds" && !hasAuthoritativeOddsName(entry)) return false;
+        return true;
       }),
     ]),
   );
@@ -1401,6 +1413,7 @@ module.exports = {
   reconcileRegularDefinitions,
   normalizeEventPayload,
   frontendEventPayload,
+  hasAuthoritativeOddsName,
   validMarketIdentifier,
   invalidateMarkets,
   __testing__: {
