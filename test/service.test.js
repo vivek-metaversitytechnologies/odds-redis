@@ -44,6 +44,7 @@ const {
 const { parseJsonObjects, containsMarketId } = require("../src/services/logReaderService");
 const {
   activeMatchesFromCache,
+  canRemainWithoutMarket,
   cachedDashboardRow,
   eventOnlyDashboardEntry,
   dashboardEntry,
@@ -227,7 +228,13 @@ test("discovery reconciliation cannot overwrite a socket tick that lands mid-rea
   redisTesting.primeMarketCache([
     [
       "9001.F2",
-      { marketid: "9001.F2", eventid: 9001, marketname: "Session Runs", isactive: true, matchname: "Alpha v Beta" },
+      {
+        marketid: "9001.F2",
+        eventid: 9001,
+        marketname: "Session Runs",
+        isactive: true,
+        matchname: "Alpha v Beta",
+      },
     ],
   ]);
 
@@ -343,13 +350,17 @@ test("future discovery creates one request batch per cricket event", () => {
     ],
     "future",
   );
-  assert.deepEqual(batches.filter(({ sportId }) => sportId === 4), [
-    { eids: [41], sportId: 4 },
-    { eids: [42], sportId: 4 },
-  ]);
-  assert.deepEqual(batches.filter(({ sportId }) => sportId === 1), [
-    { eids: [11, 12], sportId: 1 },
-  ]);
+  assert.deepEqual(
+    batches.filter(({ sportId }) => sportId === 4),
+    [
+      { eids: [41], sportId: 4 },
+      { eids: [42], sportId: 4 },
+    ],
+  );
+  assert.deepEqual(
+    batches.filter(({ sportId }) => sportId === 1),
+    [{ eids: [11, 12], sportId: 1 }],
+  );
 });
 
 test("queued future discovery takes priority after a scheduler collision", () => {
@@ -448,12 +459,7 @@ test("live markets are always admitted; future markets only while resources are 
   const neverHealthy = () => false;
 
   // Healthy: every pending market is admitted, live tier first.
-  const healthy = admissionBatches(
-    ["future1", "live1", "future2", "live2"],
-    isLive,
-    50,
-    alwaysHealthy,
-  );
+  const healthy = admissionBatches(["future1", "live1", "future2", "live2"], isLive, 50, alwaysHealthy);
   assert.deepEqual(
     healthy.batches.map((entry) => entry.tier),
     ["live", "future"],
@@ -475,12 +481,7 @@ test("live markets are always admitted; future markets only while resources are 
   // later ones deferred, preserving the caller's priority order.
   let calls = 0;
   const healthyOnceThenNot = () => calls++ === 0;
-  const partial = admissionBatches(
-    ["f1", "f2", "f3"],
-    () => false,
-    1,
-    healthyOnceThenNot,
-  );
+  const partial = admissionBatches(["f1", "f2", "f3"], () => false, 1, healthyOnceThenNot);
   assert.deepEqual(partial.batches, [{ batch: ["f1"], tier: "future" }]);
   assert.equal(partial.deferredFuture, 2);
 });
@@ -692,6 +693,20 @@ test("Redis active-match cache excludes completed and expired events", () => {
     ["2", snapshot],
   ]);
   assert.deepEqual(activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")), []);
+});
+
+test("started events without a usable primary market are excluded from active matches", () => {
+  const now = Date.parse("2026-09-06T07:00:00Z");
+  const event = {
+    eventId: 36016439,
+    eventName: "Essex v Sussex",
+    sportId: 4,
+    openDate: "2026-09-05T15:00:00Z",
+    inPlay: true,
+    gameOver: false,
+  };
+  assert.equal(canRemainWithoutMarket(event, now), false);
+  assert.deepEqual(activeMatchesFromCache([event], new Map(), 48, now), []);
 });
 
 test("database active-match rows are grouped without correlated market scans", () => {
@@ -1033,7 +1048,9 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
 
 test("fancy upserts commit bounded batches without deleting regular markets", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
-  const upsertSource = source.match(/async function upsertFancies[\s\S]*?\n}\n\nasync function upsertMarkets/)?.[0];
+  const upsertSource = source.match(
+    /async function upsertFancies[\s\S]*?\n}\n\nasync function upsertMarkets/,
+  )?.[0];
   assert.ok(upsertSource);
   assert.match(
     upsertSource,
@@ -1585,8 +1602,14 @@ test("frontend snapshots hide waiting markets but retain live and suspended mark
     ],
   });
 
-  assert.deepEqual(payload.Odds.map((market) => market.marketId), ["1.open", "1.suspended"]);
-  assert.deepEqual(payload.Fancy2.map((market) => market.mid), ["4.open-F2"]);
+  assert.deepEqual(
+    payload.Odds.map((market) => market.marketId),
+    ["1.open", "1.suspended"],
+  );
+  assert.deepEqual(
+    payload.Fancy2.map((market) => market.mid),
+    ["4.open-F2"],
+  );
 });
 
 test("regular API definitions seed line markets with suspended runner placeholders", () => {
@@ -1781,10 +1804,24 @@ test("authoritative discovery closes an event only when no primary market remain
   assert.deepEqual(
     terminalPrimaryMarketIds([
       { eventId: 10, marketId: "1.10", marketType: "match-odd", isActive: false, gameOver: true },
-      { eventId: 11, marketId: "4.11-BM", marketName: "Bookmaker", marketType: "bookmaker", isActive: false, gameOver: true },
+      {
+        eventId: 11,
+        marketId: "4.11-BM",
+        marketName: "Bookmaker",
+        marketType: "bookmaker",
+        isActive: false,
+        gameOver: true,
+      },
       { eventId: 11, marketId: "1.11", marketType: "match-odd", isActive: true, gameOver: false },
       { eventId: 12, marketId: "4.12-F2", marketType: "session", isActive: false, gameOver: true },
-      { eventId: 13, marketId: "4.13-BM", marketName: "TOSS", marketType: "bookmaker", isActive: false, gameOver: true },
+      {
+        eventId: 13,
+        marketId: "4.13-BM",
+        marketName: "TOSS",
+        marketType: "bookmaker",
+        isActive: false,
+        gameOver: true,
+      },
     ]),
     ["1.10"],
   );
@@ -1818,9 +1855,30 @@ test("event lifecycle requires consecutive terminal evidence and supports dry-ru
 test("active primary markets override historical terminal and TOSS records", () => {
   assert.deepEqual(
     primaryMarketLifecycle([
-      { eventId: 20, marketId: "1.20", marketName: "Match Odds", marketType: "match-odd", isActive: true, gameOver: false },
-      { eventId: 20, marketId: "4.20-BM", marketName: "Bookmaker", marketType: "bookmaker", isActive: false, gameOver: true },
-      { eventId: 20, marketId: "4.21-BM", marketName: "TOSS", marketType: "bookmaker", isActive: false, gameOver: true },
+      {
+        eventId: 20,
+        marketId: "1.20",
+        marketName: "Match Odds",
+        marketType: "match-odd",
+        isActive: true,
+        gameOver: false,
+      },
+      {
+        eventId: 20,
+        marketId: "4.20-BM",
+        marketName: "Bookmaker",
+        marketType: "bookmaker",
+        isActive: false,
+        gameOver: true,
+      },
+      {
+        eventId: 20,
+        marketId: "4.21-BM",
+        marketName: "TOSS",
+        marketType: "bookmaker",
+        isActive: false,
+        gameOver: true,
+      },
     ]),
     [{ eventId: 20, active: true, terminalMarketId: null }],
   );
@@ -1833,11 +1891,32 @@ test("a corrected active discovery pass cancels a pending terminal decision", ()
   process.env.EVENT_TERMINAL_DRY_RUN = "false";
   lifecycle.resetForTests();
   const terminal = primaryMarketLifecycle([
-    { eventId: 30, marketId: "1.30", marketName: "Match Odds", marketType: "match-odd", isActive: false, gameOver: true },
+    {
+      eventId: 30,
+      marketId: "1.30",
+      marketName: "Match Odds",
+      marketType: "match-odd",
+      isActive: false,
+      gameOver: true,
+    },
   ])[0];
-  assert.equal(lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: Boolean(terminal.terminalMarketId) }).execute, false);
+  assert.equal(
+    lifecycle.observe({
+      eventId: 30,
+      source: "market-discovery",
+      terminal: Boolean(terminal.terminalMarketId),
+    }).execute,
+    false,
+  );
   const corrected = primaryMarketLifecycle([
-    { eventId: 30, marketId: "1.30", marketName: "Match Odds", marketType: "match-odd", isActive: true, gameOver: false },
+    {
+      eventId: 30,
+      marketId: "1.30",
+      marketName: "Match Odds",
+      marketType: "match-odd",
+      isActive: true,
+      gameOver: false,
+    },
   ])[0];
   lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: !corrected.active });
   assert.equal(lifecycle.observe({ eventId: 30, source: "market-discovery", terminal: true }).execute, false);
@@ -1880,7 +1959,10 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(eventSource, /lifecycle\.isConfirmed\(event\.eventId\)/);
   assert.match(eventSource, /redis\.writeDiscoveryEvents/);
   assert.match(discoverySource, /redisStore\.getDiscoveryEvents/);
-  assert.match(eventSource, /const cacheableEvents = effectiveEvents\.filter\(\(event\) => !event\.gameOver\)/);
+  assert.match(
+    eventSource,
+    /const cacheableEvents = effectiveEvents\.filter\(\(event\) => !event\.gameOver\)/,
+  );
   assert.match(eventSource, /terminalDryRun[\s\S]*effectiveEvents\.filter\(\(event\) => !event\.gameOver\)/);
   assert.match(eventSource, /dryRunCandidates/);
 });

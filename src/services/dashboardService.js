@@ -112,9 +112,17 @@ function eventOnlyDashboardEntry(event) {
   };
 }
 
-function activeMatchEntryFromCache(event, snapshot) {
+function canRemainWithoutMarket(event, now = Date.now()) {
+  if (event?.inPlay) return false;
+  const openTime = Date.parse(event?.openDate);
+  return !Number.isFinite(openTime) || openTime > now;
+}
+
+function activeMatchEntryFromCache(event, snapshot, now = Date.now()) {
   const row = cachedDashboardRow(event, snapshot);
-  return (row ? dashboardEntry(row, snapshot) : null) || eventOnlyDashboardEntry(event);
+  const entry = row ? dashboardEntry(row, snapshot) : null;
+  if (entry) return entry;
+  return canRemainWithoutMarket(event, now) ? eventOnlyDashboardEntry(event) : null;
 }
 
 function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {
@@ -127,8 +135,9 @@ function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()
     })
     .map((event) => {
       const snapshot = snapshots.get(String(event.eventId));
-      return activeMatchEntryFromCache(event, snapshot);
+      return activeMatchEntryFromCache(event, snapshot, now);
     })
+    .filter(Boolean)
     .sort(compareDashboardEntries);
 }
 
@@ -181,7 +190,8 @@ async function activeMatchesFromRedis(sportId, timings) {
     return compact
       .filter((entry) => {
         const openTime = Date.parse(entry?.openDate);
-        return !Number.isFinite(openTime) || openTime >= oldest;
+        const recentEnough = !Number.isFinite(openTime) || openTime >= oldest;
+        return recentEnough && (entry?.marketId || canRemainWithoutMarket(entry));
       })
       .sort(compareDashboardEntries);
   }
@@ -234,6 +244,7 @@ module.exports = {
   cachedDashboardRow,
   eventOnlyDashboardEntry,
   activeMatchEntryFromCache,
+  canRemainWithoutMarket,
   dashboardEntry,
   compareDashboardEntries,
   openDateValue,

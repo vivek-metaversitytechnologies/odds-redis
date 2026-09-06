@@ -100,6 +100,7 @@ async function reconcileActiveMatchProjection(redis, sportId, rows) {
   for (const event of rows) {
     const eventId = String(event.eventId);
     let entry = null;
+    const emptyProjection = activeMatchProjection(event, null);
     const payload = eventPayloadCache.get(eventId);
     if (payload) entry = activeMatchProjection(event, payload);
     if (!entry && existing[eventId]) {
@@ -116,8 +117,10 @@ async function reconcileActiveMatchProjection(redis, sportId, rows) {
         entry = null;
       }
     }
-    entry ||= activeMatchProjection(event, null);
-    transaction.hSet(key, eventId, JSON.stringify(entry));
+    if (entry && !entry.marketId && !emptyProjection) entry = null;
+    entry ||= emptyProjection;
+    if (entry) transaction.hSet(key, eventId, JSON.stringify(entry));
+    else transaction.hDel(key, eventId);
   }
   const staleFields = Object.keys(existing).filter((field) => field !== "_meta" && !activeIds.has(field));
   if (staleFields.length) transaction.hDel(key, staleFields);
@@ -1132,7 +1135,8 @@ async function writeTicks(items) {
       const transaction = redis.multi().set(key, serialized, { EX: EVENT_TTL_SECONDS });
       if (event) {
         const entry = activeMatchProjection(event, payload);
-        transaction.hSet(activeMatchKey(event.sportId), eventId, JSON.stringify(entry));
+        if (entry) transaction.hSet(activeMatchKey(event.sportId), eventId, JSON.stringify(entry));
+        else transaction.hDel(activeMatchKey(event.sportId), eventId);
         transaction.expire(activeMatchKey(event.sportId), ACTIVE_MATCH_TTL_SECONDS);
       }
       await transaction.exec();
