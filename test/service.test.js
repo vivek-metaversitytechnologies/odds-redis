@@ -492,10 +492,11 @@ test("active suspended fancies remain eligible for vendor subscription", () => {
   assert.match(source, /COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
 });
 
-test("active suspended fancies remain eligible for vendor result polling", () => {
+test("only recently inactive open fancies are eligible for vendor result polling", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
-  assert.doesNotMatch(source, /NOT IN \('SUSPENDED','CLOSED'\)/);
-  assert.match(source, /f\.isactive=\? AND COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
+  assert.match(source, /WHERE f\.isactive=\? AND UPPER\(f\.status\)=\?/);
+  assert.match(source, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
+  assert.match(source, /\[false, "OPEN", \.\.\.sportIds, limit\]/);
 });
 
 test("bounded result polling cannot starve fancy candidates", () => {
