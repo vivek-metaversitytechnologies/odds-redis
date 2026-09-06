@@ -92,7 +92,9 @@ async function fetchActiveMarkets() {
   // configured future horizon. Historical/far-future rows must not flood the
   // provider control endpoint.
   const [rows] = await getSourcePool().query(
-    `SELECT m.* FROM t_market m INNER JOIN t_event e ON e.eventid=m.eventid
+    `SELECT m.*,
+       CAST((COALESCE(e.in_play,0)=1 OR COALESCE(m.inplay,0)=1) AS UNSIGNED) AS inplay
+     FROM t_market m INNER JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
        AND e.isactive = ?
        AND (e.open_date IS NULL OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
@@ -106,7 +108,8 @@ async function fetchActiveMarkets() {
   const [fancyRows] = await getSourcePool().query(
     `SELECT f.*, f.fancyid AS marketid, f.name AS marketname,
        COALESCE(f.sportid,e.sportid) AS sportid, e.eventname AS matchname,
-       e.open_date AS opendate, e.in_play AS inplay
+       e.open_date AS opendate,
+       CAST((COALESCE(e.in_play,0)=1 OR COALESCE(f.isplay,0)=1) AS UNSIGNED) AS inplay
      FROM t_matchfancy f INNER JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${sportIds.map(() => "?").join(",")})
        AND e.isactive=?

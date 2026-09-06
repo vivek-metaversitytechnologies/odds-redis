@@ -4,11 +4,13 @@ class Market {
   }
 
   static fromRow(row) {
+    const bitNumber = (value) => (Buffer.isBuffer(value) ? Number(value[0] || 0) : Number(value || 0));
     return new Market({
       ...row,
       updatedOn: row.updatedon,
       betDelay: row.betdelay,
-      inPlay: row.inplay,
+      inplay: bitNumber(row.inplay),
+      inPlay: bitNumber(row.inplay),
       minBetRate: row.minbetrate ?? 0,
       maxBetRate: row.maxbetrate ?? 0,
       isRedisUpdated: row.is_redis_updated,

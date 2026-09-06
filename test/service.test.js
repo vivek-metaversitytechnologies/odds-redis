@@ -558,6 +558,12 @@ test("database rows map to API event fields", () => {
   assert.equal(event.channelId, "cricket");
 });
 
+test("database BIT values map to numeric market in-play state", () => {
+  const market = Market.fromRow({ marketid: "1.2", inplay: Buffer.from([1]) });
+  assert.equal(market.inplay, 1);
+  assert.equal(market.inPlay, 1);
+});
+
 test("dashboard entries use first prices from the consolidated event snapshot", () => {
   const entry = dashboardEntry(
     {
