@@ -116,7 +116,7 @@ async function fetchActiveMarkets() {
        AND (e.open_date IS NULL OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
        AND (COALESCE(e.in_play,0)=1 OR e.open_date IS NULL
          OR e.open_date <= DATE_ADD(NOW(), INTERVAL ${futureHours} HOUR))
-       AND COALESCE(UPPER(f.status),'') NOT IN ('SUSPENDED','CLOSED')
+       AND COALESCE(UPPER(f.status),'') <> 'CLOSED'
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
      ORDER BY CASE WHEN COALESCE(f.sportid,e.sportid)=${cricketSportId} THEN 0 ELSE 1 END,
        COALESCE(e.in_play,0) DESC, e.open_date ASC, f.id DESC`,

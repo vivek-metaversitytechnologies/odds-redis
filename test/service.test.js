@@ -485,6 +485,18 @@ test("market subscription batches retain cricket priority", () => {
   assert.match(source, /CASE WHEN COALESCE\(f\.sportid,e\.sportid\)=.*THEN 0 ELSE 1 END/);
 });
 
+test("active suspended fancies remain eligible for vendor subscription", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketSync.js"), "utf8");
+  assert.doesNotMatch(source, /NOT IN \('SUSPENDED','CLOSED'\)/);
+  assert.match(source, /COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
+});
+
+test("active suspended fancies remain eligible for vendor result polling", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
+  assert.doesNotMatch(source, /NOT IN \('SUSPENDED','CLOSED'\)/);
+  assert.match(source, /f\.isactive=\? AND COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
+});
+
 test("market discovery delegates subscription reconciliation to its standalone cron", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
   assert.doesNotMatch(source, /syncMarketSubscriptions\s*\(/);
