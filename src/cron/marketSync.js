@@ -176,7 +176,11 @@ async function syncMarketSubscriptions(lane = "active") {
       record("batch.started", { batch: index + 1, size: batch.length, tier });
       try {
         const result = await subscriptions.subscribeMarkets(batch, { scheduleRetry: false });
-        const subscribedIds = Array.isArray(result.subscribed) ? result.subscribed : [];
+        const subscribedIds = Array.isArray(result.attached)
+          ? result.attached
+          : Array.isArray(result.subscribed)
+            ? result.subscribed
+            : [];
         const skippedIds = Array.isArray(result.skipped) ? result.skipped : [];
         subscribedIds.forEach((id) => activeMarketIds.add(id));
         accepted.push(...subscribedIds);

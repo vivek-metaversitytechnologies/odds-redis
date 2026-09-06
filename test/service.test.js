@@ -1769,7 +1769,7 @@ test("fancy settlement values follow the Java-compatible contract", () => {
   assert.equal(fancyResultValue("4.1-F2", "Abandoned"), null);
 });
 
-test("provider acknowledgement excludes skipped markets from subscription", () => {
+test("provider acknowledgement attaches explicitly skipped existing registrations", () => {
   assert.deepEqual(
     normalizeProviderAcknowledgement(
       {
@@ -1781,6 +1781,7 @@ test("provider acknowledgement excludes skipped markets from subscription", () =
     {
       subscribed: ["1.2"],
       skipped: ["BM-1", "missing"],
+      attached: ["1.2", "BM-1"],
       providerResponse: { subscribed: ["1.2"], skipped: ["BM-1"] },
     },
   );

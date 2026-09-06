@@ -181,7 +181,7 @@ async function closeProviderRequests() {
   await providerLimiter.stop({ dropWaitingJobs: true, dropErrorMessage: "Provider client is shutting down" });
 }
 
-function postIds(path, ids) {
+function postIds(path, ids, timeoutName = "PROVIDER_SUBSCRIBE_TIMEOUT_MS", defaultTimeoutMs = 5000) {
   if (!Array.isArray(ids) || !ids.length) return null;
   // Subscription control is latency-sensitive and must not sit behind the much
   // larger discovery queue. Bottleneck priority 1 runs before default priority 5.
@@ -194,7 +194,7 @@ function postIds(path, ids) {
     body: { data: ids },
     priority: 1,
     retries: 0,
-    timeoutMs: integer("PROVIDER_SUBSCRIBE_TIMEOUT_MS", 5000, { min: 1000 }),
+    timeoutMs: integer(timeoutName, defaultTimeoutMs, { min: 1000 }),
   });
 }
 
@@ -212,5 +212,11 @@ module.exports = {
   // Results must not sit behind the much larger discovery queue indefinitely.
   results: (body) => request("/v1/markets/results", { method: "POST", body, priority: 2 }),
   subscribe: (ids) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids),
-  unsubscribe: (ids) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids),
+  unsubscribe: (ids) =>
+    postIds(
+      process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe",
+      ids,
+      "PROVIDER_UNSUBSCRIBE_TIMEOUT_MS",
+      15000,
+    ),
 };

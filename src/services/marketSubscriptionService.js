@@ -57,7 +57,11 @@ function normalizeProviderAcknowledgement(response, requested) {
     : [];
   const skippedSet = new Set(explicitSkipped);
   for (const id of requested) if (!subscribedSet.has(id)) skippedSet.add(id);
-  return { subscribed, skipped: [...skippedSet], providerResponse: response };
+  const skipped = [...skippedSet];
+  // The provider uses `skipped` for IDs that are already registered. They still
+  // need to be attached to a replacement socket after a process restart.
+  const attached = [...new Set([...subscribed, ...explicitSkipped])];
+  return { subscribed, skipped, attached, providerResponse: response };
 }
 
 async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
@@ -72,9 +76,10 @@ async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
   if (!marketIds.length) return { subscribed: [], skipped: [] };
   const response = await provider.subscribe(marketIds);
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
-  websocket.subscribeMarkets(acknowledgement.subscribed);
-  acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
-  queueSkippedMarkets(acknowledgement.skipped, { schedule: scheduleRetry });
+  websocket.subscribeMarkets(acknowledgement.attached);
+  acknowledgement.attached.forEach((id) => skippedMarketIds.delete(id));
+  const unresolved = acknowledgement.skipped.filter((id) => !acknowledgement.attached.includes(id));
+  queueSkippedMarkets(unresolved, { schedule: scheduleRetry });
   return acknowledgement;
 }
 
