@@ -99,6 +99,7 @@ const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
 const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
 const { pipelineCheck } = require("../src/services/healthSupervisor");
 const { getProviderRateLimitStatus, isVendorRateLimitResponse } = require("../src/services/providerApi");
+const { minuteId, parseBucket } = require("../src/services/providerMetrics");
 
 test("provider limiter stays below the vendor rolling-window cap", () => {
   const limit = getProviderRateLimitStatus();
@@ -118,6 +119,21 @@ test("provider limiter recognizes the vendor temporary IP block", () => {
     true,
   );
   assert.equal(isVendorRateLimitResponse(403, "Forbidden"), false);
+});
+
+test("provider metrics aggregate Redis minute fields by endpoint", () => {
+  assert.equal(minuteId("2026-09-06T10:25:50.000Z"), "202609061025");
+  assert.deepEqual(
+    parseBucket("202609061025", {
+      "POST|/v1/markets|attempts": "3",
+      "POST|/v1/markets|succeeded": "2",
+      "POST|/v1/markets|aborted": "1",
+    }),
+    {
+      minute: "202609061025",
+      endpoints: { "POST /v1/markets": { attempts: 3, succeeded: 2, aborted: 1 } },
+    },
+  );
 });
 
 test("database deadlocks are recognized and retried with a bounded attempt count", async () => {

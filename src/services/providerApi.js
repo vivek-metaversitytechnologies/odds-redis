@@ -1,6 +1,7 @@
 const { writeProviderLog } = require("../utils/providerFileLogger");
 const Bottleneck = require("bottleneck");
 const { integer } = require("../config/env");
+const providerMetrics = require("./providerMetrics");
 
 const VENDOR_WINDOW_MS = 20000;
 const VENDOR_WINDOW_CAP = 1000;
@@ -51,6 +52,7 @@ function startRequestAttempt(method, url) {
   };
   requestAttempts.push(entry);
   requestLifetime.attempts += 1;
+  providerMetrics.recordAttempt(entry.startedAt, method, entry.route);
   pruneRequestAttempts(entry.startedAt);
   return entry;
 }
@@ -67,6 +69,7 @@ function finishRequestAttempt(entry, { status = null, error } = {}) {
     requestLifetime.failed += 1;
     if (entry.outcome === "aborted") requestLifetime.aborted += 1;
   }
+  providerMetrics.recordOutcome(entry.startedAt, entry.method, entry.route, entry.outcome, entry.durationMs);
 }
 
 function requestWindow(windowMs, now = Date.now()) {

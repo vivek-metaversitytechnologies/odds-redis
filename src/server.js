@@ -15,6 +15,7 @@ const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
+const providerMetrics = require("./services/providerMetrics");
 const { runStartupPreflight } = require("./services/startupPreflight");
 const { startHealthSupervisor, stopHealthSupervisor } = require("./services/healthSupervisor");
 
@@ -88,6 +89,7 @@ async function startServer() {
       // Requests owned by the outgoing process must not keep PM2 waiting through
       // provider timeouts and retries. The replacement process establishes fresh work.
       await closeProviderRequests();
+      await providerMetrics.stop();
       await subscriptions.stopSkippedRetries();
       websocket.setResultHandler(null);
       await frontendSocket.closeFrontendSocket();

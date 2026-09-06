@@ -23,6 +23,15 @@ function same(value, expected) {
 }
 
 module.exports = {
+  metrics: handler(async (req) => {
+    const minutes = Number(req.query.minutes || 60);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+      const error = new Error("minutes must be an integer between 1 and 1440");
+      error.statusCode = 400;
+      throw error;
+    }
+    return require("../services/providerMetrics").history(minutes);
+  }),
   sports: handler(async () => items(await provider.sports())),
   competitions: handler(async (req) =>
     items(await provider.competitions(req.query)).filter((item) =>
