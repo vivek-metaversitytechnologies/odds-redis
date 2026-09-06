@@ -55,6 +55,16 @@ function isEventTerminalMarketName(name) {
   return normalized === "match odds" || normalized.includes("bookmaker");
 }
 
+function interleaveResultCandidates(markets = [], fancies = []) {
+  const combined = [];
+  const length = Math.max(markets.length, fancies.length);
+  for (let index = 0; index < length; index += 1) {
+    if (markets[index]) combined.push(markets[index]);
+    if (fancies[index]) combined.push(fancies[index]);
+  }
+  return combined;
+}
+
 async function hasExceptionalTable(connection) {
   if (exceptionalTableAvailable != null) return exceptionalTableAvailable;
   const [rows] = await connection.query(
@@ -428,13 +438,18 @@ async function syncResults() {
   state.lastError = null;
   try {
     const candidates = await loadCandidates();
-    const all = [...candidates.markets, ...candidates.fancies];
+    // A bounded run must not let a large regular-market backlog consume every
+    // provider call before the first fancy is reached. Alternate both queues so
+    // each market family receives result-polling capacity on every run.
+    const all = interleaveResultCandidates(candidates.markets, candidates.fancies);
     const batchSize = Math.max(1, Number(process.env.RESULT_BATCH_SIZE || 100));
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
     const batches = [];
     for (let index = 0; index < all.length && batches.length < maxCalls; index += batchSize) {
       batches.push(all.slice(index, index + batchSize).map((market) => market.marketid));
     }
+    const requested = all.slice(0, batches.length * batchSize);
+    const fancyObjects = new Set(candidates.fancies);
     const responses = await Promise.allSettled(batches.map((mids) => provider.results({ mids })));
     const results = responses.flatMap((response) =>
       response.status === "fulfilled" ? responseRows(response.value) : [],
@@ -446,6 +461,8 @@ async function syncResults() {
       regular: candidates.markets.length,
       fancies: candidates.fancies.length,
       calls: batches.length,
+      requestedRegular: requested.filter((market) => !fancyObjects.has(market)).length,
+      requestedFancies: requested.filter((market) => fancyObjects.has(market)).length,
       failedCalls: responses.filter((response) => response.status === "rejected").length,
       results: results.length,
       settled: applied.settled.length,
@@ -488,6 +505,7 @@ function getResultSyncStatus() {
 module.exports = {
   responseRows,
   fancyResultValue,
+  interleaveResultCandidates,
   isEventTerminalMarketName,
   loadCandidates,
   handleSocketGameOver,

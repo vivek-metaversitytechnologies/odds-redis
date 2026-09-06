@@ -98,6 +98,7 @@ const {
   responseRows: resultRows,
   fancyResultValue,
   isEventTerminalMarketName,
+  interleaveResultCandidates,
 } = require("../src/cron/resultSync");
 const { integer, boolean, csvIntegers } = require("../src/config/env");
 const { setBounded } = require("../src/utils/boundedMap");
@@ -495,6 +496,15 @@ test("active suspended fancies remain eligible for vendor result polling", () =>
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   assert.doesNotMatch(source, /NOT IN \('SUSPENDED','CLOSED'\)/);
   assert.match(source, /f\.isactive=\? AND COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
+});
+
+test("bounded result polling cannot starve fancy candidates", () => {
+  const regular = [{ marketid: "r1" }, { marketid: "r2" }, { marketid: "r3" }];
+  const fancies = [{ marketid: "f1" }, { marketid: "f2" }, { marketid: "f3" }];
+  assert.deepEqual(
+    interleaveResultCandidates(regular, fancies).map((market) => market.marketid),
+    ["r1", "f1", "r2", "f2", "r3", "f3"],
+  );
 });
 
 test("market discovery delegates subscription reconciliation to its standalone cron", () => {
