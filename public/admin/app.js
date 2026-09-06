@@ -44,15 +44,129 @@ function pipelineErrors(pipelines = {}) {
     return error ? [`${label}: ${error}`] : [];
   });
 }
+const vendorSeries = [
+  { key: "POST /v1/markets", label: "Markets", color: "#2563eb" },
+  { key: "GET /v1/markets/:marketId/runners", label: "Runners", color: "#7c3aed" },
+  { key: "POST /v1/unsubscribe", label: "Unsubscribe", color: "#d97706" },
+  { key: "POST /v1/subscribe", label: "Subscribe", color: "#059669" },
+  { key: "other", label: "Other", color: "#94a3b8" },
+];
+let lastVendorMetrics;
+function vendorMinuteLabel(value) {
+  return `${value.slice(8, 10)}:${value.slice(10, 12)}`;
+}
+function renderVendorLegend() {
+  const legend = $("#vendorChartLegend");
+  if (legend.children.length) return;
+  [...vendorSeries, { label: "Aborted", color: "#dc2626", line: true }].forEach((series) => {
+    const item = document.createElement("span");
+    item.innerHTML = `<i style="background:${series.color};height:${series.line ? "2px" : "10px"}"></i>${series.label}`;
+    legend.appendChild(item);
+  });
+}
+function vendorChartRows(metrics) {
+  const known = new Set(vendorSeries.filter((series) => series.key !== "other").map((series) => series.key));
+  return (metrics.buckets || []).map((bucket) => {
+    const row = { minute: bucket.minute, aborted: 0, other: 0 };
+    vendorSeries.forEach((series) => {
+      if (series.key !== "other") row[series.key] = bucket.endpoints?.[series.key]?.attempts || 0;
+    });
+    Object.entries(bucket.endpoints || {}).forEach(([endpoint, values]) => {
+      row.aborted += values.aborted || 0;
+      if (!known.has(endpoint)) row.other += values.attempts || 0;
+    });
+    row.total = vendorSeries.reduce((sum, series) => sum + (row[series.key] || 0), 0);
+    return row;
+  });
+}
+function drawVendorChart(metrics) {
+  lastVendorMetrics = metrics;
+  renderVendorLegend();
+  const canvas = $("#vendorChart");
+  const rows = vendorChartRows(metrics);
+  const hasData = rows.some((row) => row.total || row.aborted);
+  const context = canvas.getContext("2d");
+  const width = Math.max(320, canvas.parentElement.clientWidth);
+  const height = 320;
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  context.scale(ratio, ratio);
+  context.clearRect(0, 0, width, height);
+  if (!hasData) {
+    context.fillStyle = "#64748b";
+    context.font = "13px sans-serif";
+    context.fillText("No vendor request history recorded yet.", 16, 32);
+    $("#vendorChartStatus").textContent = "Waiting for the first Redis metrics bucket.";
+    return;
+  }
+  const margin = { top: 15, right: 18, bottom: 38, left: 52 };
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+  const maximum = Math.max(10, ...rows.map((row) => row.total));
+  const ceiling = Math.ceil(maximum / 50) * 50;
+  const xStep = plotWidth / rows.length;
+  const barWidth = Math.max(2, xStep * 0.72);
+  context.font = "11px sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  for (let index = 0; index <= 4; index += 1) {
+    const value = (ceiling / 4) * index;
+    const y = margin.top + plotHeight - (value / ceiling) * plotHeight;
+    context.strokeStyle = "#e2e8f0";
+    context.beginPath();
+    context.moveTo(margin.left, y);
+    context.lineTo(width - margin.right, y);
+    context.stroke();
+    context.fillStyle = "#64748b";
+    context.fillText(String(Math.round(value)), margin.left - 8, y);
+  }
+  rows.forEach((row, index) => {
+    const x = margin.left + index * xStep + (xStep - barWidth) / 2;
+    let bottom = margin.top + plotHeight;
+    vendorSeries.forEach((series) => {
+      const value = row[series.key] || 0;
+      const segmentHeight = (value / ceiling) * plotHeight;
+      context.fillStyle = series.color;
+      context.fillRect(x, bottom - segmentHeight, barWidth, segmentHeight);
+      bottom -= segmentHeight;
+    });
+  });
+  context.strokeStyle = "#dc2626";
+  context.lineWidth = 2;
+  context.beginPath();
+  rows.forEach((row, index) => {
+    const x = margin.left + index * xStep + xStep / 2;
+    const y = margin.top + plotHeight - (row.aborted / ceiling) * plotHeight;
+    if (index === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  });
+  context.stroke();
+  context.fillStyle = "#64748b";
+  context.textAlign = "center";
+  context.textBaseline = "top";
+  const tickEvery = Math.max(1, Math.ceil(rows.length / (width < 600 ? 5 : 10)));
+  rows.forEach((row, index) => {
+    if (index % tickEvery !== 0 && index !== rows.length - 1) return;
+    context.fillText(vendorMinuteLabel(row.minute), margin.left + index * xStep + xStep / 2, height - 27);
+  });
+  const attempts = rows.reduce((sum, row) => sum + row.total, 0);
+  const aborted = rows.reduce((sum, row) => sum + row.aborted, 0);
+  $("#vendorChartStatus").textContent =
+    `${attempts.toLocaleString()} attempts · ${aborted.toLocaleString()} aborted · UTC minute buckets`;
+}
 async function refresh() {
   const button = $("#refresh");
   button.disabled = true;
   button.textContent = "Refreshing…";
   try {
-    const [health, counts, redis] = await Promise.all([
+    const [health, counts, redis, vendorMetrics] = await Promise.all([
       request("/health"),
       request("/api/source/overview"),
       request("/api/redis/ticks?limit=250"),
+      request("/api/provider/metrics?minutes=60"),
     ]);
     const ws = health.websocket || {};
     const ready = health.sourceDatabase === "connected" && health.redis?.connected && ws.connected;
@@ -101,6 +215,7 @@ async function refresh() {
     $("#providerQueued").textContent = providerQueue.QUEUED || 0;
     $("#providerRunning").textContent =
       `${providerQueue.RUNNING || 0} running · ${providerQueue.EXECUTING || 0} executing`;
+    drawVendorChart(vendorMetrics);
     $("#updatedAt").textContent = `Updated ${new Date().toLocaleTimeString()} · Refreshes every 15 seconds`;
   } catch (error) {
     $("#overallState").className = "dashboard-alert error";
@@ -116,3 +231,9 @@ $("#adminKey").value = sessionStorage.getItem("se-admin-key") || "";
 $("#refresh").addEventListener("click", refresh);
 void refresh();
 setInterval(refresh, 15000);
+window.addEventListener("resize", () => {
+  clearTimeout(window.vendorChartResizeTimer);
+  window.vendorChartResizeTimer = setTimeout(() => {
+    if (lastVendorMetrics) drawVendorChart(lastVendorMetrics);
+  }, 150);
+});

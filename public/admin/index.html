@@ -99,6 +99,23 @@
             </article>
           </section>
         </section>
+        <section class="dashboard-card">
+          <div class="card-head">
+            <div>
+              <p class="section-label">Last 60 minutes</p>
+              <h2>Vendor API requests</h2>
+              <span id="vendorChartStatus">Loading historical request metrics…</span>
+            </div>
+          </div>
+          <div class="vendor-chart-legend" id="vendorChartLegend"></div>
+          <div class="vendor-chart-wrap">
+            <canvas
+              id="vendorChart"
+              role="img"
+              aria-label="Vendor API requests per minute by endpoint"
+            ></canvas>
+          </div>
+        </section>
         <p id="updatedAt" class="dashboard-updated">Not refreshed yet</p>
       </main>
     </div>
