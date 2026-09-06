@@ -8,6 +8,7 @@ const {
   bookmakerPayload,
   oddsPayload,
   fancyPayload,
+  ballByBallMetadata,
   payloadGroup,
   emptyEventPayload,
   runnerPrices,
@@ -1623,12 +1624,23 @@ test("fancy ticks and market suffixes map to frontend groups", () => {
   ]);
 });
 
-test("ball-by-ball socket ticks retain the numbered discovery name", () => {
+test("ball-by-ball socket ticks expose the discovery ball line separately from the name", () => {
   const output = fancyPayload(
     { mid: "4.1-BB", na: "Ball Run SB", r: [{ na: "Ball Run SB", b: 1, l: 2 }] },
     { marketname: "29 Ball Run SB", mtype: "ball-by-ball", isactive: 1 },
   );
-  assert.equal(output.nation, "29 Ball Run SB");
+  assert.equal(output.nation, "Ball Run SB");
+  assert.equal(output.ballLine, 29);
+  assert.equal(output.difference, 29);
+  assert.equal(output.srno, "29");
+});
+
+test("ball-by-ball metadata splits a decimal ball line from its durable database name", () => {
+  assert.deepEqual(ballByBallMetadata("0.5 Ball Run BW"), {
+    ballLine: 0.5,
+    name: "Ball Run BW",
+  });
+  assert.deepEqual(ballByBallMetadata("BallByBall"), { ballLine: null, name: null });
 });
 
 test("legacy F3 Redis rows migrate from OtherMarket to Fancy3", () => {

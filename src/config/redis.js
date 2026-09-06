@@ -530,6 +530,18 @@ function numberOr(value, fallback = null) {
   return value == null || value === "" || Number.isNaN(Number(value)) ? fallback : Number(value);
 }
 
+function ballByBallMetadata(value) {
+  const storedName = String(value || "").trim();
+  const match = storedName.match(/^(\d+(?:\.\d+)?)\s+(.+)$/);
+  if (!match) {
+    return {
+      ballLine: null,
+      name: /^ball\s*by\s*ball$/i.test(storedName) ? null : storedName || null,
+    };
+  }
+  return { ballLine: Number(match[1]), name: match[2].trim() || null };
+}
+
 function booleanOr(value, fallback = null) {
   if (value == null) return fallback;
   if (Buffer.isBuffer(value)) return value.length ? value[0] !== 0 : fallback;
@@ -655,12 +667,16 @@ function fancyPayload(item, market) {
     .toUpperCase()
     .includes("-CC");
   const casinoRate = cricketCasino ? numberOr(runner.ra ?? item.ra) : null;
-  const difference = numberOr(item.d ?? item.di ?? item.srno ?? runner.d ?? runner.di ?? runner.srno);
+  const ballMetadata = ballByBall ? ballByBallMetadata(market.marketname) : null;
+  const difference = numberOr(
+    item.d ?? item.di ?? item.srno ?? runner.d ?? runner.di ?? runner.srno,
+    ballMetadata?.ballLine ?? null,
+  );
   return {
     mid: String(item.mid),
     sid: String(runner.rid ?? item.mid),
     nation: ballByBall
-      ? market.marketname || runner.na || item.na || null
+      ? ballMetadata?.name || runner.na || item.na || market.marketname || null
       : (runner.na ?? item.na ?? market.marketname ?? null),
     b1: numberOr(runner.b ?? runner.b1 ?? item.b ?? item.b1, casinoRate),
     l1: numberOr(runner.l ?? runner.l1 ?? item.l ?? item.l1),
@@ -673,6 +689,7 @@ function fancyPayload(item, market) {
     difference,
     d: difference,
     di: difference,
+    ...(ballByBall ? { ballLine: difference } : {}),
     gameover: booleanOr(item.go, false),
     s: booleanOr(item.s, true),
     maxBet: numberOr(market.maxbet),
@@ -1397,6 +1414,7 @@ module.exports = {
   bookmakerPayload,
   oddsPayload,
   fancyPayload,
+  ballByBallMetadata,
   payloadGroup,
   runnerPrices,
   transformedTick,
