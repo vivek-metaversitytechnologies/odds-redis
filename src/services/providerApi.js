@@ -23,7 +23,9 @@ let blockedUntil = 0;
 
 function isVendorRateLimitResponse(status, body) {
   const message = typeof body === "string" ? body : JSON.stringify(body || "");
-  return status === 429 || (status === 403 && /temporarily blocked|exceed(?:ed|ing).*requests/i.test(message));
+  return (
+    status === 429 || (status === 403 && /temporarily blocked|exceed(?:ed|ing).*requests/i.test(message))
+  );
 }
 
 async function waitForVendorCooldown() {
@@ -84,10 +86,7 @@ function loggedPayload(value) {
   return { truncated: true, originalCharacters: serialized.length, preview: serialized.slice(0, maxLength) };
 }
 
-async function request(
-  path,
-  { method = "GET", query, body, retries = 2, priority = 5, timeoutMs } = {},
-) {
+async function request(path, { method = "GET", query, body, retries = 2, priority = 5, timeoutMs } = {}) {
   if (shuttingDown) throw new Error("Provider client is shutting down");
   const url = providerUrl(path, query);
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -194,8 +193,8 @@ function postIds(path, ids) {
     method: "POST",
     body: { data: ids },
     priority: 1,
-    retries: 1,
-    timeoutMs: integer("PROVIDER_SUBSCRIBE_TIMEOUT_MS", 15000, { min: 1000 }),
+    retries: 0,
+    timeoutMs: integer("PROVIDER_SUBSCRIBE_TIMEOUT_MS", 5000, { min: 1000 }),
   });
 }
 

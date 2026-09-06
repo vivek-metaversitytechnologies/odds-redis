@@ -12,6 +12,7 @@ let retryPromise = null;
 let unsubscribeRetryTimer = null;
 let unsubscribePromise = null;
 let retriesStopped = false;
+let consecutiveFailedRetryRuns = 0;
 const retryState = {
   attempts: 0,
   lastAttemptAt: null,
@@ -22,7 +23,23 @@ const retryState = {
 };
 
 function getRetryDelayMs() {
-  return integer("PROVIDER_SKIPPED_RETRY_MS", 1000, { min: 100 });
+  const base = integer("PROVIDER_SKIPPED_RETRY_MS", 5000, { min: 100 });
+  const maximum = integer("PROVIDER_SKIPPED_RETRY_MAX_MS", 60000, { min: base });
+  return Math.min(maximum, base * 2 ** Math.min(consecutiveFailedRetryRuns, 6));
+}
+
+function providerBatchSize() {
+  return integer("PROVIDER_SUBSCRIPTION_BATCH_SIZE", 5, { min: 1, max: 20 });
+}
+
+function queueSkippedMarkets(ids, { schedule = true } = {}) {
+  for (const id of ids || []) {
+    const marketId = String(id);
+    if (redisStore.validMarketIdentifier(marketId) && !completedMarketIds.has(marketId)) {
+      skippedMarketIds.add(marketId);
+    }
+  }
+  if (schedule) scheduleSkippedRetry();
 }
 
 function normalizeProviderAcknowledgement(response, requested) {
@@ -43,7 +60,7 @@ function normalizeProviderAcknowledgement(response, requested) {
   return { subscribed, skipped: [...skippedSet], providerResponse: response };
 }
 
-async function subscribeMarkets(ids) {
+async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
   const marketIds = [
     ...new Set(
       (ids || [])
@@ -57,8 +74,7 @@ async function subscribeMarkets(ids) {
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
   websocket.subscribeMarkets(acknowledgement.subscribed);
   acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
-  acknowledgement.skipped.forEach((id) => skippedMarketIds.add(id));
-  scheduleSkippedRetry();
+  queueSkippedMarkets(acknowledgement.skipped, { schedule: scheduleRetry });
   return acknowledgement;
 }
 
@@ -82,7 +98,7 @@ async function flushResultUnsubscriptions() {
   const queued = [...pendingResultUnsubscriptions];
   if (!queued.length || retriesStopped) return undefined;
   unsubscribePromise = (async () => {
-    const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
+    const batchSize = providerBatchSize();
     for (let index = 0; index < queued.length && !retriesStopped; index += batchSize) {
       const batch = queued.slice(index, index + batchSize);
       try {
@@ -141,7 +157,7 @@ async function unsubscribeEventMarkets(ids) {
   if (!marketIds.length) return { requested: [], unsubscribed: [] };
   websocket.unsubscribeMarkets(marketIds);
 
-  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
+  const batchSize = providerBatchSize();
   const unsubscribed = [];
   for (let index = 0; index < marketIds.length; index += batchSize) {
     const batch = marketIds.slice(index, index + batchSize);
@@ -165,7 +181,7 @@ async function reconcileProviderSubscriptions(ids) {
     ),
   ];
   if (!marketIds.length) return { requested: 0, unsubscribed: 0 };
-  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
+  const batchSize = providerBatchSize();
   let unsubscribed = 0;
   for (let index = 0; index < marketIds.length; index += batchSize) {
     const batch = marketIds.slice(index, index + batchSize);
@@ -183,7 +199,12 @@ async function reconcileProviderSubscriptions(ids) {
 
 async function refreshMarkets(ids) {
   const marketIds = [
-    ...new Set((ids || []).map(String).map((id) => id.trim()).filter(redisStore.validMarketIdentifier)),
+    ...new Set(
+      (ids || [])
+        .map(String)
+        .map((id) => id.trim())
+        .filter(redisStore.validMarketIdentifier),
+    ),
   ].filter((id) => !completedMarketIds.has(id));
   if (!marketIds.length) return { requested: 0, subscribed: [], skipped: [] };
   await provider.unsubscribe(marketIds);
@@ -225,7 +246,14 @@ async function retrySkippedMarkets() {
   retryState.lastError = null;
   let accepted = 0;
   let skipped = 0;
-  const batchSize = integer("MARKET_SUBSCRIPTION_BATCH_SIZE", 50, { min: 1, max: 100 });
+  const batchSize = providerBatchSize();
+  const maxBatches = integer("MARKET_SUBSCRIPTION_MAX_BATCHES_PER_RUN", 10, { min: 1, max: 100 });
+  const maxFailures = integer("MARKET_SUBSCRIPTION_MAX_CONSECUTIVE_FAILURES", 2, {
+    min: 1,
+    max: 10,
+  });
+  let attemptedBatches = 0;
+  let consecutiveFailures = 0;
 
   logger.info("[MarketSubscription] retrying provider-skipped markets", {
     attempt: retryState.attempts,
@@ -233,9 +261,14 @@ async function retrySkippedMarkets() {
     retryDelayMs: getRetryDelayMs(),
   });
 
-  for (let index = 0; index < queued.length && !retriesStopped; index += batchSize) {
+  for (
+    let index = 0;
+    index < queued.length && !retriesStopped && attemptedBatches < maxBatches;
+    index += batchSize
+  ) {
     const batch = queued.slice(index, index + batchSize).filter((id) => !completedMarketIds.has(id));
     if (!batch.length) continue;
+    attemptedBatches += 1;
     try {
       // A provider "skipped" response can mean the IDs remain registered from an
       // earlier subscription while this socket is not attached to them. Clear that
@@ -251,15 +284,20 @@ async function retrySkippedMarkets() {
       });
       accepted += acknowledgement.subscribed.length;
       skipped += acknowledgement.skipped.length;
+      consecutiveFailures = 0;
     } catch (error) {
       skipped += batch.length;
+      consecutiveFailures += 1;
       retryState.lastError = error.message;
       logger.warn("[MarketSubscription] provider-skipped batch remains queued", {
         error: error.message,
         marketIds: batch,
       });
+      if (consecutiveFailures >= maxFailures) break;
     }
   }
+
+  consecutiveFailedRetryRuns = retryState.lastError ? consecutiveFailedRetryRuns + 1 : 0;
 
   retryState.lastCompletedAt = new Date().toISOString();
   retryState.lastAccepted = accepted;
@@ -281,6 +319,10 @@ function getSkippedRetryStatus() {
     completedMarketIds: [...completedMarketIds],
     pendingResultUnsubscriptions: [...pendingResultUnsubscriptions],
   };
+}
+
+function isSubscriptionRecoveryRunning() {
+  return Boolean(retryPromise || retryTimer);
 }
 
 function startSkippedRetries() {
@@ -309,6 +351,9 @@ async function unsubscribeAll() {
 
 module.exports = {
   subscribeMarkets,
+  queueSkippedMarkets,
+  scheduleSkippedRetry,
+  isSubscriptionRecoveryRunning,
   unsubscribeAll,
   normalizeProviderAcknowledgement,
   getSkippedRetryStatus,
