@@ -1,6 +1,37 @@
 const redis = require("../config/redis");
 const dashboard = require("../services/dashboardService");
 
+const activeMatchCache = new Map();
+const activeMatchLoads = new Map();
+
+function activeMatchCacheMs() {
+  const value = Number(process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS || 350);
+  return Number.isFinite(value) && value >= 0 ? value : 350;
+}
+
+async function loadActiveMatches(sportId, timings) {
+  const cached = activeMatchCache.get(sportId);
+  if (cached && cached.expiresAt > Date.now()) {
+    timings.activeMatchSource = "memory";
+    return cached.data;
+  }
+  if (activeMatchLoads.has(sportId)) {
+    timings.activeMatchSource = "coalesced";
+    return activeMatchLoads.get(sportId);
+  }
+  const loading = dashboard
+    .activeMatchesFromRedis(sportId, timings)
+    .then((data) => {
+      if (data !== null) {
+        activeMatchCache.set(sportId, { data, expiresAt: Date.now() + activeMatchCacheMs() });
+      }
+      return data;
+    })
+    .finally(() => activeMatchLoads.delete(sportId));
+  activeMatchLoads.set(sportId, loading);
+  return loading;
+}
+
 function disableCaching(res) {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.set("Pragma", "no-cache");
@@ -97,7 +128,7 @@ async function activeMatchesRedisOnly(req, res, next) {
         .status(400)
         .json({ status: false, message: "A positive numeric sport ID is required", data: [] });
     }
-    const data = await dashboard.activeMatchesFromRedis(sportId, timings);
+    const data = await loadActiveMatches(sportId, timings);
     timings.controllerMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
     res.set(
       "Server-Timing",
@@ -110,6 +141,9 @@ async function activeMatchesRedisOnly(req, res, next) {
         `snapshots-parse;dur=${(timings.snapshotsParseMs || 0).toFixed(1)}`,
         `transform;dur=${(timings.transformMs || 0).toFixed(1)}`,
         `controller;dur=${timings.controllerMs.toFixed(1)}`,
+        `active-match;desc="${timings.activeMatchSource || "unknown"}"`,
+        `compact-command;dur=${(timings.activeMatchCommandMs || 0).toFixed(1)}`,
+        `compact-parse;dur=${(timings.activeMatchParseMs || 0).toFixed(1)}`,
       ].join(", "),
     );
     if (data === null) {

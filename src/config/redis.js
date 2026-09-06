@@ -14,6 +14,7 @@ const marketCache = new Map();
 const runnerNameCache = new Map();
 const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
+const publicEventMetadata = new Map();
 const tickActivity = new Map();
 const eventLocks = new Map();
 const eventMetadataLocks = new Map();
@@ -21,6 +22,7 @@ const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
 const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 });
 const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 172800, { min: 300 });
 const SCORE_TTL_SECONDS = integer("REDIS_SCORE_TTL_SECONDS", 86400, { min: 60 });
+const ACTIVE_MATCH_TTL_SECONDS = integer("REDIS_ACTIVE_MATCH_TTL_SECONDS", 172800, { min: 300 });
 
 const PAYLOAD_GROUPS = [
   "Odds",
@@ -79,6 +81,50 @@ function discoveryEventMetadataKey(sportId) {
   return `${process.env.REDIS_DISCOVERY_EVENT_METADATA_KEY_PREFIX || "Discovery-Events-Rs:"}${sportId}`;
 }
 
+function activeMatchKey(sportId) {
+  return `${process.env.REDIS_ACTIVE_MATCH_KEY_PREFIX || "ActiveMatches-Rs:"}${sportId}`;
+}
+
+function activeMatchProjection(event, snapshot) {
+  // Loaded lazily to avoid a module-initialization cycle: dashboardService uses this Redis store.
+  const { activeMatchEntryFromCache } = require("../services/dashboardService");
+  return activeMatchEntryFromCache(event, snapshot);
+}
+
+async function reconcileActiveMatchProjection(redis, sportId, rows) {
+  const key = activeMatchKey(sportId);
+  const existing = await redis.hGetAll(key);
+  const activeIds = new Set(rows.map((event) => String(event.eventId)));
+  const transaction = redis.multi();
+  transaction.hSet(key, "_meta", JSON.stringify({ sportId, updatedAt: new Date().toISOString() }));
+  for (const event of rows) {
+    const eventId = String(event.eventId);
+    let entry = null;
+    const payload = eventPayloadCache.get(eventId);
+    if (payload) entry = activeMatchProjection(event, payload);
+    if (!entry && existing[eventId]) {
+      try {
+        entry = {
+          ...JSON.parse(existing[eventId]),
+          matchName: event.eventName ?? null,
+          openDate: event.openDate ?? null,
+          inPlay: Boolean(event.inPlay),
+          matchId: Number(event.eventId),
+          li: event.seriesId == null ? null : Number(event.seriesId),
+        };
+      } catch {
+        entry = null;
+      }
+    }
+    entry ||= activeMatchProjection(event, null);
+    transaction.hSet(key, eventId, JSON.stringify(entry));
+  }
+  const staleFields = Object.keys(existing).filter((field) => field !== "_meta" && !activeIds.has(field));
+  if (staleFields.length) transaction.hDel(key, staleFields);
+  transaction.expire(key, ACTIVE_MATCH_TTL_SECONDS);
+  await transaction.exec();
+}
+
 async function writeEventMetadata(events, sportIds, keyForSport, lockNamespace) {
   const redis = await getRedisClient();
   if (!redis?.isOpen) return { sports: 0, events: 0 };
@@ -114,7 +160,37 @@ async function writeEventMetadata(events, sportIds, keyForSport, lockNamespace) 
 }
 
 async function writeEvents(events, sportIds = []) {
-  return writeEventMetadata(events, sportIds, eventMetadataKey, "public");
+  const result = await writeEventMetadata(events, sportIds, eventMetadataKey, "public");
+  const requestedSports = [...new Set((sportIds || []).map(Number).filter(Number.isInteger))];
+  const bySport = new Map(requestedSports.map((sportId) => [sportId, []]));
+  for (const event of events || []) {
+    const sportId = Number(event?.sportId);
+    if (!bySport.has(sportId)) continue;
+    const normalized = {
+      eventId: Number(event.eventId),
+      eventName: String(event.eventName || "").trim(),
+      sportId,
+      seriesId: Number(event.seriesId),
+      openDate: event.openDate ?? null,
+      inPlay: Boolean(event.inPlay),
+      gameOver: Boolean(event.gameOver),
+    };
+    bySport.get(sportId).push(normalized);
+    publicEventMetadata.set(String(normalized.eventId), normalized);
+  }
+  const activeIds = new Set([...bySport.values()].flat().map((event) => String(event.eventId)));
+  for (const [eventId, event] of publicEventMetadata) {
+    if (requestedSports.includes(event.sportId) && !activeIds.has(eventId)) {
+      publicEventMetadata.delete(eventId);
+    }
+  }
+  const redis = await getRedisClient();
+  if (redis?.isOpen) {
+    await Promise.all(
+      [...bySport].map(([sportId, rows]) => reconcileActiveMatchProjection(redis, sportId, rows)),
+    );
+  }
+  return result;
 }
 
 async function writeDiscoveryEvents(events, sportIds = []) {
@@ -149,6 +225,31 @@ async function getEventMetadata(sportId, keyForSport, timings) {
 
 async function getEvents(sportId, timings) {
   return getEventMetadata(sportId, eventMetadataKey, timings);
+}
+
+async function getActiveMatches(sportId, timings) {
+  const normalized = Number(sportId);
+  if (!Number.isInteger(normalized) || normalized <= 0) return null;
+  const clientStartedAt = process.hrtime.bigint();
+  const redis = await getRedisReadClient();
+  recordDuration(timings, "activeMatchRedisClientMs", clientStartedAt);
+  if (!redis?.isOpen) return null;
+  const commandStartedAt = process.hrtime.bigint();
+  const values = await redis.hGetAll(activeMatchKey(normalized));
+  recordDuration(timings, "activeMatchCommandMs", commandStartedAt);
+  if (!values._meta) return null;
+  const parseStartedAt = process.hrtime.bigint();
+  const entries = [];
+  for (const [field, value] of Object.entries(values)) {
+    if (field === "_meta") continue;
+    try {
+      entries.push(JSON.parse(value));
+    } catch {
+      // Ignore one malformed projection instead of failing the entire active-match response.
+    }
+  }
+  recordDuration(timings, "activeMatchParseMs", parseStartedAt);
+  return entries;
 }
 
 async function getDiscoveryEvents(sportId) {
@@ -1026,7 +1127,16 @@ async function writeTicks(items) {
     }
     moveTiedMatchLast(payload);
     const serialized = changed ? JSON.stringify(payload) : null;
-    if (changed) await redis.set(key, serialized, { EX: EVENT_TTL_SECONDS });
+    if (changed) {
+      const event = publicEventMetadata.get(eventId);
+      const transaction = redis.multi().set(key, serialized, { EX: EVENT_TTL_SECONDS });
+      if (event) {
+        const entry = activeMatchProjection(event, payload);
+        transaction.hSet(activeMatchKey(event.sportId), eventId, JSON.stringify(entry));
+        transaction.expire(activeMatchKey(event.sportId), ACTIVE_MATCH_TTL_SECONDS);
+      }
+      await transaction.exec();
+    }
     setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
     return { payload, changed, serialized };
   });
@@ -1219,7 +1329,11 @@ async function removeEvent(eventId) {
       `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
       `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
     ];
-    await redis.del(keys);
+    const event = publicEventMetadata.get(eventKey);
+    const transaction = redis.multi().del(keys);
+    if (event) transaction.hDel(activeMatchKey(event.sportId), eventKey);
+    await transaction.exec();
+    publicEventMetadata.delete(eventKey);
     eventPayloadCache.delete(eventKey);
     return true;
   });
@@ -1251,6 +1365,7 @@ module.exports = {
   getScore,
   writeEvents,
   getEvents,
+  getActiveMatches,
   writeDiscoveryEvents,
   getDiscoveryEvents,
   removeEventsFromMetadata,

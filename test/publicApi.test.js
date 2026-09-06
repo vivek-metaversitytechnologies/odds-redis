@@ -26,10 +26,13 @@ test("public API rejects an invalid listen port", () => {
 test("active-match response exposes its Redis and application timings", async (t) => {
   const originalGetEvents = redis.getEvents;
   const originalGetEventSnapshots = redis.getEventSnapshots;
+  const originalGetActiveMatches = redis.getActiveMatches;
   t.after(() => {
     redis.getEvents = originalGetEvents;
     redis.getEventSnapshots = originalGetEventSnapshots;
+    redis.getActiveMatches = originalGetActiveMatches;
   });
+  redis.getActiveMatches = async () => null;
   redis.getEvents = async () => [];
   redis.getEventSnapshots = async () => new Map();
 

@@ -112,6 +112,11 @@ function eventOnlyDashboardEntry(event) {
   };
 }
 
+function activeMatchEntryFromCache(event, snapshot) {
+  const row = cachedDashboardRow(event, snapshot);
+  return (row ? dashboardEntry(row, snapshot) : null) || eventOnlyDashboardEntry(event);
+}
+
 function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {
   const oldest = now - maxAgeHours * 60 * 60 * 1000;
   return (events || [])
@@ -122,8 +127,7 @@ function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()
     })
     .map((event) => {
       const snapshot = snapshots.get(String(event.eventId));
-      const row = cachedDashboardRow(event, snapshot);
-      return (row ? dashboardEntry(row, snapshot) : null) || eventOnlyDashboardEntry(event);
+      return activeMatchEntryFromCache(event, snapshot);
     })
     .sort(compareDashboardEntries);
 }
@@ -170,6 +174,18 @@ function elapsedMs(startedAt) {
 
 async function activeMatchesFromRedis(sportId, timings) {
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
+  const compact = await redisStore.getActiveMatches(sportId, timings);
+  if (compact !== null) {
+    if (timings) timings.activeMatchSource = "compact";
+    const oldest = Date.now() - maxAgeHours * 60 * 60 * 1000;
+    return compact
+      .filter((entry) => {
+        const openTime = Date.parse(entry?.openDate);
+        return !Number.isFinite(openTime) || openTime >= oldest;
+      })
+      .sort(compareDashboardEntries);
+  }
+  if (timings) timings.activeMatchSource = "fallback";
   const eventsStartedAt = process.hrtime.bigint();
   const cachedEvents = await redisStore.getEvents(sportId, timings);
   if (timings) timings.redisEventsMs = elapsedMs(eventsStartedAt);
@@ -217,6 +233,7 @@ module.exports = {
   activeMatchesFromCache,
   cachedDashboardRow,
   eventOnlyDashboardEntry,
+  activeMatchEntryFromCache,
   dashboardEntry,
   compareDashboardEntries,
   openDateValue,
