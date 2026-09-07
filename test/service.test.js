@@ -1490,6 +1490,24 @@ test("active fancy definitions create socket-updatable placeholder rows", () => 
   );
 });
 
+test("Ball-by-Ball definitions are immediately visible as suspended placeholders", () => {
+  const entry = fancyDefinitionEntry({
+    marketId: "4.1-BB",
+    marketName: "17.2 Ball Run HK-W",
+    marketType: "ball-by-ball",
+    eventId: 10,
+    matchName: "A v B",
+    minBet: 100,
+    maxBet: 100000,
+    betDelay: 0,
+  });
+  assert.equal(entry.gstatus, "SUSPENDED");
+  assert.equal(entry.nation, "Ball Run HK-W");
+  assert.equal(entry.ballLine, 17.2);
+  assert.equal(entry.srno, "17.2");
+  assert.equal(frontendEventPayload({ BallByBall: [entry] }).BallByBall.length, 1);
+});
+
 test("market rows map betting configuration", () => {
   const market = Market.fromRow({
     marketid: "1.2",

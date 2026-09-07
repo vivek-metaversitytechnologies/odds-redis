@@ -737,17 +737,32 @@ function transformedTick(item, market) {
 }
 
 function fancyDefinitionEntry(market) {
+  const ballByBall =
+    String(market.marketType || "").toLowerCase() === "ball-by-ball" ||
+    String(market.marketId || "").toUpperCase().endsWith("-BB");
+  const ballMetadata = ballByBall ? ballByBallMetadata(market.marketName) : null;
   return {
     mid: String(market.marketId),
     sid: String(market.marketId),
-    nation: market.marketName,
+    nation: ballMetadata?.name || market.marketName,
     b1: null,
     l1: null,
     bs1: 0,
     ls1: 0,
-    gstatus: "WAITING",
+    // Ball-by-Ball definitions must be visible as soon as discovery exposes the
+    // next ball. They remain non-tradable/suspended until a socket price replaces
+    // this placeholder. Other fancy families still wait for their first tick.
+    gstatus: ballByBall ? "SUSPENDED" : "WAITING",
     rem: "",
-    srno: "",
+    srno: ballMetadata?.ballLine == null ? "" : String(ballMetadata.ballLine),
+    ...(ballByBall
+      ? {
+          difference: ballMetadata?.ballLine ?? null,
+          d: ballMetadata?.ballLine ?? null,
+          di: ballMetadata?.ballLine ?? null,
+          ballLine: ballMetadata?.ballLine ?? null,
+        }
+      : {}),
     gameover: false,
     s: true,
     maxBet: numberOr(market.maxBet, 100000),
