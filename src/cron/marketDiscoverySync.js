@@ -236,9 +236,11 @@ function marketRows(response, eventsById) {
           : providedName;
       const displayMessage =
         item?.inPlayFilter == null ? null : String(item.inPlayFilter).trim().slice(0, 255) || null;
-      const marketName = zeroCommission
-        ? "Bookmaker"
-        : numberedBallName || (inferredBookmaker2 ? "Bookmaker2" : fallbackMarketName(marketType, marketId));
+      const marketName = inferredBookmaker2
+        ? "Bookmaker2"
+        : zeroCommission
+          ? "Bookmaker"
+          : numberedBallName || fallbackMarketName(marketType, marketId);
       return {
         marketId,
         eventId: Number(item?.eventId),

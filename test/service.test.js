@@ -1298,19 +1298,32 @@ test("undocumented vendor families are classified instead of dropped", () => {
   );
 });
 
-test("unnamed BM2 markets remain available for socket population", () => {
+test("BM2 markets use the canonical Bookmaker2 name", () => {
   const events = new Map([["10", { eventName: "A v B", sportId: 4 }]]);
-  const [row] = marketRows(
+  const rows = marketRows(
     {
       data: [
         { id: "1.2-BM2", eventId: "10", sportId: 4, name: null, type: null, isActive: true, gameOver: false },
+        {
+          id: "1.3-BM2",
+          eventId: "10",
+          sportId: 4,
+          name: "Match Odds (BM2)",
+          type: "bookmaker",
+          isActive: true,
+          gameOver: false,
+        },
       ],
     },
     events,
   );
-  assert.equal(row.marketName, "Bookmaker2");
-  assert.equal(row.marketType, "bookmaker");
-  assert.equal(row.maxBet, 25000);
+  assert.deepEqual(
+    rows.map((row) => [row.marketName, row.marketType, row.maxBet]),
+    [
+      ["Bookmaker2", "bookmaker", 25000],
+      ["Bookmaker2", "bookmaker", 25000],
+    ],
+  );
 });
 
 test("BM2 discovery fetches and stores runner metadata under its exact market ID", () => {
