@@ -244,6 +244,25 @@ function fallbackMarketName(marketType, marketId) {
   return names[marketType] || `Market ${marketId}`;
 }
 
+function isGenericFancyName(name, marketType, marketId = "") {
+  const normalized = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "");
+  const fallback = fallbackMarketName(marketType, marketId)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "");
+  return !normalized || normalized === fallback;
+}
+
+function persistedFancyName(fancy, existingName) {
+  const incoming = String(fancy?.marketName || "").trim();
+  const stored = String(existingName || "").trim();
+  if (!isGenericFancyName(incoming, fancy?.marketType, fancy?.marketId)) return incoming;
+  return stored || incoming || fallbackMarketName(fancy?.marketType, fancy?.marketId);
+}
+
 function vendorMarketStatus(item) {
   const value = String(item?.status ?? item?.sb ?? "")
     .trim()
@@ -325,7 +344,10 @@ function mergeDiscoveredMarkets(markets) {
     }
     const currentActive = current.isActive && !current.gameOver;
     const incomingActive = market.isActive && !market.gameOver;
-    const preferIncomingMetadata = current.marketType === "unknown" && market.marketType !== "unknown";
+    const preferIncomingMetadata =
+      (current.marketType === "unknown" && market.marketType !== "unknown") ||
+      (isGenericFancyName(current.marketName, current.marketType, current.marketId) &&
+        !isGenericFancyName(market.marketName, market.marketType, market.marketId));
     const metadata = preferIncomingMetadata ? market : current;
     merged.set(market.marketId, {
       ...metadata,
@@ -389,13 +411,13 @@ async function upsertFancies(fancies) {
   try {
     const ids = fancies.map((fancy) => fancy.marketId);
     const [existingRows] = await connection.query(
-      `SELECT fancyid,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      `SELECT fancyid,name,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
     const existing = new Map(
       existingRows.map((row) => [
         String(row.fancyid),
-        { isActive: Number(row.isactive) === 1, status: row.status },
+        { name: row.name, isActive: Number(row.isactive) === 1, status: row.status },
       ]),
     );
     const writable = fancies.filter(
@@ -414,7 +436,7 @@ async function upsertFancies(fancies) {
           const marketStatus = fancy.status || existing.get(fancy.marketId)?.status || "OPEN";
           return [
             fancy.marketId,
-            fancy.marketName,
+            persistedFancyName(fancy, existing.get(fancy.marketId)?.name),
             oddsType(fancy.marketId),
             marketStatus,
             fancy.maxBet,
@@ -447,18 +469,10 @@ async function upsertFancies(fancies) {
              updatedon=IF(
                NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
                NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)) OR
-               (VALUES(mtype)='ball-by-ball' AND
-                (TRIM(COALESCE(name,''))='' OR
-                 LOWER(REPLACE(REPLACE(TRIM(name),' ',''),'-',''))='ballbyball') AND
-                NOT (name <=> VALUES(name))),
+               NOT (name <=> VALUES(name)),
                NOW(),updatedon
              ),
-             name=IF(
-               VALUES(mtype)='ball-by-ball' AND
-               (TRIM(COALESCE(name,''))='' OR
-                LOWER(REPLACE(REPLACE(TRIM(name),' ',''),'-',''))='ballbyball'),
-               VALUES(name),name
-             ),
+             name=VALUES(name),
              status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
           [values],
         );
@@ -1510,6 +1524,8 @@ module.exports = {
   isMarketSnapshotResponse,
   inferredMarketType,
   fallbackMarketName,
+  isGenericFancyName,
+  persistedFancyName,
   mergeDiscoveredMarkets,
   oddsType,
   storedInFancyTable,

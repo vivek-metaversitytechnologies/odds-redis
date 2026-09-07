@@ -75,6 +75,8 @@ const {
   isMarketSnapshotResponse,
   inferredMarketType,
   fallbackMarketName,
+  isGenericFancyName,
+  persistedFancyName,
   mergeDiscoveredMarkets,
   bookmaker2BaseMarketId,
   runnerSourceMarketId,
@@ -1201,10 +1203,33 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
   ]) {
     assert.doesNotMatch(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
   }
-  assert.match(duplicateClause, /name=IF\([\s\S]*?VALUES\(mtype\)='ball-by-ball'[\s\S]*?VALUES\(name\),name/);
-  assert.doesNotMatch(duplicateClause, /name=VALUES\(name\)/);
+  assert.match(duplicateClause, /name=VALUES\(name\)/);
   assert.match(duplicateClause, /updatedon=IF\(/);
   assert.doesNotMatch(duplicateClause, /updatedon=NOW\(\)/);
+});
+
+test("fancy names prefer meaningful vendor values without regressing to generic fallbacks", () => {
+  assert.equal(isGenericFancyName("Fancy2", "session", "4.1-F2"), true);
+  assert.equal(isGenericFancyName("Khado", "khado", "4.1-KD"), true);
+  assert.equal(isGenericFancyName("4 Over Run AF", "session", "4.1-F2"), false);
+  assert.equal(
+    persistedFancyName(
+      { marketId: "4.1-F2", marketType: "session", marketName: "4 Over Run AF" },
+      "Fancy2",
+    ),
+    "4 Over Run AF",
+  );
+  assert.equal(
+    persistedFancyName(
+      { marketId: "4.1-F2", marketType: "session", marketName: "Fancy2" },
+      "4 Over Run AF",
+    ),
+    "4 Over Run AF",
+  );
+  assert.equal(
+    persistedFancyName({ marketId: "4.1-F2", marketType: "session", marketName: "Fancy2" }, null),
+    "Fancy2",
+  );
 });
 
 test("fancy upserts commit bounded batches without deleting regular markets", () => {
@@ -1449,6 +1474,22 @@ test("active vendor discovery wins over contradictory typed inactive records", (
   assert.equal(rows.length, 1);
   assert.equal(rows[0].isActive, true);
   assert.equal(rows[0].gameOver, false);
+});
+
+test("market discovery merge prefers descriptive fancy names over generic names", () => {
+  const base = {
+    marketId: "4.1-F2",
+    eventId: 10,
+    sportId: 4,
+    marketType: "session",
+    isActive: true,
+    gameOver: false,
+  };
+  const [row] = mergeDiscoveredMarkets([
+    { ...base, marketName: "Fancy2" },
+    { ...base, marketName: "4 Over Run AF" },
+  ]);
+  assert.equal(row.marketName, "4 Over Run AF");
 });
 
 test("vendor discovery deactivates a market when every response agrees", () => {
