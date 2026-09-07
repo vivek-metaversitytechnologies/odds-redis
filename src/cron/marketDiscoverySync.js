@@ -21,6 +21,7 @@ const {
 } = require("../config/marketTypes");
 let running = false;
 let liveCleanupRunning = false;
+let ballByBallRunning = false;
 const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
 const initialPriceSeeded = new Map();
@@ -114,13 +115,7 @@ function isBallByBallDiscoveryRequest(sportId, type) {
   );
 }
 
-function typedDiscoveryThrottle(lane, sportId, type) {
-  if (lane === "active" && isBallByBallDiscoveryRequest(sportId, type)) {
-    return {
-      key: `${lane}:${sportId}:ball-by-ball`,
-      intervalMs: integer("BALL_BY_BALL_DISCOVERY_MS", 4000, { min: 1000 }),
-    };
-  }
+function typedDiscoveryThrottle(lane, sportId) {
   return {
     key: `${lane}:${sportId}:full`,
     intervalMs:
@@ -411,8 +406,18 @@ async function upsertFancies(fancies) {
            ON DUPLICATE KEY UPDATE
              updatedon=IF(
                NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
-               NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
+               NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)) OR
+               (VALUES(mtype)='ball-by-ball' AND
+                (TRIM(COALESCE(name,''))='' OR
+                 LOWER(REPLACE(REPLACE(TRIM(name),' ',''),'-',''))='ballbyball') AND
+                NOT (name <=> VALUES(name))),
                NOW(),updatedon
+             ),
+             name=IF(
+               VALUES(mtype)='ball-by-ball' AND
+               (TRIM(COALESCE(name,''))='' OR
+                LOWER(REPLACE(REPLACE(TRIM(name),' ',''),'-',''))='ballbyball'),
+               VALUES(name),name
              ),
              status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
           [values],
@@ -912,7 +917,11 @@ async function syncMarketDiscovery(events, lane = "active") {
       Number(providerQueue.QUEUED || 0) < typedQueueLimit
         ? eventBatches.flatMap(({ eids, sportId }) => {
             return typedDiscoveryRequests(sportId).flatMap((type) => {
-              const throttle = typedDiscoveryThrottle(lane, sportId, type);
+              // Active Ball-by-Ball metadata has a dedicated synchronous two-second
+              // poller below. Keep it out of the broader typed fan-out to avoid
+              // duplicate vendor requests. Future discovery still uses this path.
+              if (lane === "active" && isBallByBallDiscoveryRequest(sportId, type)) return [];
+              const throttle = typedDiscoveryThrottle(lane, sportId);
               if (Date.now() - (lastFullDiscoveryAt.get(throttle.key) || 0) < throttle.intervalMs) return [];
               return [{ eids, type, sportId, throttleKey: throttle.key }];
             });
@@ -1163,6 +1172,61 @@ async function requestStoredEventMarkets(lane = "active") {
   return syncStoredEventMarkets(lane);
 }
 
+async function syncActiveBallByBallDiscovery() {
+  if (ballByBallRunning) return { skipped: true, reason: "already-running" };
+  ballByBallRunning = true;
+  const startedAt = Date.now();
+  try {
+    const events = (await fetchActiveEventsForMarketDiscovery("active")).filter(
+      (event) => Number(event.sportId) === cricketSportId(),
+    );
+    const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
+    const discovered = [];
+    let failedRequests = 0;
+
+    // Intentionally sequential: the next vendor request does not start until the
+    // previous event's Ball-by-Ball response has completed.
+    for (const event of events) {
+      try {
+        const response = await provider.markets(
+          { eids: [Number(event.eventId)], type: ["ball-by-ball"] },
+          { priority: discoveryPriority(event.sportId, "active") },
+        );
+        discovered.push(...marketRows(response, eventsById));
+      } catch (error) {
+        failedRequests += 1;
+        logger.error("[BallByBallDiscovery] vendor request failed", {
+          eventId: event.eventId,
+          error: error.message,
+        });
+      }
+    }
+
+    const fancies = mergeDiscoveredMarkets(discovered).filter(
+      (market) => market.marketType === "ball-by-ball",
+    );
+    const persisted = await retryDeadlock(() => upsertFancies(fancies));
+    redisStore.invalidateMarkets(persisted.fancyIds);
+    const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
+    await Promise.allSettled(
+      (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
+    );
+    const result = {
+      skipped: false,
+      events: events.length,
+      markets: fancies.length,
+      failedRequests,
+      inserted: persisted.inserted,
+      updated: persisted.updated,
+      durationMs: Date.now() - startedAt,
+    };
+    logger.info("[BallByBallDiscovery] completed", result);
+    return result;
+  } finally {
+    ballByBallRunning = false;
+  }
+}
+
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
   const discoveryTask = cron.schedule(expression, () => {
@@ -1170,6 +1234,11 @@ function startMarketDiscoverySync() {
   });
   const futureTask = cron.schedule(cronConfig.futureMarketDiscovery.expression, () => {
     void requestStoredEventMarkets("future").catch(() => {});
+  });
+  const ballByBallTask = cron.schedule(cronConfig.ballByBallDiscovery.expression, () => {
+    void syncActiveBallByBallDiscovery().catch((error) =>
+      logger.error("[BallByBallDiscovery] failed", { error: error.message }),
+    );
   });
   const cleanupTask = cron.schedule(cronConfig.liveMarketCleanup.expression, () => {
     void syncLiveMarketCleanup().catch((error) =>
@@ -1181,11 +1250,16 @@ function startMarketDiscoverySync() {
   logger.info("[MarketDiscovery] future lane scheduled", {
     expression: cronConfig.futureMarketDiscovery.expression,
   });
+  logger.info("[BallByBallDiscovery] scheduled", {
+    expression: cronConfig.ballByBallDiscovery.expression,
+    synchronous: true,
+  });
   setImmediate(() => void requestStoredEventMarkets("active").catch(() => {}));
   return {
     stop: () => {
       discoveryTask.stop();
       futureTask.stop();
+      ballByBallTask.stop();
       cleanupTask.stop();
     },
   };
@@ -1235,6 +1309,7 @@ module.exports = {
   syncLiveMarketCleanup,
   syncMarketDiscovery,
   syncStoredEventMarkets,
+  syncActiveBallByBallDiscovery,
   startMarketDiscoverySync,
   getMarketDiscoveryStatus,
 };

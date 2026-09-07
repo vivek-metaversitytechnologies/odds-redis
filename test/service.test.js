@@ -447,18 +447,23 @@ test("market discovery prioritizes cricket and limits non-cricket typed fan-out"
   assert.ok(discoveryPriority(1, "active") < discoveryPriority(1, "future"));
 });
 
-test("active cricket ball-by-ball discovery uses an independent four-second throttle", () => {
+test("cricket ball-by-ball discovery requests are identified independently", () => {
   assert.equal(isBallByBallDiscoveryRequest(4, ["ball-by-ball"]), true);
   assert.equal(isBallByBallDiscoveryRequest(4, ["session"]), false);
   assert.equal(isBallByBallDiscoveryRequest(1, ["ball-by-ball"]), false);
-  assert.deepEqual(typedDiscoveryThrottle("active", 4, ["ball-by-ball"]), {
-    key: "active:4:ball-by-ball",
-    intervalMs: 4000,
-  });
-  assert.deepEqual(typedDiscoveryThrottle("active", 4, ["session"]), {
+  assert.deepEqual(typedDiscoveryThrottle("active", 4), {
     key: "active:4:full",
     intervalMs: 60000,
   });
+});
+
+test("active Ball-by-Ball discovery is scheduled every two seconds and awaits each vendor request", () => {
+  const cronSource = fs.readFileSync(path.join(__dirname, "../src/config/cron.js"), "utf8");
+  const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  assert.match(cronSource, /BALL_BY_BALL_DISCOVERY_CRON \|\| "\*\/2 \* \* \* \* \*"/);
+  assert.match(discoverySource, /if \(ballByBallRunning\) return \{ skipped: true, reason: "already-running" \}/);
+  assert.match(discoverySource, /for \(const event of events\) \{[\s\S]*?await provider\.markets\(/);
+  assert.match(discoverySource, /lane === "active" && isBallByBallDiscoveryRequest\(sportId, type\)/);
 });
 
 test("bounded maps evict their oldest entry", () => {
@@ -1145,7 +1150,6 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
     assert.match(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
   }
   for (const column of [
-    "name",
     "oddstype",
     "eventid",
     "isshow",
@@ -1161,6 +1165,8 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
   ]) {
     assert.doesNotMatch(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
   }
+  assert.match(duplicateClause, /name=IF\([\s\S]*?VALUES\(mtype\)='ball-by-ball'[\s\S]*?VALUES\(name\),name/);
+  assert.doesNotMatch(duplicateClause, /name=VALUES\(name\)/);
   assert.match(duplicateClause, /updatedon=IF\(/);
   assert.doesNotMatch(duplicateClause, /updatedon=NOW\(\)/);
 });
