@@ -493,6 +493,18 @@ test("active suspended fancies remain eligible for vendor subscription", () => {
   assert.match(source, /COALESCE\(UPPER\(f\.status\),''\) <> 'CLOSED'/);
 });
 
+test("future subscription horizon does not restrict cricket markets", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketSync.js"), "utf8");
+  assert.match(
+    source,
+    /COALESCE\(m\.sportid,e\.sportid\)=\$\{cricketSportId\}[\s\S]*?e\.open_date <= DATE_ADD\(NOW\(\), INTERVAL \$\{futureHours\} HOUR\)/,
+  );
+  assert.match(
+    source,
+    /COALESCE\(f\.sportid,e\.sportid\)=\$\{cricketSportId\}[\s\S]*?e\.open_date <= DATE_ADD\(NOW\(\), INTERVAL \$\{futureHours\} HOUR\)/,
+  );
+});
+
 test("all inactive open fancies without results are eligible for vendor result polling", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   assert.match(source, /WHERE f\.isactive=\? AND UPPER\(f\.status\)=\?/);
