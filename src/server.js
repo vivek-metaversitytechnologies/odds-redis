@@ -13,6 +13,7 @@ const subscriptions = require("./services/marketSubscriptionService");
 const frontendSocket = require("./services/frontendSocketService");
 const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
+const { closeBallByBallLog } = require("./utils/ballByBallFileLogger");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
 const providerMetrics = require("./services/providerMetrics");
@@ -101,6 +102,7 @@ async function startServer() {
       await closeRedis();
       await closeSourceDb();
       await closeProviderLog();
+      await closeBallByBallLog();
       await logger.close();
     })();
     return shutdownPromise;
@@ -113,7 +115,13 @@ async function startServer() {
 if (require.main === module) {
   startServer().catch(async (error) => {
     logger.error("Startup failed", { error: error.message });
-    await Promise.allSettled([closeRedis(), closeSourceDb(), closeProviderLog(), logger.close()]);
+    await Promise.allSettled([
+      closeRedis(),
+      closeSourceDb(),
+      closeProviderLog(),
+      closeBallByBallLog(),
+      logger.close(),
+    ]);
     process.exitCode = 1;
   });
 }
