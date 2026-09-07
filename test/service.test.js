@@ -76,7 +76,6 @@ const {
   inferredMarketType,
   fallbackMarketName,
   isGenericFancyName,
-  persistedFancyName,
   mergeDiscoveredMarkets,
   bookmaker2BaseMarketId,
   runnerSourceMarketId,
@@ -1203,33 +1202,15 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
   ]) {
     assert.doesNotMatch(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
   }
-  assert.match(duplicateClause, /name=VALUES\(name\)/);
+  assert.doesNotMatch(duplicateClause, /name\s*=/);
   assert.match(duplicateClause, /updatedon=IF\(/);
   assert.doesNotMatch(duplicateClause, /updatedon=NOW\(\)/);
 });
 
-test("fancy names prefer meaningful vendor values without regressing to generic fallbacks", () => {
+test("generic fancy names are identified while names remain insert-only", () => {
   assert.equal(isGenericFancyName("Fancy2", "session", "4.1-F2"), true);
   assert.equal(isGenericFancyName("Khado", "khado", "4.1-KD"), true);
   assert.equal(isGenericFancyName("4 Over Run AF", "session", "4.1-F2"), false);
-  assert.equal(
-    persistedFancyName(
-      { marketId: "4.1-F2", marketType: "session", marketName: "4 Over Run AF" },
-      "Fancy2",
-    ),
-    "4 Over Run AF",
-  );
-  assert.equal(
-    persistedFancyName(
-      { marketId: "4.1-F2", marketType: "session", marketName: "Fancy2" },
-      "4 Over Run AF",
-    ),
-    "4 Over Run AF",
-  );
-  assert.equal(
-    persistedFancyName({ marketId: "4.1-F2", marketType: "session", marketName: "Fancy2" }, null),
-    "Fancy2",
-  );
 });
 
 test("fancy upserts commit bounded batches without deleting regular markets", () => {

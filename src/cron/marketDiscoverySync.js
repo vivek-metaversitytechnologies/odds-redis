@@ -256,13 +256,6 @@ function isGenericFancyName(name, marketType, marketId = "") {
   return !normalized || normalized === fallback;
 }
 
-function persistedFancyName(fancy, existingName) {
-  const incoming = String(fancy?.marketName || "").trim();
-  const stored = String(existingName || "").trim();
-  if (!isGenericFancyName(incoming, fancy?.marketType, fancy?.marketId)) return incoming;
-  return stored || incoming || fallbackMarketName(fancy?.marketType, fancy?.marketId);
-}
-
 function vendorMarketStatus(item) {
   const value = String(item?.status ?? item?.sb ?? "")
     .trim()
@@ -411,13 +404,13 @@ async function upsertFancies(fancies) {
   try {
     const ids = fancies.map((fancy) => fancy.marketId);
     const [existingRows] = await connection.query(
-      `SELECT fancyid,name,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      `SELECT fancyid,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
     const existing = new Map(
       existingRows.map((row) => [
         String(row.fancyid),
-        { name: row.name, isActive: Number(row.isactive) === 1, status: row.status },
+        { isActive: Number(row.isactive) === 1, status: row.status },
       ]),
     );
     const writable = fancies.filter(
@@ -436,7 +429,7 @@ async function upsertFancies(fancies) {
           const marketStatus = fancy.status || existing.get(fancy.marketId)?.status || "OPEN";
           return [
             fancy.marketId,
-            persistedFancyName(fancy, existing.get(fancy.marketId)?.name),
+            fancy.marketName,
             oddsType(fancy.marketId),
             marketStatus,
             fancy.maxBet,
@@ -468,11 +461,9 @@ async function upsertFancies(fancies) {
            ON DUPLICATE KEY UPDATE
              updatedon=IF(
                NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
-               NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)) OR
-               NOT (name <=> VALUES(name)),
+               NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
                NOW(),updatedon
              ),
-             name=VALUES(name),
              status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
           [values],
         );
@@ -1525,7 +1516,6 @@ module.exports = {
   inferredMarketType,
   fallbackMarketName,
   isGenericFancyName,
-  persistedFancyName,
   mergeDiscoveredMarkets,
   oddsType,
   storedInFancyTable,
