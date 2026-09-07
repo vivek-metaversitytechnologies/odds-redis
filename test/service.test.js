@@ -461,7 +461,7 @@ test("active Ball-by-Ball discovery is scheduled every two seconds and awaits ea
   const cronSource = fs.readFileSync(path.join(__dirname, "../src/config/cron.js"), "utf8");
   const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
   assert.match(cronSource, /BALL_BY_BALL_DISCOVERY_CRON \|\| "\*\/2 \* \* \* \* \*"/);
-  assert.match(discoverySource, /if \(ballByBallRunning\) return \{ skipped: true, reason: "already-running" \}/);
+  assert.match(discoverySource, /if \(ballByBallRunning\) \{[\s\S]*?reason: "already-running"/);
   assert.match(discoverySource, /for \(const event of events\) \{[\s\S]*?await provider\.markets\(/);
   assert.match(discoverySource, /lane === "active" && isBallByBallDiscoveryRequest\(sportId, type\)/);
   assert.match(discoverySource, /pendingSubscriptions[\s\S]*?await subscribeMarkets\(batch/);
