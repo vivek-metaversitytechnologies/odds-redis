@@ -60,6 +60,7 @@ const {
   canRemainWithoutMarket,
   cachedDashboardRow,
   eventOnlyDashboardEntry,
+  hasDisplayableMarket,
   dashboardEntry,
   compareDashboardEntries,
   selectDashboardRows,
@@ -804,7 +805,7 @@ test("Redis event metadata and snapshots produce the active-match API shape", ()
   ]);
 });
 
-test("Redis events remain visible before a usable market snapshot arrives", () => {
+test("Redis events remain hidden until a displayable market snapshot arrives", () => {
   const event = {
     eventId: 102,
     eventName: "Waiting Home v Waiting Away",
@@ -833,11 +834,19 @@ test("Redis events remain visible before a usable market snapshot arrives", () =
   };
   const now = Date.parse("2026-08-20T13:00:00Z");
   assert.deepEqual(eventOnlyDashboardEntry(event), expected);
+  assert.equal(hasDisplayableMarket({ Odds: [], Bookmaker: [] }), false);
   assert.deepEqual(
     activeMatchesFromCache([event], new Map([["102", { Odds: [], Bookmaker: [] }]]), 48, now),
-    [expected],
+    [],
   );
-  assert.deepEqual(activeMatchesFromCache([event], new Map(), 48, now), [expected]);
+  assert.deepEqual(activeMatchesFromCache([event], new Map(), 48, now), []);
+  const fancySnapshot = {
+    Odds: [],
+    Bookmaker: [],
+    Fancy2: [{ mid: "4.102-F2", nation: "1 Over Run", gstatus: "SUSPENDED" }],
+  };
+  assert.equal(hasDisplayableMarket(fancySnapshot), true);
+  assert.deepEqual(activeMatchesFromCache([event], new Map([["102", fancySnapshot]]), 48, now), [expected]);
 });
 
 test("Redis active-match cache excludes completed and expired events", () => {

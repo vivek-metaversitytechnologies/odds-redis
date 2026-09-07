@@ -112,6 +112,24 @@ function eventOnlyDashboardEntry(event) {
   };
 }
 
+function hasDisplayableMarket(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return false;
+  return Object.entries(snapshot).some(([group, markets]) =>
+    Array.isArray(markets) &&
+    markets.some((market) => {
+      const state = String(market?.status ?? market?.gstatus ?? market?.s ?? "")
+        .trim()
+        .toUpperCase();
+      if (state === "WAITING") return false;
+      const marketId = String(market?.marketId ?? market?.mid ?? "").trim();
+      if (!marketId) return false;
+      if (group !== "Odds") return true;
+      const name = String(market?.Name ?? market?.name ?? "").trim();
+      return Boolean(name) && name.toLowerCase() !== `market ${marketId}`.toLowerCase();
+    }),
+  );
+}
+
 function canRemainWithoutMarket(event, now = Date.now()) {
   if (event?.inPlay) return false;
   const openTime = Date.parse(event?.openDate);
@@ -122,7 +140,9 @@ function activeMatchEntryFromCache(event, snapshot, now = Date.now()) {
   const row = cachedDashboardRow(event, snapshot);
   const entry = row ? dashboardEntry(row, snapshot) : null;
   if (entry) return entry;
-  return canRemainWithoutMarket(event, now) ? eventOnlyDashboardEntry(event) : null;
+  return canRemainWithoutMarket(event, now) && hasDisplayableMarket(snapshot)
+    ? eventOnlyDashboardEntry(event)
+    : null;
 }
 
 function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {
@@ -243,6 +263,7 @@ module.exports = {
   activeMatchesFromCache,
   cachedDashboardRow,
   eventOnlyDashboardEntry,
+  hasDisplayableMarket,
   activeMatchEntryFromCache,
   canRemainWithoutMarket,
   dashboardEntry,
