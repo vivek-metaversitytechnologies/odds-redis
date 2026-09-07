@@ -961,7 +961,7 @@ test("market discovery maps active unfinished markets with Java betting defaults
     rows.filter((row) => row.isActive).map((row) => [row.marketName, row.maxBet, row.betDelay]),
     [
       ["Bookmaker", 25000, 0],
-      ["Match Odds", 1, 3],
+      ["Match Odds", 10000, 3],
     ],
   );
   assert.equal(rows.find((row) => row.marketName === "Closed")?.isActive, false);

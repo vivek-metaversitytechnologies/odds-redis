@@ -228,7 +228,7 @@ function marketRows(response, eventsById) {
         status: vendorMarketStatus(item),
         betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3,
         minBet: 100,
-        maxBet: fancy ? 100000 : bookmaker ? 25000 : 1,
+        maxBet: fancy ? 100000 : bookmaker ? 25000 : 10000,
         displayMessage,
         seriesId: event?.seriesId ?? null,
       };
