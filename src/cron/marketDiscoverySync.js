@@ -105,6 +105,31 @@ function typedDiscoveryRequests(sportId) {
   return [["match-odd", "winner-market", "goals"]];
 }
 
+function isBallByBallDiscoveryRequest(sportId, type) {
+  return (
+    Number(sportId) === cricketSportId() &&
+    Array.isArray(type) &&
+    type.length === 1 &&
+    String(type[0]).toLowerCase() === "ball-by-ball"
+  );
+}
+
+function typedDiscoveryThrottle(lane, sportId, type) {
+  if (lane === "active" && isBallByBallDiscoveryRequest(sportId, type)) {
+    return {
+      key: `${lane}:${sportId}:ball-by-ball`,
+      intervalMs: integer("BALL_BY_BALL_DISCOVERY_MS", 4000, { min: 1000 }),
+    };
+  }
+  return {
+    key: `${lane}:${sportId}:full`,
+    intervalMs:
+      Number(sportId) === cricketSportId()
+        ? integer("MARKET_FULL_DISCOVERY_MS", 60000, { min: 10000 })
+        : integer("NON_CRICKET_FULL_DISCOVERY_MS", 300000, { min: 60000 }),
+  };
+}
+
 function discoveryPriority(sportId, lane = "active") {
   if (Number(sportId) === cricketSportId()) return 3;
   return lane === "active" ? 6 : 8;
@@ -879,17 +904,16 @@ async function syncMarketDiscovery(events, lane = "active") {
     // Typed fallback discovery fans out into several /v1/markets calls per event.
     // Live prices arrive over the socket, so repeating this metadata-only fan-out
     // every five seconds adds no pricing freshness and can exhaust the vendor cap.
-    const cricketFullIntervalMs = integer("MARKET_FULL_DISCOVERY_MS", 60000, { min: 10000 });
-    const otherFullIntervalMs = integer("NON_CRICKET_FULL_DISCOVERY_MS", 300000, { min: 60000 });
     const typedQueueLimit = integer("MARKET_TYPED_DISCOVERY_QUEUE_LIMIT", 200, { min: 1 });
     const providerQueue = provider.providerLimiter.counts();
     const typedWork =
       Number(providerQueue.QUEUED || 0) < typedQueueLimit
         ? eventBatches.flatMap(({ eids, sportId }) => {
-            const intervalMs = sportId === cricketSportId() ? cricketFullIntervalMs : otherFullIntervalMs;
-            const key = `${lane}:${sportId}`;
-            if (Date.now() - (lastFullDiscoveryAt.get(key) || 0) < intervalMs) return [];
-            return typedDiscoveryRequests(sportId).map((type) => ({ eids, type, sportId }));
+            return typedDiscoveryRequests(sportId).flatMap((type) => {
+              const throttle = typedDiscoveryThrottle(lane, sportId, type);
+              if (Date.now() - (lastFullDiscoveryAt.get(throttle.key) || 0) < throttle.intervalMs) return [];
+              return [{ eids, type, sportId, throttleKey: throttle.key }];
+            });
           })
         : [];
     const fullDiscovery = typedWork.length > 0;
@@ -950,7 +974,7 @@ async function syncMarketDiscovery(events, lane = "active") {
     const completedAt = Date.now();
     for (const event of selectedEvents) lastPrimaryDiscoveryAt.set(`${lane}:${event.sportId}`, completedAt);
     if (fullDiscovery) {
-      for (const { sportId } of typedWork) lastFullDiscoveryAt.set(`${lane}:${sportId}`, completedAt);
+      for (const { throttleKey } of typedWork) lastFullDiscoveryAt.set(throttleKey, completedAt);
     }
     const result = {
       skipped: false,
@@ -1199,6 +1223,8 @@ module.exports = {
   prioritizedDiscoveryEvents,
   discoveryEventBatches,
   typedDiscoveryRequests,
+  isBallByBallDiscoveryRequest,
+  typedDiscoveryThrottle,
   discoveryPriority,
   nextDiscoveryLane,
   reconcileMissingLineMarkets,

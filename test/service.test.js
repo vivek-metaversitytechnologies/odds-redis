@@ -86,6 +86,8 @@ const {
   prioritizedDiscoveryEvents,
   discoveryEventBatches,
   typedDiscoveryRequests,
+  isBallByBallDiscoveryRequest,
+  typedDiscoveryThrottle,
   discoveryPriority,
   nextDiscoveryLane,
   oddsType,
@@ -428,6 +430,8 @@ test("queued future discovery takes priority after a scheduler collision", () =>
 });
 
 test("market discovery prioritizes cricket and limits non-cricket typed fan-out", () => {
+  const cronSource = fs.readFileSync(path.join(__dirname, "../src/config/cron.js"), "utf8");
+  assert.match(cronSource, /MARKET_DISCOVERY_CRON \|\| "\*\/4 \* \* \* \* \*"/);
   const events = [
     { eventId: 11, sportId: 1 },
     { eventId: 12, sportId: 2 },
@@ -441,6 +445,20 @@ test("market discovery prioritizes cricket and limits non-cricket typed fan-out"
   assert.deepEqual(typedDiscoveryRequests(2), [["match-odd", "winner-market", "goals"]]);
   assert.ok(discoveryPriority(4) < discoveryPriority(1));
   assert.ok(discoveryPriority(1, "active") < discoveryPriority(1, "future"));
+});
+
+test("active cricket ball-by-ball discovery uses an independent four-second throttle", () => {
+  assert.equal(isBallByBallDiscoveryRequest(4, ["ball-by-ball"]), true);
+  assert.equal(isBallByBallDiscoveryRequest(4, ["session"]), false);
+  assert.equal(isBallByBallDiscoveryRequest(1, ["ball-by-ball"]), false);
+  assert.deepEqual(typedDiscoveryThrottle("active", 4, ["ball-by-ball"]), {
+    key: "active:4:ball-by-ball",
+    intervalMs: 4000,
+  });
+  assert.deepEqual(typedDiscoveryThrottle("active", 4, ["session"]), {
+    key: "active:4:full",
+    intervalMs: 60000,
+  });
 });
 
 test("bounded maps evict their oldest entry", () => {
