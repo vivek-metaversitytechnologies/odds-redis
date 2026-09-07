@@ -88,6 +88,7 @@ const {
   typedDiscoveryRequests,
   isBallByBallDiscoveryRequest,
   typedDiscoveryThrottle,
+  ballByBallSnapshotDelta,
   discoveryPriority,
   nextDiscoveryLane,
   oddsType,
@@ -465,6 +466,40 @@ test("active Ball-by-Ball discovery is scheduled every two seconds and awaits ea
   assert.match(discoverySource, /for \(const event of events\) \{[\s\S]*?await provider\.markets\(/);
   assert.match(discoverySource, /lane === "active" && isBallByBallDiscoveryRequest\(sportId, type\)/);
   assert.match(discoverySource, /pendingSubscriptions[\s\S]*?await subscribeMarkets\(batch/);
+});
+
+test("Ball-by-Ball snapshots process only active changes and explicit deactivations", () => {
+  const active = {
+    marketId: "4.1-BB",
+    eventId: 36034463,
+    sportId: 4,
+    marketName: "1.2 Ball Run HK-W",
+    marketType: "ball-by-ball",
+    isActive: true,
+    gameOver: false,
+    status: "OPEN",
+  };
+  const historical = { ...active, marketId: "4.old-BB", isActive: false };
+
+  const first = ballByBallSnapshotDelta([active, historical]);
+  assert.deepEqual(first.changed.map((market) => market.marketId), ["4.1-BB"]);
+  assert.equal(first.active, 1);
+  assert.equal(first.nextSnapshot.has("4.old-BB"), false);
+
+  const unchanged = ballByBallSnapshotDelta([active], first.nextSnapshot);
+  assert.equal(unchanged.changed.length, 0);
+  assert.equal(unchanged.unchanged, 1);
+
+  // Omission is not an inactive signal, so the prior active state is retained.
+  const omitted = ballByBallSnapshotDelta([], unchanged.nextSnapshot);
+  assert.equal(omitted.changed.length, 0);
+  assert.equal(omitted.nextSnapshot.has("4.1-BB"), true);
+
+  const inactive = { ...active, isActive: false };
+  const retired = ballByBallSnapshotDelta([inactive], omitted.nextSnapshot);
+  assert.deepEqual(retired.changed.map((market) => market.marketId), ["4.1-BB"]);
+  assert.deepEqual(retired.explicitlyDeactivated, ["4.1-BB"]);
+  assert.equal(retired.nextSnapshot.has("4.1-BB"), false);
 });
 
 test("bounded maps evict their oldest entry", () => {

@@ -30,6 +30,7 @@ let liveCleanupRunning = false;
 let ballByBallRunning = false;
 let ballByBallStartedAt = 0;
 let ballByBallCycleSequence = 0;
+const ballByBallActiveSnapshots = new Map();
 const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
 const initialPriceSeeded = new Map();
@@ -178,6 +179,37 @@ function marketFingerprint(market) {
     market.displayMessage,
     market.seriesId,
   ]);
+}
+
+function ballByBallSnapshotDelta(markets, previousSnapshot = new Map()) {
+  const nextSnapshot = new Map(previousSnapshot);
+  const changed = [];
+  const explicitlyDeactivated = [];
+  let active = 0;
+  let unchanged = 0;
+
+  for (const market of markets || []) {
+    const marketId = String(market.marketId);
+    const isActive = market.isActive && !market.gameOver;
+    if (isActive) {
+      active += 1;
+      const fingerprint = marketFingerprint(market);
+      if (previousSnapshot.get(marketId) === fingerprint) unchanged += 1;
+      else changed.push(market);
+      nextSnapshot.set(marketId, fingerprint);
+      continue;
+    }
+
+    // Vendor snapshots intermittently omit active rows. Retire a row only when
+    // the vendor explicitly returns it as inactive or game-over.
+    if (previousSnapshot.has(marketId)) {
+      changed.push(market);
+      explicitlyDeactivated.push(marketId);
+      nextSnapshot.delete(marketId);
+    }
+  }
+
+  return { nextSnapshot, changed, explicitlyDeactivated, active, unchanged };
 }
 
 function inferredMarketType(marketId, providedType) {
@@ -1270,21 +1302,65 @@ async function syncActiveBallByBallDiscovery() {
     const fancies = mergeDiscoveredMarkets(discovered).filter(
       (market) => market.marketType === "ball-by-ball",
     );
+    const selectedEventIds = new Set(events.map((event) => String(event.eventId)));
+    for (const eventId of ballByBallActiveSnapshots.keys()) {
+      if (!selectedEventIds.has(eventId)) ballByBallActiveSnapshots.delete(eventId);
+    }
+
+    const fanciesByEvent = new Map();
+    for (const fancy of fancies) {
+      const eventId = String(fancy.eventId);
+      if (!fanciesByEvent.has(eventId)) fanciesByEvent.set(eventId, []);
+      fanciesByEvent.get(eventId).push(fancy);
+    }
+
+    const changedFancies = [];
+    const explicitlyDeactivatedIds = [];
+    let activeMarkets = 0;
+    let unchangedMarkets = 0;
+    for (const event of events) {
+      const eventId = String(event.eventId);
+      const delta = ballByBallSnapshotDelta(
+        fanciesByEvent.get(eventId) || [],
+        ballByBallActiveSnapshots.get(eventId),
+      );
+      ballByBallActiveSnapshots.set(eventId, delta.nextSnapshot);
+      changedFancies.push(...delta.changed);
+      explicitlyDeactivatedIds.push(...delta.explicitlyDeactivated);
+      activeMarkets += delta.active;
+      unchangedMarkets += delta.unchanged;
+      writeBallByBallLog("snapshot.delta", {
+        cycleId,
+        eventId: event.eventId,
+        active: delta.active,
+        changed: delta.changed.length,
+        explicitlyDeactivated: delta.explicitlyDeactivated,
+        unchanged: delta.unchanged,
+      });
+    }
+
     const persistenceStartedAt = Date.now();
-    const persisted = await retryDeadlock(() => upsertFancies(fancies));
+    const persisted = changedFancies.length
+      ? await retryDeadlock(() => upsertFancies(changedFancies))
+      : { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
     writeBallByBallLog("database.persisted", {
       cycleId,
       durationMs: Date.now() - persistenceStartedAt,
-      discovered: fancies.length,
-      active: fancies.filter((market) => market.isActive && !market.gameOver).length,
+      received: fancies.length,
+      active: activeMarkets,
+      changed: changedFancies.length,
+      unchanged: unchangedMarkets,
+      explicitlyDeactivated: explicitlyDeactivatedIds.length,
       inserted: persisted.inserted,
       updated: persisted.updated,
       marketIds: persisted.fancyIds.slice(0, logMarketLimit),
       marketIdsTruncated: persisted.fancyIds.length > logMarketLimit,
     });
-    redisStore.invalidateMarkets(persisted.fancyIds);
+    if (persisted.fancyIds.length) redisStore.invalidateMarkets(persisted.fancyIds);
     const redisStartedAt = Date.now();
-    const redisDefinitions = await redisStore.reconcileFancyDefinitions(fancies);
+    const redisDefinitions = changedFancies.length
+      ? await redisStore.reconcileFancyDefinitions(changedFancies)
+      : { events: 0, added: 0, removed: 0, changedEventIds: [] };
     const publishResults = await Promise.allSettled(
       (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
     );
@@ -1295,7 +1371,7 @@ async function syncActiveBallByBallDiscovery() {
       publishFailures: publishResults.filter((result) => result.status === "rejected").length,
     });
     const subscribedIds = new Set(websocket.getSubscribedMarketIds().map(String));
-    const pendingSubscriptions = fancies
+    const pendingSubscriptions = changedFancies
       .filter((market) => market.isActive && !market.gameOver)
       .map((market) => String(market.marketId))
       .filter((marketId) => !subscribedIds.has(marketId) && !isMarketSuppressed(marketId));
@@ -1343,6 +1419,11 @@ async function syncActiveBallByBallDiscovery() {
       skipped: false,
       events: events.length,
       markets: fancies.length,
+      activeMarkets,
+      changedMarkets: changedFancies.length,
+      unchangedMarkets,
+      explicitlyDeactivated: explicitlyDeactivatedIds.length,
+      unchanged: changedFancies.length === 0,
       failedRequests,
       inserted: persisted.inserted,
       updated: persisted.updated,
@@ -1452,6 +1533,7 @@ module.exports = {
   typedDiscoveryRequests,
   isBallByBallDiscoveryRequest,
   typedDiscoveryThrottle,
+  ballByBallSnapshotDelta,
   discoveryPriority,
   nextDiscoveryLane,
   reconcileMissingLineMarkets,
