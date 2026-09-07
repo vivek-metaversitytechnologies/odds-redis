@@ -464,6 +464,7 @@ test("active Ball-by-Ball discovery is scheduled every two seconds and awaits ea
   assert.match(discoverySource, /if \(ballByBallRunning\) return \{ skipped: true, reason: "already-running" \}/);
   assert.match(discoverySource, /for \(const event of events\) \{[\s\S]*?await provider\.markets\(/);
   assert.match(discoverySource, /lane === "active" && isBallByBallDiscoveryRequest\(sportId, type\)/);
+  assert.match(discoverySource, /pendingSubscriptions[\s\S]*?await subscribeMarkets\(batch/);
 });
 
 test("bounded maps evict their oldest entry", () => {

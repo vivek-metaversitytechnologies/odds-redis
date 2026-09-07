@@ -1,7 +1,12 @@
 const cron = require("node-cron");
 const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
-const { unsubscribeEventMarkets } = require("../services/marketSubscriptionService");
+const {
+  unsubscribeEventMarkets,
+  subscribeMarkets,
+  isMarketSuppressed,
+} = require("../services/marketSubscriptionService");
+const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
@@ -1211,6 +1216,32 @@ async function syncActiveBallByBallDiscovery() {
     await Promise.allSettled(
       (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
     );
+    const subscribedIds = new Set(websocket.getSubscribedMarketIds().map(String));
+    const pendingSubscriptions = fancies
+      .filter((market) => market.isActive && !market.gameOver)
+      .map((market) => String(market.marketId))
+      .filter((marketId) => !subscribedIds.has(marketId) && !isMarketSuppressed(marketId));
+    const subscriptionBatchSize = integer("PROVIDER_SUBSCRIPTION_BATCH_SIZE", 5, { min: 1, max: 20 });
+    let newlySubscribed = 0;
+    let locallyAttached = 0;
+    let providerSkipped = 0;
+    let failedSubscriptionBatches = 0;
+    // Keep immediate subscriptions sequential as well. The normal five-second
+    // reconciler remains the retry/safety net for any failed batch.
+    for (const batch of chunks(pendingSubscriptions, subscriptionBatchSize)) {
+      try {
+        const acknowledgement = await subscribeMarkets(batch, { scheduleRetry: false });
+        newlySubscribed += acknowledgement.subscribed.length;
+        locallyAttached += acknowledgement.attached.length;
+        providerSkipped += acknowledgement.skipped.length;
+      } catch (error) {
+        failedSubscriptionBatches += 1;
+        logger.error("[BallByBallDiscovery] immediate subscription failed", {
+          marketIds: batch,
+          error: error.message,
+        });
+      }
+    }
     const result = {
       skipped: false,
       events: events.length,
@@ -1218,6 +1249,11 @@ async function syncActiveBallByBallDiscovery() {
       failedRequests,
       inserted: persisted.inserted,
       updated: persisted.updated,
+      subscriptionRequested: pendingSubscriptions.length,
+      newlySubscribed,
+      locallyAttached,
+      providerSkipped,
+      failedSubscriptionBatches,
       durationMs: Date.now() - startedAt,
     };
     logger.info("[BallByBallDiscovery] completed", result);
