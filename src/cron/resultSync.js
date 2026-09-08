@@ -51,6 +51,29 @@ function fancyResultValue(marketId, result, marketType) {
   return null;
 }
 
+function rejectedResultReason(market, result, isFancy) {
+  if (isFancy) {
+    return fancyResultValue(market.marketid, result.result, market.mtype) == null
+      ? "unsupported-fancy-result"
+      : "fancy-result-not-persisted";
+  }
+  return Number.isInteger(Number(result.result))
+    ? "winner-selection-metadata-missing"
+    : "non-numeric-market-winner";
+}
+
+function rejectedResultDetail(market, result, isFancy) {
+  return {
+    marketId: result.marketId,
+    family: isFancy ? "fancy" : "regular",
+    marketName: market.marketname || null,
+    vendorMarketType: result.marketType || null,
+    dbMarketType: isFancy ? market.mtype || market.oddstype || null : market.marketname || null,
+    result: result.result,
+    reason: rejectedResultReason(market, result, isFancy),
+  };
+}
+
 function isEventTerminalMarketName(name) {
   const normalized = String(name || "").trim().toLowerCase();
   return normalized === "match odds" || normalized.includes("bookmaker");
@@ -396,69 +419,139 @@ async function persistFancyResult(connection, fancy, result) {
 async function applyResults(results, candidates) {
   const regularById = new Map(candidates.markets.map((market) => [String(market.marketid), market]));
   const fancyById = new Map(candidates.fancies.map((market) => [String(market.marketid), market]));
-  const settled = [];
+  const persistenceConcurrency = Math.max(
+    1,
+    Math.min(16, Number(process.env.RESULT_PERSIST_CONCURRENCY || 4)),
+  );
+  const rejectionDetailLimit = Math.max(
+    0,
+    Math.min(500, Number(process.env.RESULT_REJECTED_DETAIL_LIMIT || 100)),
+  );
+  const matched = [];
   let regularSettled = 0;
   let fancySettled = 0;
   let unmatchedResults = 0;
   let persistenceFailures = 0;
   let rejectedResults = 0;
-  const changedEventIds = new Set();
   for (const result of results) {
     const market = regularById.get(result.marketId) || fancyById.get(result.marketId);
     if (!market) {
       unmatchedResults += 1;
       continue;
     }
+    matched.push({ result, market, isFancy: fancyById.has(result.marketId) });
+  }
+
+  const dbStartedAt = Date.now();
+  const persisted = await settleWithConcurrency(matched, async ({ result, market, isFancy }) => {
     const connection = await getSourcePool().getConnection();
-    let saved = false;
+    let transactionStarted = false;
     try {
       await connection.beginTransaction();
-      saved = fancyById.has(result.marketId)
+      transactionStarted = true;
+      const saved = isFancy
         ? await persistFancyResult(connection, market, result)
         : await persistMarketResult(connection, market, result);
       if (!saved) {
         await connection.rollback();
-        rejectedResults += 1;
-        continue;
+        transactionStarted = false;
+        return { status: "rejected", result, market, isFancy };
       }
       await connection.commit();
+      transactionStarted = false;
+      return { status: "settled", result, market, isFancy };
     } catch (error) {
-      await connection.rollback();
-      saved = false;
-      persistenceFailures += 1;
-      logger.error("[ResultSync] result persistence failed", {
-        marketId: result.marketId,
-        error: error.message,
-      });
+      if (transactionStarted) await connection.rollback().catch(() => {});
+      throw Object.assign(error, { resultMarketId: result.marketId });
     } finally {
       connection.release();
     }
-    if (!saved) continue;
-    try {
-      await redis.removeMarket(market.eventid, result.marketId);
-    } catch (error) {
-      logger.error("[ResultSync] Redis cleanup failed", { marketId: result.marketId, error: error.message });
+  }, persistenceConcurrency);
+
+  const dbWriteMs = Date.now() - dbStartedAt;
+  const settledRows = [];
+  const rejectedResultDetails = [];
+  const rejectedResultReasons = {};
+  for (const outcome of persisted) {
+    if (outcome.status === "rejected") {
+      persistenceFailures += 1;
+      logger.error("[ResultSync] result persistence failed", {
+        marketId: outcome.reason?.resultMarketId,
+        error: outcome.reason?.message || String(outcome.reason),
+      });
+      continue;
     }
-    changedEventIds.add(String(market.eventid));
-    settled.push(result.marketId);
-    if (fancyById.has(result.marketId)) fancySettled += 1;
+    if (outcome.value.status === "rejected") {
+      rejectedResults += 1;
+      const detail = rejectedResultDetail(
+        outcome.value.market,
+        outcome.value.result,
+        outcome.value.isFancy,
+      );
+      rejectedResultReasons[detail.reason] = (rejectedResultReasons[detail.reason] || 0) + 1;
+      if (rejectedResultDetails.length < rejectionDetailLimit) {
+        rejectedResultDetails.push(detail);
+      }
+      continue;
+    }
+    settledRows.push(outcome.value);
+    if (outcome.value.isFancy) fancySettled += 1;
     else regularSettled += 1;
   }
-  for (const eventId of changedEventIds) {
-    try {
-      await frontendSocket.publishEventSnapshot(eventId);
-    } catch (error) {
-      logger.error("[ResultSync] frontend snapshot publish failed", { eventId, error: error.message });
-    }
+
+  const marketsByEvent = new Map();
+  for (const { result, market } of settledRows) {
+    const eventId = String(market.eventid);
+    if (!marketsByEvent.has(eventId)) marketsByEvent.set(eventId, []);
+    marketsByEvent.get(eventId).push(result.marketId);
   }
+  const redisStartedAt = Date.now();
+  const eventIds = [...marketsByEvent.keys()];
+  const cleanupResults = await settleWithConcurrency(
+    [...marketsByEvent],
+    ([eventId, marketIds]) => redis.removeMarkets(eventId, marketIds),
+    persistenceConcurrency,
+  );
+  cleanupResults.forEach((outcome, index) => {
+    if (outcome.status === "rejected") {
+      logger.error("[ResultSync] Redis cleanup failed", {
+        eventId: eventIds[index],
+        error: outcome.reason?.message || String(outcome.reason),
+      });
+    }
+  });
+  const redisCleanupMs = Date.now() - redisStartedAt;
+  const publishStartedAt = Date.now();
+  const publishResults = await settleWithConcurrency(
+    eventIds,
+    (eventId) => frontendSocket.publishEventSnapshot(eventId),
+    persistenceConcurrency,
+  );
+  publishResults.forEach((outcome, index) => {
+    if (outcome.status === "rejected") logger.error("[ResultSync] frontend snapshot publish failed", {
+      eventId: eventIds[index],
+      error: outcome.reason?.message || String(outcome.reason),
+    });
+  });
+  const snapshotPublishMs = Date.now() - publishStartedAt;
+  const settled = settledRows.map(({ result }) => result.marketId);
+  const unsubscribeStartedAt = Date.now();
   if (settled.length) await subscriptions.unsubscribeResultMarkets(settled);
+  const unsubscribeMs = Date.now() - unsubscribeStartedAt;
   return {
     settled,
+    persistenceConcurrency,
+    dbWriteMs,
+    redisCleanupMs,
+    snapshotPublishMs,
+    unsubscribeMs,
     regularSettled,
     fancySettled,
     unmatchedResults,
     persistenceFailures,
     rejectedResults,
+    rejectedResultReasons,
+    rejectedResultDetails,
   };
 }
 
@@ -519,12 +612,19 @@ async function syncResults() {
       failedCalls: responses.filter((response) => response.status === "rejected").length,
       results: results.length,
       settled: applied.settled.length,
+      persistenceConcurrency: applied.persistenceConcurrency,
+      dbWriteMs: applied.dbWriteMs,
+      redisCleanupMs: applied.redisCleanupMs,
+      snapshotPublishMs: applied.snapshotPublishMs,
+      unsubscribeMs: applied.unsubscribeMs,
       regularSettled: applied.regularSettled,
       fancySettled: applied.fancySettled,
       unmatchedResults: applied.unmatchedResults,
       settledMarketIds: applied.settled,
       persistenceFailures: applied.persistenceFailures,
       rejectedResults: applied.rejectedResults,
+      rejectedResultReasons: applied.rejectedResultReasons,
+      rejectedResultDetails: applied.rejectedResultDetails,
       cursorsUsed: candidates.cursorsUsed,
       nextCursors,
       candidateLoadMs,
@@ -564,6 +664,8 @@ function getResultSyncStatus() {
 module.exports = {
   responseRows,
   fancyResultValue,
+  rejectedResultReason,
+  rejectedResultDetail,
   interleaveResultCandidates,
   settleWithConcurrency,
   advanceCandidateCursors,
