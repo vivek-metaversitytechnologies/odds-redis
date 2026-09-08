@@ -85,25 +85,24 @@ async function loadCandidates() {
   const [markets] = await getSourcePool().query(
     `SELECT m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
-     WHERE (m.isactive=? OR (m.isactive=? AND m.status=?
-       AND m.updatedon >= DATE_SUB(NOW(), INTERVAL 48 HOUR)))
+     WHERE m.isactive=?
        AND m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ORDER BY m.id DESC LIMIT ?`,
-    [true, false, false, ...sportIds, limit],
+    [true, ...sportIds, limit],
   );
   const [fancies] = await getSourcePool().query(
     `SELECT f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
-     WHERE f.isactive=? AND UPPER(f.status)=?
+     WHERE UPPER(f.status)=?
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
      ORDER BY f.isactive ASC, f.updatedon DESC, f.id DESC LIMIT ?`,
-    [false, "OPEN", ...sportIds, limit],
+    ["OPEN", ...sportIds, limit],
   );
   return { markets, fancies };
 }
