@@ -40,19 +40,20 @@ function pruneRequestAttempts(now = Date.now()) {
   while (requestAttempts.length && requestAttempts[0].startedAt < cutoff) requestAttempts.shift();
 }
 
-function startRequestAttempt(method, url) {
+function startRequestAttempt(method, url, source) {
   const entry = {
     startedAt: Date.now(),
     method,
     path: url.pathname,
     route: metricRoute(url.pathname),
+    source: source || "unclassified",
     status: null,
     outcome: "running",
     durationMs: null,
   };
   requestAttempts.push(entry);
   requestLifetime.attempts += 1;
-  providerMetrics.recordAttempt(entry.startedAt, method, entry.route);
+  providerMetrics.recordAttempt(entry.startedAt, method, entry.route, entry.source);
   pruneRequestAttempts(entry.startedAt);
   return entry;
 }
@@ -69,12 +70,20 @@ function finishRequestAttempt(entry, { status = null, error } = {}) {
     requestLifetime.failed += 1;
     if (entry.outcome === "aborted") requestLifetime.aborted += 1;
   }
-  providerMetrics.recordOutcome(entry.startedAt, entry.method, entry.route, entry.outcome, entry.durationMs);
+  providerMetrics.recordOutcome(
+    entry.startedAt,
+    entry.method,
+    entry.route,
+    entry.outcome,
+    entry.durationMs,
+    entry.source,
+  );
 }
 
 function requestWindow(windowMs, now = Date.now()) {
   const rows = requestAttempts.filter((entry) => entry.startedAt >= now - windowMs);
   const byEndpoint = {};
+  const bySource = {};
   for (const entry of rows) {
     const key = `${entry.method} ${entry.route}`;
     const current = byEndpoint[key] || { attempts: 0, succeeded: 0, failed: 0, aborted: 0 };
@@ -85,6 +94,15 @@ function requestWindow(windowMs, now = Date.now()) {
       current.aborted += 1;
     } else if (entry.outcome === "failed") current.failed += 1;
     byEndpoint[key] = current;
+    const source = entry.source || "unclassified";
+    const sourceCurrent = bySource[source] || { attempts: 0, succeeded: 0, failed: 0, aborted: 0 };
+    sourceCurrent.attempts += 1;
+    if (entry.outcome === "succeeded") sourceCurrent.succeeded += 1;
+    else if (entry.outcome === "aborted") {
+      sourceCurrent.failed += 1;
+      sourceCurrent.aborted += 1;
+    } else if (entry.outcome === "failed") sourceCurrent.failed += 1;
+    bySource[source] = sourceCurrent;
   }
   return {
     attempts: rows.length,
@@ -93,6 +111,7 @@ function requestWindow(windowMs, now = Date.now()) {
     aborted: rows.filter((entry) => entry.outcome === "aborted").length,
     running: rows.filter((entry) => entry.outcome === "running").length,
     byEndpoint,
+    bySource,
   };
 }
 
@@ -168,7 +187,10 @@ function loggedPayload(value) {
   return { truncated: true, originalCharacters: serialized.length, preview: serialized.slice(0, maxLength) };
 }
 
-async function request(path, { method = "GET", query, body, retries = 2, priority = 5, timeoutMs } = {}) {
+async function request(
+  path,
+  { method = "GET", query, body, retries = 2, priority = 5, timeoutMs, metricSource } = {},
+) {
   if (shuttingDown) throw new Error("Provider client is shutting down");
   const url = providerUrl(path, query);
   for (let attempt = 0; attempt <= retries; attempt += 1) {
@@ -183,10 +205,11 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
         query: Object.fromEntries(url.searchParams),
         body: body === undefined ? null : loggedPayload(body),
         attempt: attempt + 1,
+        source: metricSource || "unclassified",
       };
       writeProviderLog("provider.request", requestLog);
       const response = await providerLimiter.schedule({ priority }, async () => {
-        metricEntry = startRequestAttempt(method, url);
+        metricEntry = startRequestAttempt(method, url, metricSource);
         const controller = new AbortController();
         activeControllers.add(controller);
         const timer = setTimeout(
@@ -248,6 +271,7 @@ async function request(path, { method = "GET", query, body, retries = 2, priorit
         status: error.statusCode || null,
         durationMs: Date.now() - startedAt,
         attempt: attempt + 1,
+        source: metricSource || "unclassified",
         error: error.message,
       };
       writeProviderLog("provider.error", errorLog);
@@ -290,7 +314,8 @@ module.exports = {
   sports: () => request("/v1/sports"),
   competitions: (query) => request("/v1/competitions", { query }),
   events: (query) => request("/v1/events", { query }),
-  markets: (body, { priority = 5 } = {}) => request("/v1/markets", { method: "POST", body, priority }),
+  markets: (body, { priority = 5, source } = {}) =>
+    request("/v1/markets", { method: "POST", body, priority, metricSource: source }),
   runners: (marketId) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`),
   // Results must not sit behind the much larger discovery queue indefinitely.
   results: (body) => request("/v1/markets/results", { method: "POST", body, priority: 2 }),

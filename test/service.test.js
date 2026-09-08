@@ -179,7 +179,15 @@ test("provider metrics aggregate Redis minute fields by endpoint", () => {
     {
       minute: "202609061025",
       endpoints: { "POST /v1/markets": { attempts: 3, succeeded: 2, aborted: 1 } },
+      sources: {},
     },
+  );
+  assert.deepEqual(
+    parseBucket("202609061025", {
+      "SOURCE|ball-by-ball|POST|/v1/markets|attempts": "4",
+      "SOURCE|ball-by-ball|POST|/v1/markets|succeeded": "4",
+    }).sources,
+    { "ball-by-ball": { "POST /v1/markets": { attempts: 4, succeeded: 4 } } },
   );
 });
 
@@ -437,7 +445,8 @@ test("queued future discovery takes priority after a scheduler collision", () =>
 
 test("market discovery prioritizes cricket and limits non-cricket typed fan-out", () => {
   const cronSource = fs.readFileSync(path.join(__dirname, "../src/config/cron.js"), "utf8");
-  assert.match(cronSource, /MARKET_DISCOVERY_CRON \|\| "\*\/4 \* \* \* \* \*"/);
+  assert.match(cronSource, /MARKET_DISCOVERY_CRON \|\| "\*\/10 \* \* \* \* \*"/);
+  assert.match(cronSource, /LIVE_MARKET_CLEANUP_CRON \|\| "\*\/15 \* \* \* \* \*"/);
   const events = [
     { eventId: 11, sportId: 1 },
     { eventId: 12, sportId: 2 },
@@ -463,12 +472,14 @@ test("cricket ball-by-ball discovery requests are identified independently", () 
   });
 });
 
-test("active Ball-by-Ball discovery is scheduled every second and awaits each vendor request", () => {
+test("active Ball-by-Ball discovery batches events every second and awaits each vendor request", () => {
   const cronSource = fs.readFileSync(path.join(__dirname, "../src/config/cron.js"), "utf8");
   const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
   assert.match(cronSource, /BALL_BY_BALL_DISCOVERY_CRON \|\| "\* \* \* \* \* \*"/);
   assert.match(discoverySource, /if \(ballByBallRunning\) \{[\s\S]*?reason: "already-running"/);
-  assert.match(discoverySource, /for \(const event of events\) \{[\s\S]*?await provider\.markets\(/);
+  assert.match(discoverySource, /BALL_BY_BALL_EVENT_BATCH_SIZE/);
+  assert.match(discoverySource, /for \(const eventBatch of chunks\(events, eventBatchSize\)\) \{[\s\S]*?await provider\.markets\(/);
+  assert.match(discoverySource, /source: "ball-by-ball"/);
   assert.match(discoverySource, /lane === "active" && isBallByBallDiscoveryRequest\(sportId, type\)/);
   assert.match(discoverySource, /pendingSubscriptions[\s\S]*?await subscribeMarkets\(batch/);
 });

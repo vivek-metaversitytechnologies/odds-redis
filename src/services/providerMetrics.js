@@ -22,23 +22,37 @@ function field(method, route, outcome) {
   return `${method}|${route}|${outcome}`;
 }
 
-function increment(timestamp, method, route, outcome, amount = 1) {
+function sourceField(source, method, route, outcome) {
+  return `SOURCE|${source || "unclassified"}|${method}|${route}|${outcome}`;
+}
+
+function incrementField(timestamp, name, amount = 1) {
   if (!enabled()) return;
   const key = metricKey(timestamp);
   if (!pending.has(key)) pending.set(key, new Map());
   const fields = pending.get(key);
-  const name = field(method, route, outcome);
   fields.set(name, (fields.get(name) || 0) + amount);
   scheduleFlush();
 }
 
-function recordAttempt(timestamp, method, route) {
-  increment(timestamp, method, route, "attempts");
+function increment(timestamp, method, route, outcome, amount = 1) {
+  incrementField(timestamp, field(method, route, outcome), amount);
 }
 
-function recordOutcome(timestamp, method, route, outcome, durationMs) {
+function recordAttempt(timestamp, method, route, source) {
+  increment(timestamp, method, route, "attempts");
+  incrementField(timestamp, sourceField(source, method, route, "attempts"));
+}
+
+function recordOutcome(timestamp, method, route, outcome, durationMs, source) {
   increment(timestamp, method, route, outcome);
   increment(timestamp, method, route, "durationMs", Math.max(0, Math.round(durationMs || 0)));
+  incrementField(timestamp, sourceField(source, method, route, outcome));
+  incrementField(
+    timestamp,
+    sourceField(source, method, route, "durationMs"),
+    Math.max(0, Math.round(durationMs || 0)),
+  );
 }
 
 function mergePending(snapshot) {
@@ -89,13 +103,23 @@ function scheduleFlush() {
 
 function parseBucket(id, values) {
   const endpoints = {};
+  const sources = {};
   for (const [name, rawValue] of Object.entries(values || {})) {
-    const [method, route, outcome] = name.split("|");
+    const parts = name.split("|");
+    if (parts[0] === "SOURCE") {
+      const [, source, method, route, outcome] = parts;
+      const endpoint = `${method} ${route}`;
+      if (!sources[source]) sources[source] = {};
+      if (!sources[source][endpoint]) sources[source][endpoint] = {};
+      sources[source][endpoint][outcome] = Number(rawValue) || 0;
+      continue;
+    }
+    const [method, route, outcome] = parts;
     const endpoint = `${method} ${route}`;
     if (!endpoints[endpoint]) endpoints[endpoint] = {};
     endpoints[endpoint][outcome] = Number(rawValue) || 0;
   }
-  return { minute: id, endpoints };
+  return { minute: id, endpoints, sources };
 }
 
 async function history(minutes = 60) {
@@ -108,6 +132,7 @@ async function history(minutes = 60) {
   const rows = await Promise.all(ids.map((id) => client.hGetAll(`${KEY_PREFIX}${id}`)));
   const buckets = ids.map((id, index) => parseBucket(id, rows[index]));
   const totals = {};
+  const sourceTotals = {};
   for (const bucket of buckets) {
     for (const [endpoint, outcomes] of Object.entries(bucket.endpoints)) {
       if (!totals[endpoint]) totals[endpoint] = {};
@@ -115,8 +140,18 @@ async function history(minutes = 60) {
         totals[endpoint][outcome] = (totals[endpoint][outcome] || 0) + value;
       }
     }
+    for (const [source, endpoints] of Object.entries(bucket.sources)) {
+      if (!sourceTotals[source]) sourceTotals[source] = {};
+      for (const [endpoint, outcomes] of Object.entries(endpoints)) {
+        if (!sourceTotals[source][endpoint]) sourceTotals[source][endpoint] = {};
+        for (const [outcome, value] of Object.entries(outcomes)) {
+          sourceTotals[source][endpoint][outcome] =
+            (sourceTotals[source][endpoint][outcome] || 0) + value;
+        }
+      }
+    }
   }
-  return { minutes: limit, totals, buckets };
+  return { minutes: limit, totals, sourceTotals, buckets };
 }
 
 async function stop() {

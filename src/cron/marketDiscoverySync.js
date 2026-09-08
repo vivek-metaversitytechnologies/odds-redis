@@ -893,7 +893,10 @@ async function syncMarketDiscovery(events, lane = "active") {
     const primarySettled = await settleWithConcurrency(
       eventBatches,
       async ({ eids, sportId }) => {
-        const response = await provider.markets({ eids }, { priority: discoveryPriority(sportId, lane) });
+        const response = await provider.markets(
+          { eids },
+          { priority: discoveryPriority(sportId, lane), source: `${lane}-discovery` },
+        );
         return { valid: isMarketSnapshotResponse(response), rows: marketRows(response, eventsById) };
       },
     );
@@ -979,7 +982,7 @@ async function syncMarketDiscovery(events, lane = "active") {
           async ({ eids, type, sportId }) => {
             const response = await provider.markets(
               { eids, type },
-              { priority: discoveryPriority(sportId, lane) },
+              { priority: discoveryPriority(sportId, lane), source: `${lane}-typed-discovery` },
             );
             return marketRows(response, eventsById);
           },
@@ -1152,7 +1155,9 @@ async function syncLiveMarketCleanup() {
       events.map((event) => event.eventId),
       eventBatchSize,
     );
-    const settled = await settleWithConcurrency(eventBatches, (eids) => provider.markets({ eids }));
+    const settled = await settleWithConcurrency(eventBatches, (eids) =>
+      provider.markets({ eids }, { source: "live-cleanup" }),
+    );
     const responses = settled.map((result) => (result.status === "fulfilled" ? result.value : null));
     const vendorMarkets = responses.flatMap((response) => marketRows(response, eventsById));
     const validEventIds = eventBatches.flatMap((eids, index) =>
@@ -1252,16 +1257,21 @@ async function syncActiveBallByBallDiscovery() {
     let failedRequests = 0;
     const requestSummaries = [];
     const logMarketLimit = integer("BALL_BY_BALL_LOG_MARKET_LIMIT", 100, { min: 1, max: 1000 });
+    const eventBatchSize = integer("BALL_BY_BALL_EVENT_BATCH_SIZE", 5, { min: 1, max: 20 });
 
-    // Intentionally sequential: the next vendor request does not start until the
-    // previous event's Ball-by-Ball response has completed.
-    for (const event of events) {
+    // Batches remain sequential: the next vendor request does not start until the
+    // previous Ball-by-Ball response has completed.
+    for (const eventBatch of chunks(events, eventBatchSize)) {
+      const eventIds = eventBatch.map((event) => Number(event.eventId));
       const requestStartedAt = Date.now();
-      writeBallByBallLog("vendor.request.started", { cycleId, eventId: event.eventId });
+      writeBallByBallLog("vendor.request.started", { cycleId, eventIds });
       try {
         const response = await provider.markets(
-          { eids: [Number(event.eventId)], type: ["ball-by-ball"] },
-          { priority: discoveryPriority(event.sportId, "active") },
+          { eids: eventIds, type: ["ball-by-ball"] },
+          {
+            priority: discoveryPriority(eventBatch[0]?.sportId, "active"),
+            source: "ball-by-ball",
+          },
         );
         const rawRows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
         const parsedRows = marketRows(response, eventsById);
@@ -1269,7 +1279,7 @@ async function syncActiveBallByBallDiscovery() {
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);
         const summary = {
           cycleId,
-          eventId: event.eventId,
+          eventIds,
           durationMs: Date.now() - requestStartedAt,
           received: rawRows.length,
           parsed: parsedRows.length,
@@ -1291,14 +1301,14 @@ async function syncActiveBallByBallDiscovery() {
         failedRequests += 1;
         writeBallByBallLog("vendor.request.failed", {
           cycleId,
-          eventId: event.eventId,
+          eventIds,
           durationMs: Date.now() - requestStartedAt,
           error: error.message,
           name: error.name,
           statusCode: error.statusCode ?? null,
         });
         logger.error("[BallByBallDiscovery] vendor request failed", {
-          eventId: event.eventId,
+          eventIds,
           error: error.message,
         });
       }
@@ -1437,8 +1447,9 @@ async function syncActiveBallByBallDiscovery() {
       locallyAttached,
       providerSkipped,
       failedSubscriptionBatches,
-      requests: requestSummaries.map(({ eventId, durationMs, received, parsed, active }) => ({
-        eventId,
+      requestBatchSize: eventBatchSize,
+      requests: requestSummaries.map(({ eventIds, durationMs, received, parsed, active }) => ({
+        eventIds,
         durationMs,
         received,
         parsed,

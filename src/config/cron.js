@@ -14,7 +14,7 @@ module.exports = Object.freeze({
     runOnStart: booleanEnv("RUN_EVENT_SYNC_ON_START"),
   }),
   marketDiscovery: Object.freeze({
-    expression: process.env.MARKET_DISCOVERY_CRON || "*/4 * * * * *",
+    expression: process.env.MARKET_DISCOVERY_CRON || "*/10 * * * * *",
   }),
   ballByBallDiscovery: Object.freeze({
     expression: process.env.BALL_BY_BALL_DISCOVERY_CRON || "* * * * * *",
@@ -23,7 +23,7 @@ module.exports = Object.freeze({
     expression: process.env.FUTURE_MARKET_DISCOVERY_CRON || "0 */10 * * * *",
   }),
   liveMarketCleanup: Object.freeze({
-    expression: process.env.LIVE_MARKET_CLEANUP_CRON || "*/3 * * * * *",
+    expression: process.env.LIVE_MARKET_CLEANUP_CRON || "*/15 * * * * *",
   }),
   redisEventCleanup: Object.freeze({
     expression: process.env.REDIS_EVENT_CLEANUP_CRON || "0 */10 * * * *",
