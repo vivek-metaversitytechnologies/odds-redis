@@ -105,6 +105,9 @@ const {
   fancyResultValue,
   isEventTerminalMarketName,
   interleaveResultCandidates,
+  settleWithConcurrency: settleResultsWithConcurrency,
+  advanceCandidateCursors,
+  __testing__: resultTesting,
 } = require("../src/cron/resultSync");
 const { integer, boolean, csvIntegers } = require("../src/config/env");
 const { setBounded } = require("../src/utils/boundedMap");
@@ -584,6 +587,33 @@ test("bounded result polling cannot starve fancy candidates", () => {
     interleaveResultCandidates(regular, fancies).map((market) => market.marketid),
     ["r1", "f1", "r2", "f2", "r3", "f3"],
   );
+});
+
+test("result requests use bounded concurrency", async () => {
+  let running = 0;
+  let peak = 0;
+  const results = await settleResultsWithConcurrency(
+    [1, 2, 3, 4, 5],
+    async (value) => {
+      running += 1;
+      peak = Math.max(peak, running);
+      await new Promise((resolve) => setImmediate(resolve));
+      running -= 1;
+      return value * 2;
+    },
+    2,
+  );
+  assert.equal(peak, 2);
+  assert.deepEqual(results.map((result) => result.value), [2, 4, 6, 8, 10]);
+});
+
+test("result cursors advance only through candidates actually requested", () => {
+  resultTesting.resetCandidateCursors();
+  const markets = [{ candidateid: 30 }, { candidateid: 20 }, { candidateid: 10 }];
+  const fancies = [{ candidateid: 300 }, { candidateid: 200 }, { candidateid: 100 }];
+  const next = advanceCandidateCursors([markets[0], fancies[0], markets[1]], markets, fancies);
+  assert.deepEqual(next, { market: 20, fancy: 300 });
+  resultTesting.resetCandidateCursors();
 });
 
 test("market discovery delegates subscription reconciliation to its standalone cron", () => {
@@ -2217,8 +2247,9 @@ test("socket game-over cleans up immediately while corrected vendor state can re
     resultSource,
     /ORDER BY CASE WHEN \? IS NULL OR f\.id < \? THEN 0 ELSE 1 END, f\.id DESC/,
   );
-  assert.match(resultSource, /candidateCursors\.market = markets\.length/);
-  assert.match(resultSource, /candidateCursors\.fancy = fancies\.length/);
+  assert.match(resultSource, /candidateCursors\.market = Number\(requestedMarkets\.at\(-1\)\.candidateid\)/);
+  assert.match(resultSource, /candidateCursors\.fancy = Number\(requestedFancies\.at\(-1\)\.candidateid\)/);
+  assert.match(resultSource, /RESULT_REQUEST_CONCURRENCY \|\| 4/);
   assert.match(discoverySource, /isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\),isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\)/);

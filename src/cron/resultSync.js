@@ -66,6 +66,37 @@ function interleaveResultCandidates(markets = [], fancies = []) {
   return combined;
 }
 
+async function settleWithConcurrency(items, mapper, concurrency) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      try {
+        results[index] = { status: "fulfilled", value: await mapper(items[index], index) };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  }
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
+function advanceCandidateCursors(requested, marketCandidates, fancyCandidates) {
+  const marketIds = new Set(marketCandidates.map((candidate) => candidate));
+  const fancyIds = new Set(fancyCandidates.map((candidate) => candidate));
+  const requestedMarkets = requested.filter((candidate) => marketIds.has(candidate));
+  const requestedFancies = requested.filter((candidate) => fancyIds.has(candidate));
+  if (!marketCandidates.length) candidateCursors.market = null;
+  else if (requestedMarkets.length) candidateCursors.market = Number(requestedMarkets.at(-1).candidateid);
+  if (!fancyCandidates.length) candidateCursors.fancy = null;
+  else if (requestedFancies.length) candidateCursors.fancy = Number(requestedFancies.at(-1).candidateid);
+  return { ...candidateCursors };
+}
+
 async function hasExceptionalTable(connection) {
   if (exceptionalTableAvailable != null) return exceptionalTableAvailable;
   const [rows] = await connection.query(
@@ -107,10 +138,7 @@ async function loadCandidates() {
      LIMIT ?`,
     ["OPEN", ...sportIds, candidateCursors.fancy, candidateCursors.fancy, limit],
   );
-  const cursorsUsed = { ...candidateCursors };
-  candidateCursors.market = markets.length ? Number(markets.at(-1).candidateid) : null;
-  candidateCursors.fancy = fancies.length ? Number(fancies.at(-1).candidateid) : null;
-  return { markets, fancies, cursorsUsed, nextCursors: { ...candidateCursors } };
+  return { markets, fancies, cursorsUsed: { ...candidateCursors } };
 }
 
 async function handleSocketGameOver(marketIds) {
@@ -441,7 +469,10 @@ async function syncResults() {
   state.lastStartedAt = new Date().toISOString();
   state.lastError = null;
   try {
+    const startedAt = Date.now();
+    const candidatesStartedAt = Date.now();
     const candidates = await loadCandidates();
+    const candidateLoadMs = Date.now() - candidatesStartedAt;
     // A bounded run must not let a large regular-market backlog consume every
     // provider call before the first fancy is reached. Alternate both queues so
     // each market family receives result-polling capacity on every run.
@@ -454,17 +485,35 @@ async function syncResults() {
     }
     const requested = all.slice(0, batches.length * batchSize);
     const fancyObjects = new Set(candidates.fancies);
-    const responses = await Promise.allSettled(batches.map((mids) => provider.results({ mids })));
+    const nextCursors = advanceCandidateCursors(
+      requested,
+      candidates.markets,
+      candidates.fancies,
+    );
+    const requestConcurrency = Math.max(
+      1,
+      Math.min(20, Number(process.env.RESULT_REQUEST_CONCURRENCY || 4)),
+    );
+    const vendorStartedAt = Date.now();
+    const responses = await settleWithConcurrency(
+      batches,
+      (mids) => provider.results({ mids }),
+      requestConcurrency,
+    );
+    const vendorDurationMs = Date.now() - vendorStartedAt;
     const results = responses.flatMap((response) =>
       response.status === "fulfilled" ? responseRows(response.value) : [],
     );
+    const persistenceStartedAt = Date.now();
     const applied = await applyResults(results, candidates);
+    const persistenceDurationMs = Date.now() - persistenceStartedAt;
     const output = {
       skipped: false,
       candidates: all.length,
       regular: candidates.markets.length,
       fancies: candidates.fancies.length,
       calls: batches.length,
+      requestConcurrency,
       requestedRegular: requested.filter((market) => !fancyObjects.has(market)).length,
       requestedFancies: requested.filter((market) => fancyObjects.has(market)).length,
       failedCalls: responses.filter((response) => response.status === "rejected").length,
@@ -477,7 +526,11 @@ async function syncResults() {
       persistenceFailures: applied.persistenceFailures,
       rejectedResults: applied.rejectedResults,
       cursorsUsed: candidates.cursorsUsed,
-      nextCursors: candidates.nextCursors,
+      nextCursors,
+      candidateLoadMs,
+      vendorDurationMs,
+      persistenceDurationMs,
+      durationMs: Date.now() - startedAt,
     };
     state.lastResult = output;
     if (applied.persistenceFailures) {
@@ -512,6 +565,8 @@ module.exports = {
   responseRows,
   fancyResultValue,
   interleaveResultCandidates,
+  settleWithConcurrency,
+  advanceCandidateCursors,
   isEventTerminalMarketName,
   loadCandidates,
   handleSocketGameOver,
