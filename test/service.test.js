@@ -2049,6 +2049,8 @@ test("fancy settlement values follow the Java-compatible contract", () => {
   assert.equal(fancyResultValue("4.1-F2", "87"), 87);
   assert.equal(fancyResultValue("4.1-BB", "12"), 12);
   assert.equal(fancyResultValue("4.1-CC", "4"), 4);
+  assert.equal(fancyResultValue("4.1-KD", "38", "khado"), 38);
+  assert.equal(fancyResultValue("4.1-MT", "19", "meter"), 19);
   assert.equal(fancyResultValue("4.1-OE", "Back"), 1);
   assert.equal(fancyResultValue("4.1-OE", "Lay"), 0);
   assert.equal(fancyResultValue("4.1-F3", "back"), 1);

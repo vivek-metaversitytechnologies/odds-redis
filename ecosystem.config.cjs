@@ -28,9 +28,6 @@ module.exports = {
         REDIS_MEMORY_CACHE_LIMIT: "50000",
         MARKET_DISCOVERY_CACHE_LIMIT: "50000",
         SCORE_HASH_CACHE_LIMIT: "50000",
-        RESULT_BATCH_SIZE: "250",
-        RESULT_MAX_CALLS_PER_RUN: "8",
-        RESULT_MARKET_LIMIT: "2000",
       },
     },
     {

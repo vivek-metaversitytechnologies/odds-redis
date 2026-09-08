@@ -43,7 +43,9 @@ function fancyResultValue(marketId, result, marketType) {
     id.includes("-F2") ||
     id.includes("-BB") ||
     id.includes("-CC") ||
-    String(marketType).toLowerCase() === "line-market"
+    id.includes("-KD") ||
+    id.includes("-MT") ||
+    ["line-market", "khado", "meter"].includes(String(marketType).toLowerCase())
   ) {
     const value = Number.parseInt(result, 10);
     return Number.isInteger(value) ? value : null;
