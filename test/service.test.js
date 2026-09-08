@@ -571,7 +571,10 @@ test("all open fancies without results are eligible for vendor result polling", 
   assert.match(source, /WHERE UPPER\(f\.status\)=\?/);
   assert.doesNotMatch(source, /WHERE f\.isactive=\?/);
   assert.doesNotMatch(source, /f\.updatedon >= DATE_SUB/);
-  assert.match(source, /\["OPEN", \.\.\.sportIds, limit\]/);
+  assert.match(
+    source,
+    /\["OPEN", \.\.\.sportIds, candidateCursors\.fancy, candidateCursors\.fancy, limit\]/,
+  );
 });
 
 test("bounded result polling cannot starve fancy candidates", () => {
@@ -2206,7 +2209,16 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.doesNotMatch(resultSource, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.doesNotMatch(resultSource, /f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)/);
   assert.doesNotMatch(resultSource, /f\.isactive=\? AND UPPER\(f\.status\) IN/);
-  assert.match(resultSource, /ORDER BY f\.isactive ASC, f\.updatedon DESC, f\.id DESC/);
+  assert.match(
+    resultSource,
+    /ORDER BY CASE WHEN \? IS NULL OR m\.id < \? THEN 0 ELSE 1 END, m\.id DESC/,
+  );
+  assert.match(
+    resultSource,
+    /ORDER BY CASE WHEN \? IS NULL OR f\.id < \? THEN 0 ELSE 1 END, f\.id DESC/,
+  );
+  assert.match(resultSource, /candidateCursors\.market = markets\.length/);
+  assert.match(resultSource, /candidateCursors\.fancy = fancies\.length/);
   assert.match(discoverySource, /isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\),isactive=VALUES\(isactive\)/);
   assert.match(discoverySource, /status=VALUES\(status\)/);

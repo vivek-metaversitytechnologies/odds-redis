@@ -12,6 +12,7 @@ const lifecycle = require("../services/eventLifecyclePolicy");
 
 let running = false;
 let exceptionalTableAvailable;
+const candidateCursors = { market: null, fancy: null };
 const state = {
   running: false,
   lastStartedAt: null,
@@ -83,17 +84,18 @@ async function loadCandidates() {
   const placeholders = sportIds.map(() => "?").join(",");
   const limit = Math.max(1, Number(process.env.RESULT_MARKET_LIMIT || 2000));
   const [markets] = await getSourcePool().query(
-    `SELECT m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
+    `SELECT m.id AS candidateid, m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive=?
        AND m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
-     ORDER BY m.id DESC LIMIT ?`,
-    [true, ...sportIds, limit],
+     ORDER BY CASE WHEN ? IS NULL OR m.id < ? THEN 0 ELSE 1 END, m.id DESC
+     LIMIT ?`,
+    [true, ...sportIds, candidateCursors.market, candidateCursors.market, limit],
   );
   const [fancies] = await getSourcePool().query(
-    `SELECT f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
+    `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
             COALESCE(f.sportid,e.sportid) AS sportid
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
@@ -101,10 +103,14 @@ async function loadCandidates() {
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
-     ORDER BY f.isactive ASC, f.updatedon DESC, f.id DESC LIMIT ?`,
-    ["OPEN", ...sportIds, limit],
+     ORDER BY CASE WHEN ? IS NULL OR f.id < ? THEN 0 ELSE 1 END, f.id DESC
+     LIMIT ?`,
+    ["OPEN", ...sportIds, candidateCursors.fancy, candidateCursors.fancy, limit],
   );
-  return { markets, fancies };
+  const cursorsUsed = { ...candidateCursors };
+  candidateCursors.market = markets.length ? Number(markets.at(-1).candidateid) : null;
+  candidateCursors.fancy = fancies.length ? Number(fancies.at(-1).candidateid) : null;
+  return { markets, fancies, cursorsUsed, nextCursors: { ...candidateCursors } };
 }
 
 async function handleSocketGameOver(marketIds) {
@@ -470,6 +476,8 @@ async function syncResults() {
       settledMarketIds: applied.settled,
       persistenceFailures: applied.persistenceFailures,
       rejectedResults: applied.rejectedResults,
+      cursorsUsed: candidates.cursorsUsed,
+      nextCursors: candidates.nextCursors,
     };
     state.lastResult = output;
     if (applied.persistenceFailures) {
@@ -514,4 +522,11 @@ module.exports = {
   persistMarketResult,
   persistFancyResult,
   persistExceptional,
+  __testing__: {
+    candidateCursors,
+    resetCandidateCursors() {
+      candidateCursors.market = null;
+      candidateCursors.fancy = null;
+    },
+  },
 };
