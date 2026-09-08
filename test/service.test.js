@@ -460,10 +460,10 @@ test("cricket ball-by-ball discovery requests are identified independently", () 
   });
 });
 
-test("active Ball-by-Ball discovery is scheduled every two seconds and awaits each vendor request", () => {
+test("active Ball-by-Ball discovery is scheduled every second and awaits each vendor request", () => {
   const cronSource = fs.readFileSync(path.join(__dirname, "../src/config/cron.js"), "utf8");
   const discoverySource = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
-  assert.match(cronSource, /BALL_BY_BALL_DISCOVERY_CRON \|\| "\*\/2 \* \* \* \* \*"/);
+  assert.match(cronSource, /BALL_BY_BALL_DISCOVERY_CRON \|\| "\* \* \* \* \* \*"/);
   assert.match(discoverySource, /if \(ballByBallRunning\) \{[\s\S]*?reason: "already-running"/);
   assert.match(discoverySource, /for \(const event of events\) \{[\s\S]*?await provider\.markets\(/);
   assert.match(discoverySource, /lane === "active" && isBallByBallDiscoveryRequest\(sportId, type\)/);
@@ -1570,7 +1570,10 @@ test("Ball-by-Ball definitions are immediately visible as suspended placeholders
   assert.equal(entry.gstatus, "SUSPENDED");
   assert.equal(entry.nation, "Ball Run HK-W");
   assert.equal(entry.ballLine, 17.2);
-  assert.equal(entry.srno, "17.2");
+  assert.equal(entry.srno, "");
+  assert.equal(entry.difference, null);
+  assert.equal(entry.d, null);
+  assert.equal(entry.di, null);
   assert.equal(frontendEventPayload({ BallByBall: [entry] }).BallByBall.length, 1);
 });
 
@@ -1765,8 +1768,10 @@ test("ball-by-ball socket ticks expose the discovery ball line separately from t
   );
   assert.equal(output.nation, "Ball Run SB");
   assert.equal(output.ballLine, 29);
-  assert.equal(output.difference, 29);
-  assert.equal(output.srno, "29");
+  assert.equal(output.difference, null);
+  assert.equal(output.d, null);
+  assert.equal(output.di, null);
+  assert.equal(output.srno, "");
 });
 
 test("ball-by-ball metadata splits a decimal ball line from its durable database name", () => {

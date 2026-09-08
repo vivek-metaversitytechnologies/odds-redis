@@ -668,10 +668,10 @@ function fancyPayload(item, market) {
     .includes("-CC");
   const casinoRate = cricketCasino ? numberOr(runner.ra ?? item.ra) : null;
   const ballMetadata = ballByBall ? ballByBallMetadata(market.marketname) : null;
-  const difference = numberOr(
-    item.d ?? item.di ?? item.srno ?? runner.d ?? runner.di ?? runner.srno,
-    ballMetadata?.ballLine ?? null,
-  );
+  const ballLine = ballByBall ? numberOr(item.ballLine, ballMetadata?.ballLine ?? null) : null;
+  const difference = ballByBall
+    ? null
+    : numberOr(item.d ?? item.di ?? item.srno ?? runner.d ?? runner.di ?? runner.srno);
   return {
     mid: String(item.mid),
     sid: String(runner.rid ?? item.mid),
@@ -689,7 +689,7 @@ function fancyPayload(item, market) {
     difference,
     d: difference,
     di: difference,
-    ...(ballByBall ? { ballLine: difference } : {}),
+    ...(ballByBall ? { ballLine } : {}),
     gameover: booleanOr(item.go, false),
     s: booleanOr(item.s, true),
     maxBet: numberOr(market.maxbet),
@@ -754,12 +754,12 @@ function fancyDefinitionEntry(market) {
     // this placeholder. Other fancy families still wait for their first tick.
     gstatus: ballByBall ? "SUSPENDED" : "WAITING",
     rem: "",
-    srno: ballMetadata?.ballLine == null ? "" : String(ballMetadata.ballLine),
+    srno: "",
     ...(ballByBall
       ? {
-          difference: ballMetadata?.ballLine ?? null,
-          d: ballMetadata?.ballLine ?? null,
-          di: ballMetadata?.ballLine ?? null,
+          difference: null,
+          d: null,
+          di: null,
           ballLine: ballMetadata?.ballLine ?? null,
         }
       : {}),
