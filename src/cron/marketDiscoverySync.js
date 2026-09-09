@@ -516,6 +516,7 @@ async function upsertMarkets(markets) {
         deactivatedMarketIds.push(market.marketId);
       }
     }
+    await require("../services/pendingResultQueue").enqueue(deactivatedMarketIds);
     for (const batch of chunks(writable)) {
       const values = batch.map((market) => [
         market.marketId,

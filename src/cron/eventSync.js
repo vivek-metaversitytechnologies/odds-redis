@@ -9,6 +9,7 @@ const frontendSocket = require("../services/frontendSocketService");
 const cronConfig = require("../config/cron");
 const { utcToIstSql } = require("../utils/dateTime");
 const lifecycle = require("../services/eventLifecyclePolicy");
+const pendingResults = require("../services/pendingResultQueue");
 
 let running = false;
 const state = {
@@ -165,6 +166,7 @@ async function retireCompletedEvents(events) {
       [...eventIds, true],
     );
     marketIds = [...markets, ...fancies].map((row) => String(row.marketid));
+    await pendingResults.enqueue(markets.map((row) => row.marketid));
     if (!marketIds.length) {
       await connection.rollback();
     } else {

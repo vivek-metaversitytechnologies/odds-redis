@@ -9,6 +9,7 @@ const cronConfig = require("../config/cron");
 const { eventWindowSql } = require("../utils/eventWindow");
 const { retryDeadlock } = require("../utils/dbRetry");
 const lifecycle = require("../services/eventLifecyclePolicy");
+const pendingResults = require("../services/pendingResultQueue");
 
 let running = false;
 let exceptionalTableAvailable;
@@ -200,6 +201,7 @@ async function handleSocketGameOver(marketIds) {
           },
         }).execute,
       );
+      await pendingResults.enqueue(markets.map((market) => market.marketid));
       await connection.query(
         `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
          WHERE marketid IN (${placeholders})`,
@@ -228,6 +230,7 @@ async function handleSocketGameOver(marketIds) {
            WHERE eventid IN (${eventPlaceholders})`,
           terminalEventIds,
         );
+        await pendingResults.enqueue(eventMarkets.map((market) => market.marketid));
         await connection.query(
           `UPDATE t_event SET isactive=?,status=?,in_play=?,updatedon=NOW()
            WHERE eventid IN (${eventPlaceholders})`,
@@ -311,10 +314,11 @@ async function persistExceptional(connection, market, result) {
       ],
     );
   } else {
-    logger.warn("[ResultSync] exceptional result table is absent; market deactivated without result row", {
+    logger.warn("[ResultSync] exceptional result table is absent; result remains pending", {
       marketId: market.marketid,
       result: label,
     });
+    return false;
   }
   await connection.execute(
     "UPDATE t_market SET isactive=?, status=?, issubscribed=?, updatedon=NOW() WHERE marketid=?",
@@ -567,12 +571,19 @@ async function syncResults() {
     const startedAt = Date.now();
     const candidatesStartedAt = Date.now();
     const candidates = await loadCandidates();
+    const pending = await pendingResults.load();
+    const activeRegular = candidates.markets;
+    const activeRegularIds = new Set(activeRegular.map((row) => String(row.marketid)));
+    const queued = pending.rows.filter((row) => !activeRegularIds.has(String(row.marketid)));
+    candidates.markets = interleaveResultCandidates(queued, await pendingResults.excludeReviewed(activeRegular));
     const candidateLoadMs = Date.now() - candidatesStartedAt;
     // A bounded run must not let a large regular-market backlog consume every
     // provider call before the first fancy is reached. Alternate both queues so
     // each market family receives result-polling capacity on every run.
     const all = interleaveResultCandidates(candidates.markets, candidates.fancies);
-    const batchSize = Math.max(1, Number(process.env.RESULT_BATCH_SIZE || 100));
+    const configuredBatchSize = Number(process.env.RESULT_BATCH_SIZE || 100);
+    const batchSize = Number.isFinite(configuredBatchSize)
+      ? Math.min(100, Math.max(1, Math.floor(configuredBatchSize))) : 100;
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
     const batches = [];
     for (let index = 0; index < all.length && batches.length < maxCalls; index += batchSize) {
@@ -582,7 +593,7 @@ async function syncResults() {
     const fancyObjects = new Set(candidates.fancies);
     const nextCursors = advanceCandidateCursors(
       requested,
-      candidates.markets,
+      activeRegular,
       candidates.fancies,
     );
     const requestConcurrency = Math.max(
@@ -601,10 +612,17 @@ async function syncResults() {
     );
     const persistenceStartedAt = Date.now();
     const applied = await applyResults(results, candidates);
+    await pendingResults.remove(applied.settled);
+    const settledIds = new Set(applied.settled);
+    const pendingIds = new Set(pending.rows.map((row) => String(row.marketid)));
+    await pendingResults.defer(requested
+      .map((row) => String(row.marketid))
+      .filter((id) => pendingIds.has(id) && !settledIds.has(id)));
     const persistenceDurationMs = Date.now() - persistenceStartedAt;
     const output = {
       skipped: false,
       candidates: all.length,
+      pendingResults: { depth: pending.depth, eligible: pending.rows.length, recoveredRows: pending.recovered, reviewCount: pending.reviewCount },
       regular: candidates.markets.length,
       fancies: candidates.fancies.length,
       calls: batches.length,
@@ -663,7 +681,29 @@ function getResultSyncStatus() {
   return { ...state };
 }
 
+async function reconcileReviewed(ids) {
+  if (!Array.isArray(ids) || !ids.length || ids.length > 20 || ids.some((id) => typeof id !== "string" || !redis.validMarketIdentifier(id))) {
+    throw Object.assign(new Error("Select between 1 and 20 valid market IDs"), { status: 400 });
+  }
+  if (running) throw Object.assign(new Error("Result reconciliation is already running; try again after it finishes"), { status: 409 });
+  running = true;
+  try {
+    const c = await redis.getRedisClient();
+    const unique = [...new Set(ids)];
+    const reviewed = await c.hmGet("Pending-Regular-Results:review", unique);
+    if (reviewed.some((value) => value == null)) throw Object.assign(new Error("One or more markets are no longer in review"), { status: 409 });
+    const [markets] = await getSourcePool().query(
+      `SELECT marketid,marketname,eventid,matchname,sportid FROM t_market WHERE marketid IN (${unique.map(() => "?").join(",")})`, unique,
+    );
+    const response = await provider.results({ mids: unique });
+    const applied = await applyResults(responseRows(response), { markets, fancies: [] });
+    if (applied.settled.length) await c.hDel("Pending-Regular-Results:review", applied.settled);
+    return { requested: unique.length, settled: applied.settled, remaining: unique.filter((id) => !applied.settled.includes(id)), rejected: applied.rejectedResultDetails, persistenceFailures: applied.persistenceFailures };
+  } finally { running = false; }
+}
+
 module.exports = {
+  reconcileReviewed,
   responseRows,
   fancyResultValue,
   rejectedResultReason,
