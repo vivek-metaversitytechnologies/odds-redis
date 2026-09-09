@@ -95,13 +95,38 @@ async function reconcileActiveMatchProjection(redis, sportId, rows) {
   const key = activeMatchKey(sportId);
   const existing = await redis.hGetAll(key);
   const activeIds = new Set(rows.map((event) => String(event.eventId)));
+  const payloads = new Map();
+  const missingEventIds = [];
+  for (const event of rows) {
+    const eventId = String(event.eventId);
+    const cached = eventPayloadCache.get(eventId);
+    if (cached) payloads.set(eventId, cached);
+    else missingEventIds.push(eventId);
+  }
+  if (missingEventIds.length) {
+    const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+    const snapshots = await redis.mGet(missingEventIds.map((eventId) => `${prefix}${eventId}`));
+    for (let index = 0; index < missingEventIds.length; index += 1) {
+      const value = snapshots[index];
+      if (!value) continue;
+      try {
+        const eventId = missingEventIds[index];
+        const payload = normalizeEventPayload(JSON.parse(value));
+        payloads.set(eventId, payload);
+        setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+      } catch {
+        // A malformed event snapshot must not prevent the remaining projection
+        // entries from being reconciled.
+      }
+    }
+  }
   const transaction = redis.multi();
   transaction.hSet(key, "_meta", JSON.stringify({ sportId, updatedAt: new Date().toISOString() }));
   for (const event of rows) {
     const eventId = String(event.eventId);
     let entry = null;
     const emptyProjection = activeMatchProjection(event, null);
-    const payload = eventPayloadCache.get(eventId);
+    const payload = payloads.get(eventId);
     if (payload) entry = activeMatchProjection(event, payload);
     if (!entry && existing[eventId]) {
       try {
@@ -117,7 +142,6 @@ async function reconcileActiveMatchProjection(redis, sportId, rows) {
         entry = null;
       }
     }
-    if (entry && !entry.marketId && !emptyProjection) entry = null;
     entry ||= emptyProjection;
     if (entry) transaction.hSet(key, eventId, JSON.stringify(entry));
     else transaction.hDel(key, eventId);
@@ -1450,6 +1474,7 @@ module.exports = {
   validMarketIdentifier,
   invalidateMarkets,
   __testing__: {
+    reconcileActiveMatchProjection,
     setRedisClient(fakeClient) {
       client = fakeClient;
       readClient = fakeClient;

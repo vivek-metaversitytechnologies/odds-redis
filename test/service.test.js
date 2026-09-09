@@ -929,6 +929,56 @@ test("started events with a displayable fancy remain visible without a primary m
   ]);
 });
 
+test("active-match projection hydrates Redis snapshots after an application restart", async () => {
+  const event = {
+    eventId: 36030984,
+    eventName: "Derbyshire v Kent",
+    sportId: 4,
+    seriesId: 11679292,
+    openDate: "2026-09-10T09:30:00.000Z",
+    inPlay: true,
+    gameOver: false,
+  };
+  const snapshot = {
+    Odds: [],
+    Bookmaker: [],
+    Fancy2: [{ mid: "4.1-F2", nation: "1 Over Run", gstatus: "SUSPENDED" }],
+  };
+  const written = new Map();
+  const transaction = {
+    hSet(_key, field, value) {
+      written.set(field, value);
+      return transaction;
+    },
+    hDel() {
+      return transaction;
+    },
+    expire() {
+      return transaction;
+    },
+    async exec() {
+      return [];
+    },
+  };
+  const fakeClient = {
+    async hGetAll() {
+      return {};
+    },
+    async mGet(keys) {
+      assert.deepEqual(keys, ["Data-Rs:36030984"]);
+      return [JSON.stringify(snapshot)];
+    },
+    multi() {
+      return transaction;
+    },
+  };
+
+  redisTesting.reset();
+  await redisTesting.reconcileActiveMatchProjection(fakeClient, 4, [event]);
+
+  assert.deepEqual(JSON.parse(written.get("36030984")), eventOnlyDashboardEntry(event));
+});
+
 test("database active-match rows are grouped without correlated market scans", () => {
   const common = {
     eventid: 101,
