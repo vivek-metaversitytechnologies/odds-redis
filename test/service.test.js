@@ -1614,13 +1614,19 @@ test("vendor discovery deactivates a market when every response agrees", () => {
   assert.equal(row.gameOver, true);
 });
 
-test("missing line markets require consecutive authoritative discovery passes", () => {
+test("missing line markets remain active despite repeated unfiltered omissions", () => {
   const counts = new Map();
   const stored = [{ marketId: "1.2" }, { marketId: "1.3" }];
   const vendor = [{ marketId: "1.3" }];
   assert.deepEqual(missingLineMarketIds(stored, vendor, counts), []);
-  assert.deepEqual(missingLineMarketIds(stored, vendor, counts), ["1.2"]);
+  for (let i = 0; i < 10; i += 1) assert.deepEqual(missingLineMarketIds(stored, vendor, counts), []);
   assert.equal(counts.has("1.3"), false);
+});
+
+test("line market classification uses vendor type when the name does not contain line", () => {
+  assert.equal(payloadGroup({ mid: "1.123" }, { mtype: "line-market", marketname: "Total Runs" }), "LineMarket");
+  const definition = regularDefinitionEntries({ marketId: "1.123", marketType: "line-market", marketName: "Total Runs", eventId: 123, isActive: true }, []);
+  assert.equal(definition.group, "LineMarket");
 });
 
 test("a reappearing line market clears its missing-pass counter", () => {

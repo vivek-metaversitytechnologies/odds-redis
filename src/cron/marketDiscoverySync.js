@@ -297,7 +297,7 @@ function marketRows(response, eventsById) {
         matchName: event?.eventName || null,
         openDate: event?.openDate || null,
         inPlay: Boolean(event?.inPlay),
-        gameOver: Boolean(item?.gameOver),
+        gameOver: marketType === "line-market" ? item?.gameOver === true : Boolean(item?.gameOver),
         isActive: item?.isActive !== false,
         status: vendorMarketStatus(item),
         betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3,
@@ -471,6 +471,16 @@ async function upsertFancies(fancies) {
       } catch (error) {
         await connection.rollback();
         throw error;
+      }
+    }
+    for (const fancy of writable) {
+      if (fancy.marketType === "line-market" && (!fancy.isActive || fancy.gameOver) &&
+          (existing.get(fancy.marketId)?.isActive || !existing.has(fancy.marketId))) {
+        logger.info("[LineMarket] deactivated from vendor flags", {
+          eventId: fancy.eventId, marketId: fancy.marketId, name: fancy.marketName,
+          reason: fancy.gameOver ? "vendor-game-over" : "vendor-inactive",
+          evidence: { isActive: fancy.isActive, gameOver: fancy.gameOver, status: fancy.status },
+        });
       }
     }
     return {
@@ -805,7 +815,6 @@ async function reconcileInactiveLineMarkets(markets) {
 function missingLineMarketIds(storedMarkets, vendorMarkets, missCounts = missingLineMarketPasses) {
   const present = new Set((vendorMarkets || []).map((market) => String(market.marketId)));
   const storedIds = new Set((storedMarkets || []).map((market) => String(market.marketId)));
-  const deactivated = [];
 
   for (const marketId of present) missCounts.delete(marketId);
   for (const market of storedMarkets || []) {
@@ -813,13 +822,16 @@ function missingLineMarketIds(storedMarkets, vendorMarkets, missCounts = missing
     if (present.has(marketId)) continue;
     const misses = (missCounts.get(marketId) || 0) + 1;
     missCounts.set(marketId, misses);
-    if (misses >= MISSING_LINE_MARKET_PASSES) deactivated.push(marketId);
+    if (misses === MISSING_LINE_MARKET_PASSES) logger.warn("[LineMarket] absent from unfiltered response; retained", {
+      eventId: market.eventId, marketId, missingObservations: misses,
+      reason: "omission-is-not-terminal-evidence",
+    });
   }
   // Do not retain counters for events/markets outside the current reconciliation scope.
   for (const marketId of missCounts.keys()) {
     if (!storedIds.has(marketId) && !present.has(marketId)) missCounts.delete(marketId);
   }
-  return deactivated;
+  return [];
 }
 
 async function reconcileMissingLineMarkets(eventIds, vendorMarkets) {

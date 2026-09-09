@@ -735,9 +735,7 @@ function payloadGroup(item, market) {
   const name = String(market.marketname || "").toLowerCase();
   const marketType = String(market.markettype || market.mtype || item.type || "").toLowerCase();
   if (id.includes("BM") || name.includes("bookmaker") || name === "toss") return "Bookmaker";
-  // Vendor line-market IDs look like normal exchange IDs (for example 1.260761724),
-  // so their persisted market name is the stable discriminator available on socket ticks.
-  if (/\bline\b/.test(name)) return "LineMarket";
+  if (marketType === "line-market" || /\bline\b/.test(name)) return "LineMarket";
   if (id.includes("OE") || name.includes("odd even")) return "OddEven";
   if (id.endsWith("-F3")) return "Fancy3";
   if (name.includes("other market")) return "OtherMarket";
@@ -885,6 +883,7 @@ function regularDefinitionEntries(market, runners = []) {
     sportid: market.sportId,
     marketid: market.marketId,
     marketname: market.marketName,
+    mtype: market.marketType,
     matchname: market.matchName,
     opendate: market.openDate,
     inplay: market.inPlay,

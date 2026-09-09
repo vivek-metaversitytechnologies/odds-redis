@@ -4,6 +4,9 @@ const { getSourcePool } = require("../config/sourceDb");
 const key = "Pending-Regular-Results";
 const DAY_MS = 86400000;
 const reviewKey = `${key}:review`;
+// Older scans interpreted MySQL BIT buffers with Number(), skipping inactive rows.
+// Invalidate those checkpoints once so a corrected full pass starts immediately.
+const RECOVERY_VERSION = 2;
 let recoveryCursor = 0;
 let nextRecoveryAt = 0;
 let lastRecoveryAt = 0;
@@ -88,11 +91,13 @@ async function recover(accelerate = false) {
     const saved = await c.get(`${key}:recovery`);
     if (saved) {
       const value = JSON.parse(saved);
-      recoveryCursor = Number(value.cursor) || 0;
-      nextRecoveryAt = Number(value.nextRecoveryAt) || 0;
-      lastRecoveryAt = Number(value.lastRecoveryAt) || 0;
-      scannedRows = Number(value.scannedRows) || 0;
-      completedPasses = Number(value.completedPasses) || 0;
+      if (value.version === RECOVERY_VERSION) {
+        recoveryCursor = Number(value.cursor) || 0;
+        nextRecoveryAt = Number(value.nextRecoveryAt) || 0;
+        lastRecoveryAt = Number(value.lastRecoveryAt) || 0;
+        scannedRows = Number(value.scannedRows) || 0;
+        completedPasses = Number(value.completedPasses) || 0;
+      }
     }
     recoveryLoaded = true;
   }
@@ -101,7 +106,7 @@ async function recover(accelerate = false) {
   const pool = getSourcePool();
   const [tables] = await pool.query("SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='t_matchabondendtie'");
   const [rows] = await getSourcePool().query(
-    "SELECT id,marketid,isactive FROM t_market WHERE id>? ORDER BY id LIMIT ?",
+    "SELECT id,marketid,isactive+0 AS isactive FROM t_market WHERE id>? ORDER BY id LIMIT ?",
     [recoveryCursor, batchSize],
   );
   const inactive = rows.filter((row) => Number(row.isactive) === 0).map((row) => row.marketid);
@@ -115,7 +120,7 @@ async function recover(accelerate = false) {
   }
   const cursor = rows.length === batchSize ? rows[rows.length - 1].id : 0;
   const now = Date.now();
-  const checkpoint = { cursor, lastRecoveryAt: now,
+  const checkpoint = { version: RECOVERY_VERSION, cursor, lastRecoveryAt: now,
     nextRecoveryAt: now + (cursor ? (accelerate ? 1000 : 60000) : 3600000),
     scannedRows: scannedRows + rows.length, completedPasses: completedPasses + (cursor ? 0 : 1) };
   // Commit after enqueue; replaying a page after a crash is safe (NX enqueue).
@@ -179,4 +184,4 @@ async function defer(ids) {
   })), { XX: true });
 }
 
-module.exports = { enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus };
+module.exports = { enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus, __testing__: { recover } };

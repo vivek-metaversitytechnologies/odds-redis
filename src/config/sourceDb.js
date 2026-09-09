@@ -1,4 +1,5 @@
 const mysql = require("mysql2/promise");
+const mysqlTypeCast = require("./mysqlTypeCast");
 
 let pool;
 
@@ -15,6 +16,7 @@ function getSourcePool() {
     queueLimit: 0,
     // Preserve stored IST DATETIME values instead of converting them through the host timezone.
     dateStrings: true,
+    typeCast: mysqlTypeCast,
   });
   return pool;
 }
