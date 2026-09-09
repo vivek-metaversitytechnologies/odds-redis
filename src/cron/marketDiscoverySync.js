@@ -913,6 +913,19 @@ async function syncMarketDiscovery(events, lane = "active") {
     // serialize them to avoid cross-transaction lock waits during busy discovery runs.
     const primaryPersisted = await upsertMarkets(primaryStoredRegular);
     const primaryFancyPersisted = await upsertFancies(primaryStoredFancies);
+    // A currently active vendor market of any displayable family is positive
+    // evidence that the event is still alive, even when Match Odds/Bookmaker is
+    // absent. Clear an older terminal confirmation so the next event-sync pass
+    // can restore the event to public metadata.
+    const activeMarketEventIds = new Set(
+      primaryRows
+        .filter((market) => market.isActive && !market.gameOver)
+        .map((market) => Number(market.eventId))
+        .filter(Number.isInteger),
+    );
+    for (const eventId of activeMarketEventIds) {
+      lifecycle.clearConfirmed(eventId, "active-vendor-market");
+    }
     // An authoritative snapshot with no active primary market and a completed
     // Match Odds/Bookmaker record is event-terminal. Historical completed
     // primaries cannot close an event while another primary remains active.

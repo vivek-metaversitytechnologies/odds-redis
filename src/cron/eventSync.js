@@ -131,10 +131,18 @@ async function terminalPrimaryEventIds(events) {
        FROM t_market
      WHERE eventid IN (${placeholders})
         AND (LOWER(marketname)='match odds' OR LOWER(marketname) LIKE '%bookmaker%')
+        AND NOT EXISTS (
+          SELECT 1 FROM t_market active_market
+           WHERE active_market.eventid=t_market.eventid AND active_market.isactive=?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM t_matchfancy active_fancy
+           WHERE active_fancy.eventid=t_market.eventid AND active_fancy.isactive=?
+        )
       GROUP BY eventid
      HAVING SUM(CASE WHEN isactive=? THEN 1 ELSE 0 END)=0
         AND SUM(CASE WHEN isactive=? AND status=? THEN 1 ELSE 0 END)>0`,
-    [...eventIds, true, false, false],
+    [...eventIds, true, true, true, false, false],
   );
   return new Set(rows.map((row) => Number(row.eventid)).filter(Number.isInteger));
 }

@@ -136,13 +136,11 @@ function canRemainWithoutMarket(event, now = Date.now()) {
   return !Number.isFinite(openTime) || openTime > now;
 }
 
-function activeMatchEntryFromCache(event, snapshot, now = Date.now()) {
+function activeMatchEntryFromCache(event, snapshot, _now = Date.now()) {
   const row = cachedDashboardRow(event, snapshot);
   const entry = row ? dashboardEntry(row, snapshot) : null;
   if (entry) return entry;
-  return canRemainWithoutMarket(event, now) && hasDisplayableMarket(snapshot)
-    ? eventOnlyDashboardEntry(event)
-    : null;
+  return hasDisplayableMarket(snapshot) ? eventOnlyDashboardEntry(event) : null;
 }
 
 function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {

@@ -907,7 +907,7 @@ test("Redis active-match cache excludes completed and expired events", () => {
   assert.deepEqual(activeMatchesFromCache(events, snapshots, 48, Date.parse("2026-08-20T13:00:00Z")), []);
 });
 
-test("started events without a usable primary market are excluded from active matches", () => {
+test("started events with a displayable fancy remain visible without a primary market", () => {
   const now = Date.parse("2026-09-06T07:00:00Z");
   const event = {
     eventId: 36016439,
@@ -919,6 +919,14 @@ test("started events without a usable primary market are excluded from active ma
   };
   assert.equal(canRemainWithoutMarket(event, now), false);
   assert.deepEqual(activeMatchesFromCache([event], new Map(), 48, now), []);
+  const snapshot = {
+    Odds: [],
+    Bookmaker: [],
+    Fancy2: [{ mid: "4.1-F2", nation: "1 Over Run", gstatus: "SUSPENDED" }],
+  };
+  assert.deepEqual(activeMatchesFromCache([event], new Map([["36016439", snapshot]]), 48, now), [
+    eventOnlyDashboardEntry(event),
+  ]);
 });
 
 test("database active-match rows are grouped without correlated market scans", () => {
