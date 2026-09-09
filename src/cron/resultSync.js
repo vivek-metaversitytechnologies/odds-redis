@@ -12,6 +12,11 @@ const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
 
 let running = false;
+const scheduled = require("../utils/scheduledHandoff").scheduledHandoff({
+  isBusy: () => running,
+  run: () => syncResults(),
+  onError: () => {}, // syncResults records failures in health and logs.
+});
 let headroomStopped = false;
 let headroomCooldownUntil = 0;
 let headroomIdleUntil = 0;
@@ -676,23 +681,25 @@ async function syncResults() {
   } finally {
     running = false;
     state.running = false;
+    scheduled.drain();
   }
 }
 
 function startResultSync() {
   headroomStopped = false;
+  scheduled.start();
   const { expression } = cronConfig.result;
-  const task = cron.schedule(expression, () => void syncResults().catch(() => {}));
+  const task = cron.schedule(expression, () => scheduled.request());
   const timer = setInterval(() => void syncHeadroomResults(), 150);
   timer.unref?.();
   const stop = task.stop.bind(task);
-  task.stop = () => { headroomStopped = true; clearInterval(timer); return stop(); };
+  task.stop = () => { headroomStopped = true; scheduled.stop(); clearInterval(timer); return stop(); };
   logger.info("[ResultSync] scheduled", { expression });
   return task;
 }
 
 function getResultSyncStatus() {
-  return { ...state, recovery: pendingResults.recoveryStatus(), headroom: { ...headroomState } };
+  return { ...state, scheduledPending: scheduled.pending, cronExpression: cronConfig.result.expression, recovery: pendingResults.recoveryStatus(), headroom: { ...headroomState } };
 }
 
 function availableHeadroom() {
@@ -703,6 +710,7 @@ function availableHeadroom() {
 }
 
 async function syncHeadroomResults() {
+  if (scheduled.pending) { scheduled.drain(); headroomState.skippedReason = "scheduled-cycle-pending"; return; }
   if (new Date().getSeconds() < 5) { headroomState.skippedReason = "scheduled-cycle-priority"; return; }
   if (Date.now() < headroomCooldownUntil) { headroomState.skippedReason = "failure-cooldown"; return; }
   if (Date.now() < headroomIdleUntil) { headroomState.skippedReason = "waiting-for-due-work"; return; }
@@ -746,6 +754,7 @@ async function syncHeadroomResults() {
     headroomState.lastCompletedAt = new Date().toISOString();
     headroomState.running = false;
     running = false;
+    scheduled.drain();
   }
 }
 
@@ -767,7 +776,7 @@ async function reconcileReviewed(ids) {
     const applied = await applyResults(responseRows(response), { markets, fancies: [] });
     if (applied.settled.length) await c.hDel("Pending-Regular-Results:review", applied.settled);
     return { requested: unique.length, settled: applied.settled, remaining: unique.filter((id) => !applied.settled.includes(id)), rejected: applied.rejectedResultDetails, persistenceFailures: applied.persistenceFailures };
-  } finally { running = false; }
+  } finally { running = false; scheduled.drain(); }
 }
 
 module.exports = {
