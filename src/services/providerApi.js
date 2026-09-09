@@ -6,9 +6,9 @@ const providerMetrics = require("./providerMetrics");
 const VENDOR_WINDOW_MS = 20000;
 const VENDOR_WINDOW_CAP = 1000;
 const VENDOR_SAFE_WINDOW_CAP = 800;
-const configuredRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 2400, { min: 1 });
+const configuredRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 800, { min: 1 });
 const vendorSafeRequestsPerMinute = Math.floor((VENDOR_SAFE_WINDOW_CAP * 60000) / VENDOR_WINDOW_MS);
-const maxRequestsPerMinute = Math.min(configuredRequestsPerMinute, vendorSafeRequestsPerMinute);
+const maxRequestsPerMinute = Math.min(800, configuredRequestsPerMinute, vendorSafeRequestsPerMinute);
 const configuredMinTime = integer("PROVIDER_MIN_TIME_MS", 0, { min: 0 });
 const rateLimitMinTime = Math.ceil(60000 / maxRequestsPerMinute);
 const providerLimiter = new Bottleneck({
@@ -140,6 +140,7 @@ function getProviderRateLimitStatus() {
     safeWindowCap: VENDOR_SAFE_WINDOW_CAP,
     configuredRequestsPerMinute,
     effectiveRequestsPerMinute: maxRequestsPerMinute,
+    backgroundRequestsPerMinute: 400,
     minTimeMs: Math.max(configuredMinTime, rateLimitMinTime),
     configurationClamped: configuredRequestsPerMinute > maxRequestsPerMinute,
     blockedUntil: blockedUntil ? new Date(blockedUntil).toISOString() : null,
@@ -209,6 +210,19 @@ async function request(
       };
       writeProviderLog("provider.request", requestLog);
       const response = await providerLimiter.schedule({ priority }, async () => {
+        // Enforce rolling budgets at dispatch, including retries. Waiting callers
+        // share these counters, so a concurrent dispatch cannot overspend them.
+        while (true) {
+          if (shuttingDown) throw new Error("Provider client is shutting down");
+          const now = Date.now();
+          pruneRequestAttempts(now);
+          const recent = requestAttempts.filter((entry) => entry.startedAt > now - 60000);
+          const background = recent.filter((entry) => ["result-headroom", "result-runner-repair"].includes(entry.source));
+          const isBackground = ["result-headroom", "result-runner-repair"].includes(metricSource);
+          const blocked = recent.length >= maxRequestsPerMinute ? recent : isBackground && background.length >= 400 ? background : null;
+          if (!blocked) break;
+          await new Promise((resolve) => setTimeout(resolve, Math.max(1, Math.min(1000, blocked[0].startedAt + 60001 - now))));
+        }
         metricEntry = startRequestAttempt(method, url, metricSource);
         const controller = new AbortController();
         activeControllers.add(controller);

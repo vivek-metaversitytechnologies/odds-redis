@@ -682,7 +682,7 @@ function startResultSync() {
   headroomStopped = false;
   const { expression } = cronConfig.result;
   const task = cron.schedule(expression, () => void syncResults().catch(() => {}));
-  const timer = setInterval(() => void syncHeadroomResults(), 10000);
+  const timer = setInterval(() => void syncHeadroomResults(), 150);
   timer.unref?.();
   const stop = task.stop.bind(task);
   task.stop = () => { headroomStopped = true; clearInterval(timer); return stop(); };
@@ -702,6 +702,7 @@ function availableHeadroom() {
 }
 
 async function syncHeadroomResults() {
+  if (new Date().getSeconds() < 5) { headroomState.skippedReason = "scheduled-cycle-priority"; return; }
   if (Date.now() < headroomCooldownUntil) { headroomState.skippedReason = "failure-cooldown"; return; }
   if (headroomStopped || running) { headroomState.skippedReason = "worker-busy-or-stopped"; return; }
   const reason = availableHeadroom();
@@ -721,6 +722,7 @@ async function syncHeadroomResults() {
     headroomState.lastResult = { requested: 0, recoveredRows: pending.recovered, queueDepth: pending.depth, reviewCount: pending.reviewCount };
     const nextReason = availableHeadroom();
     if (headroomStopped || nextReason || !markets.length) {
+      if (!markets.length) headroomCooldownUntil = Date.now() + 10000;
       headroomState.skippedReason = nextReason || (headroomStopped ? "stopped" : "no-due-markets");
       return;
     }
