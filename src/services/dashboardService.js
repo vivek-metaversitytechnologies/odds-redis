@@ -159,6 +159,16 @@ function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()
     .sort(compareDashboardEntries);
 }
 
+function activeMatchesFromProjection(entries, maxAgeHours, now = Date.now()) {
+  const oldest = now - maxAgeHours * 60 * 60 * 1000;
+  return (entries || [])
+    .filter((entry) => {
+      const openTime = Date.parse(entry?.openDate);
+      return !Number.isFinite(openTime) || openTime >= oldest;
+    })
+    .sort(compareDashboardEntries);
+}
+
 function selectDashboardRows(rows) {
   const byEvent = new Map();
   for (const row of rows || []) {
@@ -204,14 +214,7 @@ async function activeMatchesFromRedis(sportId, timings) {
   const compact = await redisStore.getActiveMatches(sportId, timings);
   if (compact !== null) {
     if (timings) timings.activeMatchSource = "compact";
-    const oldest = Date.now() - maxAgeHours * 60 * 60 * 1000;
-    return compact
-      .filter((entry) => {
-        const openTime = Date.parse(entry?.openDate);
-        const recentEnough = !Number.isFinite(openTime) || openTime >= oldest;
-        return recentEnough && (entry?.marketId || canRemainWithoutMarket(entry));
-      })
-      .sort(compareDashboardEntries);
+    return activeMatchesFromProjection(compact, maxAgeHours);
   }
   if (timings) timings.activeMatchSource = "fallback";
   const eventsStartedAt = process.hrtime.bigint();
@@ -259,6 +262,7 @@ module.exports = {
   activeMatches,
   activeMatchesFromRedis,
   activeMatchesFromCache,
+  activeMatchesFromProjection,
   cachedDashboardRow,
   eventOnlyDashboardEntry,
   hasDisplayableMarket,

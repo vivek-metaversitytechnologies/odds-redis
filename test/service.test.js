@@ -57,6 +57,7 @@ const {
 const { parseJsonObjects, containsMarketId } = require("../src/services/logReaderService");
 const {
   activeMatchesFromCache,
+  activeMatchesFromProjection,
   canRemainWithoutMarket,
   cachedDashboardRow,
   eventOnlyDashboardEntry,
@@ -977,6 +978,21 @@ test("active-match projection hydrates Redis snapshots after an application rest
   await redisTesting.reconcileActiveMatchProjection(fakeClient, 4, [event]);
 
   assert.deepEqual(JSON.parse(written.get("36030984")), eventOnlyDashboardEntry(event));
+});
+
+test("compact active-match results retain in-play fancy-only events", () => {
+  const entry = {
+    matchName: "Derbyshire v Kent",
+    openDate: "2026-09-10 15:00:00",
+    inPlay: true,
+    matchId: 36030984,
+    marketId: null,
+  };
+
+  assert.deepEqual(
+    activeMatchesFromProjection([entry], 48, Date.parse("2026-09-09T18:10:00Z")),
+    [entry],
+  );
 });
 
 test("database active-match rows are grouped without correlated market scans", () => {
