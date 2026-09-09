@@ -6,6 +6,7 @@ const DAY_MS = 86400000;
 const reviewKey = `${key}:review`;
 let recoveryCursor = 0;
 let nextRecoveryAt = 0;
+let lastRecoveryAt = 0;
 
 async function client() {
   const value = await redis.getRedisClient();
@@ -72,20 +73,33 @@ async function remove(ids) {
 
 // Bounded keyset recovery also seeds historical inactive markets after deployment
 // or Redis loss. Advance only after enqueue succeeds.
-async function recover() {
-  if (Date.now() < nextRecoveryAt) return 0;
+async function recover(accelerate = false) {
+  if (Date.now() < nextRecoveryAt && !(accelerate && recoveryCursor && Date.now() - lastRecoveryAt >= 10000)) return 0;
+  const pool = getSourcePool();
+  const [tables] = await pool.query("SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='t_matchabondendtie'");
   const [rows] = await getSourcePool().query(
     "SELECT id,marketid,isactive FROM t_market WHERE id>? ORDER BY id LIMIT 500",
     [recoveryCursor],
   );
-  await enqueue(rows.filter((row) => Number(row.isactive) === 0).map((row) => row.marketid));
+  const inactive = rows.filter((row) => Number(row.isactive) === 0).map((row) => row.marketid);
+  if (inactive.length) {
+    const [unsettled] = await pool.query(
+      `SELECT m.marketid FROM t_market m WHERE m.marketid IN (${inactive.map(() => "?").join(",")})
+       AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+       ${tables.length ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie r WHERE r.marketid=m.marketid)" : ""}`, inactive,
+    );
+    await enqueue(unsettled.map((row) => row.marketid));
+  }
   recoveryCursor = rows.length === 500 ? rows[rows.length - 1].id : 0;
+  lastRecoveryAt = Date.now();
   nextRecoveryAt = Date.now() + (recoveryCursor ? 60000 : 3600000);
   return rows.length;
 }
 
-async function load() {
-  const recovered = await recover();
+async function load({ adaptive = false } = {}) {
+  const connection = await client();
+  const due = adaptive ? await connection.zCount(key, 0, Date.now()) : 0;
+  const recovered = await recover(adaptive && due < 100);
   const c = await client();
   let ids = await c.zRangeByScore(key, 0, Date.now(), { LIMIT: { offset: 0, count: 250 } });
   const moved = new Set(await moveExpired(ids));

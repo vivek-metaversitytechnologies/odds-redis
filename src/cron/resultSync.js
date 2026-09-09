@@ -12,6 +12,9 @@ const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
 
 let running = false;
+let headroomStopped = false;
+let headroomCooldownUntil = 0;
+const headroomState = { running: false, lastCompletedAt: null, lastError: null, skippedReason: null, lastResult: null };
 let exceptionalTableAvailable;
 const candidateCursors = { market: null, fancy: null };
 const state = {
@@ -489,6 +492,11 @@ async function applyResults(results, candidates) {
     }
     if (outcome.value.status === "rejected") {
       rejectedResults += 1;
+      if (!outcome.value.isFancy && Number.isInteger(Number(outcome.value.result.result)) &&
+          !outcome.value.result.isTie && !outcome.value.result.isAbandoned) {
+        await require("../services/resultRunnerRepair").enqueue(outcome.value.market.marketid, outcome.value.result.result)
+          .catch((error) => logger.warn("[ResultSync] runner repair enqueue failed", { error: error.message }));
+      }
       const detail = rejectedResultDetail(
         outcome.value.market,
         outcome.value.result,
@@ -671,14 +679,70 @@ async function syncResults() {
 }
 
 function startResultSync() {
+  headroomStopped = false;
   const { expression } = cronConfig.result;
   const task = cron.schedule(expression, () => void syncResults().catch(() => {}));
+  const timer = setInterval(() => void syncHeadroomResults(), 10000);
+  timer.unref?.();
+  const stop = task.stop.bind(task);
+  task.stop = () => { headroomStopped = true; clearInterval(timer); return stop(); };
   logger.info("[ResultSync] scheduled", { expression });
   return task;
 }
 
 function getResultSyncStatus() {
-  return { ...state };
+  return { ...state, headroom: { ...headroomState } };
+}
+
+function availableHeadroom() {
+  return require("../services/resultHeadroom").headroomReason({
+    rate: provider.getProviderRateLimitStatus(), counts: provider.providerLimiter.counts(),
+    health: require("../services/healthSupervisor").getHealthStatus(),
+  });
+}
+
+async function syncHeadroomResults() {
+  if (Date.now() < headroomCooldownUntil) { headroomState.skippedReason = "failure-cooldown"; return; }
+  if (headroomStopped || running) { headroomState.skippedReason = "worker-busy-or-stopped"; return; }
+  const reason = availableHeadroom();
+  if (reason) { headroomState.skippedReason = reason; return; }
+  running = true;
+  headroomState.running = true;
+  headroomState.lastError = null;
+  headroomState.skippedReason = null;
+  let requested = [];
+  try {
+    const started = Date.now();
+    const runnerRepair = await require("../services/resultRunnerRepair").repairOne();
+    headroomState.runnerRepair = runnerRepair;
+    if (headroomStopped || availableHeadroom()) { headroomState.skippedReason = "yield-after-runner-repair"; return; }
+    const pending = await pendingResults.load({ adaptive: true });
+    const markets = pending.rows.slice(0, 100);
+    headroomState.lastResult = { requested: 0, recoveredRows: pending.recovered, queueDepth: pending.depth, reviewCount: pending.reviewCount };
+    const nextReason = availableHeadroom();
+    if (headroomStopped || nextReason || !markets.length) {
+      headroomState.skippedReason = nextReason || (headroomStopped ? "stopped" : "no-due-markets");
+      return;
+    }
+    requested = markets.map((row) => String(row.marketid));
+    const response = await provider.results({ mids: requested }, { priority: 9, source: "result-headroom", retries: 0 });
+    const applied = await applyResults(responseRows(response), { markets, fancies: [] });
+    if (applied.persistenceFailures) headroomCooldownUntil = Date.now() + 60000;
+    await pendingResults.remove(applied.settled);
+    await pendingResults.defer(requested.filter((id) => !applied.settled.includes(id)));
+    headroomState.lastResult = { ...headroomState.lastResult, requested: requested.length, settled: applied.settled.length,
+      rejected: applied.rejectedResults, persistenceFailures: applied.persistenceFailures, durationMs: Date.now() - started };
+    logger.info("[ResultHeadroom] completed", headroomState.lastResult);
+  } catch (error) {
+    headroomState.lastError = error.message;
+    headroomCooldownUntil = Date.now() + 60000;
+    await pendingResults.defer(requested).catch(() => {});
+    logger.warn("[ResultHeadroom] failed", { error: error.message });
+  } finally {
+    headroomState.lastCompletedAt = new Date().toISOString();
+    headroomState.running = false;
+    running = false;
+  }
 }
 
 async function reconcileReviewed(ids) {

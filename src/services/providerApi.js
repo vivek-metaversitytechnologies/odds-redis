@@ -316,9 +316,9 @@ module.exports = {
   events: (query) => request("/v1/events", { query }),
   markets: (body, { priority = 5, source } = {}) =>
     request("/v1/markets", { method: "POST", body, priority, metricSource: source }),
-  runners: (marketId) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`),
+  runners: (marketId, { priority = 5, source, retries = 2 } = {}) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`, { priority, metricSource: source, retries }),
   // Results must not sit behind the much larger discovery queue indefinitely.
-  results: (body) => request("/v1/markets/results", { method: "POST", body, priority: 2 }),
+  results: (body, { priority = 2, source, retries = 2 } = {}) => request("/v1/markets/results", { method: "POST", body, priority, metricSource: source, retries }),
   subscribe: (ids) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids),
   unsubscribe: (ids) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids),
 };
