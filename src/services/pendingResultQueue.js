@@ -7,6 +7,15 @@ const reviewKey = `${key}:review`;
 let recoveryCursor = 0;
 let nextRecoveryAt = 0;
 let lastRecoveryAt = 0;
+let recoveryLoaded = false;
+let scannedRows = 0;
+let completedPasses = 0;
+
+function recoveryStatus() {
+  return { cursor: recoveryCursor, scannedRows, completedPasses,
+    lastScanAt: lastRecoveryAt ? new Date(lastRecoveryAt).toISOString() : null,
+    nextScanAt: nextRecoveryAt ? new Date(nextRecoveryAt).toISOString() : null };
+}
 
 async function client() {
   const value = await redis.getRedisClient();
@@ -74,12 +83,26 @@ async function remove(ids) {
 // Bounded keyset recovery also seeds historical inactive markets after deployment
 // or Redis loss. Advance only after enqueue succeeds.
 async function recover(accelerate = false) {
-  if (Date.now() < nextRecoveryAt && !(accelerate && recoveryCursor && Date.now() - lastRecoveryAt >= 10000)) return 0;
+  const c = await client();
+  if (!recoveryLoaded) {
+    const saved = await c.get(`${key}:recovery`);
+    if (saved) {
+      const value = JSON.parse(saved);
+      recoveryCursor = Number(value.cursor) || 0;
+      nextRecoveryAt = Number(value.nextRecoveryAt) || 0;
+      lastRecoveryAt = Number(value.lastRecoveryAt) || 0;
+      scannedRows = Number(value.scannedRows) || 0;
+      completedPasses = Number(value.completedPasses) || 0;
+    }
+    recoveryLoaded = true;
+  }
+  if (Date.now() < nextRecoveryAt && !(accelerate && recoveryCursor && Date.now() - lastRecoveryAt >= 1000)) return 0;
+  const batchSize = accelerate ? 2000 : 500;
   const pool = getSourcePool();
   const [tables] = await pool.query("SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='t_matchabondendtie'");
   const [rows] = await getSourcePool().query(
-    "SELECT id,marketid,isactive FROM t_market WHERE id>? ORDER BY id LIMIT 500",
-    [recoveryCursor],
+    "SELECT id,marketid,isactive FROM t_market WHERE id>? ORDER BY id LIMIT ?",
+    [recoveryCursor, batchSize],
   );
   const inactive = rows.filter((row) => Number(row.isactive) === 0).map((row) => row.marketid);
   if (inactive.length) {
@@ -90,9 +113,18 @@ async function recover(accelerate = false) {
     );
     await enqueue(unsettled.map((row) => row.marketid));
   }
-  recoveryCursor = rows.length === 500 ? rows[rows.length - 1].id : 0;
-  lastRecoveryAt = Date.now();
-  nextRecoveryAt = Date.now() + (recoveryCursor ? 60000 : 3600000);
+  const cursor = rows.length === batchSize ? rows[rows.length - 1].id : 0;
+  const now = Date.now();
+  const checkpoint = { cursor, lastRecoveryAt: now,
+    nextRecoveryAt: now + (cursor ? (accelerate ? 1000 : 60000) : 3600000),
+    scannedRows: scannedRows + rows.length, completedPasses: completedPasses + (cursor ? 0 : 1) };
+  // Commit after enqueue; replaying a page after a crash is safe (NX enqueue).
+  await c.set(`${key}:recovery`, JSON.stringify(checkpoint));
+  recoveryCursor = cursor;
+  lastRecoveryAt = now;
+  nextRecoveryAt = checkpoint.nextRecoveryAt;
+  scannedRows = checkpoint.scannedRows;
+  completedPasses = checkpoint.completedPasses;
   return rows.length;
 }
 
@@ -147,4 +179,4 @@ async function defer(ids) {
   })), { XX: true });
 }
 
-module.exports = { enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed };
+module.exports = { enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus };

@@ -14,6 +14,7 @@ const pendingResults = require("../services/pendingResultQueue");
 let running = false;
 let headroomStopped = false;
 let headroomCooldownUntil = 0;
+let headroomIdleUntil = 0;
 const headroomState = { running: false, lastCompletedAt: null, lastError: null, skippedReason: null, lastResult: null };
 let exceptionalTableAvailable;
 const candidateCursors = { market: null, fancy: null };
@@ -691,7 +692,7 @@ function startResultSync() {
 }
 
 function getResultSyncStatus() {
-  return { ...state, headroom: { ...headroomState } };
+  return { ...state, recovery: pendingResults.recoveryStatus(), headroom: { ...headroomState } };
 }
 
 function availableHeadroom() {
@@ -704,6 +705,7 @@ function availableHeadroom() {
 async function syncHeadroomResults() {
   if (new Date().getSeconds() < 5) { headroomState.skippedReason = "scheduled-cycle-priority"; return; }
   if (Date.now() < headroomCooldownUntil) { headroomState.skippedReason = "failure-cooldown"; return; }
+  if (Date.now() < headroomIdleUntil) { headroomState.skippedReason = "waiting-for-due-work"; return; }
   if (headroomStopped || running) { headroomState.skippedReason = "worker-busy-or-stopped"; return; }
   const reason = availableHeadroom();
   if (reason) { headroomState.skippedReason = reason; return; }
@@ -722,7 +724,7 @@ async function syncHeadroomResults() {
     headroomState.lastResult = { requested: 0, recoveredRows: pending.recovered, queueDepth: pending.depth, reviewCount: pending.reviewCount };
     const nextReason = availableHeadroom();
     if (headroomStopped || nextReason || !markets.length) {
-      if (!markets.length) headroomCooldownUntil = Date.now() + 10000;
+      if (!markets.length) headroomIdleUntil = Date.now() + (pendingResults.recoveryStatus().cursor ? 1000 : 10000);
       headroomState.skippedReason = nextReason || (headroomStopped ? "stopped" : "no-due-markets");
       return;
     }
