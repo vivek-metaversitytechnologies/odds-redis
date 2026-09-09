@@ -1005,6 +1005,18 @@ async function syncMarketDiscovery(events, lane = "active") {
       if (result.status === "fulfilled") discovered.push(...result.value);
     }
     const unique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(discovered));
+    // Some vendor market families are omitted from the unfiltered response and
+    // appear only in typed fallback responses. Treat an active market from either
+    // pass as authoritative evidence that its event is still alive.
+    const activeDiscoveredEventIds = new Set(
+      unique
+        .filter((market) => market.isActive && !market.gameOver)
+        .map((market) => Number(market.eventId))
+        .filter(Number.isInteger),
+    );
+    for (const eventId of activeDiscoveredEventIds) {
+      lifecycle.clearConfirmed(eventId, "active-vendor-market");
+    }
     const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
     const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const changed = unique.filter(
