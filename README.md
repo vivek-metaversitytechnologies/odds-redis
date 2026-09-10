@@ -169,3 +169,9 @@ pm2 startup
 Run the command printed by `pm2 startup`, then use `pm2 status`, `pm2 logs odds-redis`, and
 `pm2 logs odds-public-api` to verify both processes. Point the three `/betfair_api/` Nginx
 locations to `127.0.0.1:$PUBLIC_API_PORT`; keep `/socket.io/` on the ingestion service port.
+
+Line markets have a dedicated sequential discovery job every second, configurable with
+`LINE_MARKET_DISCOVERY_CRON`. It checks active-window cricket events individually,
+updates database and Redis definitions, and immediately subscribes to active markets.
+Overlapping cycles are skipped. Explicit inactive/game-over flags remove markets;
+omissions retain them. Provider latency and queue limits can extend a cycle beyond one second.

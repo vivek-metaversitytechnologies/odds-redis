@@ -19,6 +19,9 @@ module.exports = Object.freeze({
   ballByBallDiscovery: Object.freeze({
     expression: process.env.BALL_BY_BALL_DISCOVERY_CRON || "* * * * * *",
   }),
+  lineMarketDiscovery: Object.freeze({
+    expression: process.env.LINE_MARKET_DISCOVERY_CRON || "* * * * * *",
+  }),
   futureMarketDiscovery: Object.freeze({
     expression: process.env.FUTURE_MARKET_DISCOVERY_CRON || "0 */10 * * * *",
   }),

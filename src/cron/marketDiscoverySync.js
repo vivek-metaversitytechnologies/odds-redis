@@ -28,6 +28,8 @@ const {
 let running = false;
 let liveCleanupRunning = false;
 let ballByBallRunning = false;
+let lineMarketRunning = false;
+const lineMarketFingerprints = new Map();
 let ballByBallStartedAt = 0;
 let ballByBallCycleSequence = 0;
 const ballByBallActiveSnapshots = new Map();
@@ -464,6 +466,7 @@ async function upsertFancies(fancies) {
                NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
                NOW(),updatedon
              ),
+             name=IF(VALUES(mtype)='ball-by-ball' AND VALUES(name) REGEXP '^[0-9]+([.][0-9]+)? ',VALUES(name),name),
              status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
           [values],
         );
@@ -1513,6 +1516,74 @@ async function syncActiveBallByBallDiscovery() {
   }
 }
 
+async function syncActiveLineMarketDiscovery() {
+  if (lineMarketRunning) return { skipped: true, reason: "already-running" };
+  lineMarketRunning = true;
+  const startedAt = Date.now();
+  try {
+    const events = (await fetchActiveEventsForMarketDiscovery("active")).filter(
+      (event) => Number(event.sportId) === cricketSportId(),
+    );
+    const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
+    const result = { events: events.length, markets: 0, changed: 0, failedRequests: 0, failedSubscriptions: 0 };
+    // One event per request avoids truncating large line-market responses.
+    // Await each event's complete processing before requesting the next one.
+    for (const event of events) {
+      try {
+        const response = await provider.markets(
+          { eids: [Number(event.eventId)], type: ["line-market"] },
+          { priority: discoveryPriority(event.sportId, "active"), source: "line-market" },
+        );
+        const markets = mergeDiscoveredMarkets(marketRows(response, eventsById)).filter(
+          (market) => market.marketType === "line-market",
+        );
+        const changed = markets.filter(
+          (market) => lineMarketFingerprints.get(String(market.marketId)) !== marketFingerprint(market),
+        );
+        const persisted = await retryDeadlock(() => upsertFancies(changed));
+        redisStore.invalidateMarkets(persisted.fancyIds);
+        const active = markets.filter((market) => market.isActive && !market.gameOver);
+        await fetchAndStoreRunners(active.map((market) => market.marketId));
+        const definitions = await redisStore.reconcileRegularDefinitions(
+          await regularMarketsWithRunners(markets),
+        );
+        const inactiveIds = inactiveLineMarkets(markets).map((market) => market.marketId);
+        if (inactiveIds.length) await unsubscribeEventMarkets(inactiveIds);
+        await Promise.all(
+          (definitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
+        );
+        const subscribed = new Set(websocket.getSubscribedMarketIds().map(String));
+        const pending = active.map((market) => String(market.marketId)).filter(
+          (id) => !subscribed.has(id) && !isMarketSuppressed(id),
+        );
+        for (const batch of chunks(pending, integer("PROVIDER_SUBSCRIPTION_BATCH_SIZE", 5, { min: 1, max: 20 }))) {
+          try {
+            await subscribeMarkets(batch, { scheduleRetry: false });
+          } catch (error) {
+            result.failedSubscriptions += 1;
+            logger.error("[LineMarketDiscovery] immediate subscription failed", { marketIds: batch, error: error.message });
+          }
+        }
+        // Commit fingerprints only after persistence and reconciliation succeed.
+        // Missing rows are retained: omission is not evidence of a closed market.
+        for (const market of changed) {
+          setBounded(lineMarketFingerprints, String(market.marketId), marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
+        }
+        result.markets += markets.length;
+        result.changed += changed.length;
+      } catch (error) {
+        result.failedRequests += 1;
+        logger.error("[LineMarketDiscovery] event sync failed", { eventId: event.eventId, error: error.message });
+      }
+    }
+    result.durationMs = Date.now() - startedAt;
+    logger.info("[LineMarketDiscovery] completed", result);
+    return result;
+  } finally {
+    lineMarketRunning = false;
+  }
+}
+
 function startMarketDiscoverySync() {
   const { expression } = cronConfig.marketDiscovery;
   const discoveryTask = cron.schedule(expression, () => {
@@ -1531,6 +1602,15 @@ function startMarketDiscoverySync() {
       logger.error("[LiveMarketCleanup] failed", { error: error.message }),
     );
   });
+  const lineMarketTask = cron.schedule(cronConfig.lineMarketDiscovery.expression, () => {
+    void syncActiveLineMarketDiscovery().catch((error) =>
+      logger.error("[LineMarketDiscovery] failed", { error: error.message }),
+    );
+  });
+  logger.info("[LineMarketDiscovery] scheduled", {
+    expression: cronConfig.lineMarketDiscovery.expression,
+    synchronous: true,
+  });
   logger.info("[MarketDiscovery] scheduled", { expression });
   logger.info("[LiveMarketCleanup] scheduled", { expression: cronConfig.liveMarketCleanup.expression });
   logger.info("[MarketDiscovery] future lane scheduled", {
@@ -1546,6 +1626,7 @@ function startMarketDiscoverySync() {
       discoveryTask.stop();
       futureTask.stop();
       ballByBallTask.stop();
+      lineMarketTask.stop();
       cleanupTask.stop();
     },
   };
@@ -1598,6 +1679,7 @@ module.exports = {
   syncMarketDiscovery,
   syncStoredEventMarkets,
   syncActiveBallByBallDiscovery,
+  syncActiveLineMarketDiscovery,
   startMarketDiscoverySync,
   getMarketDiscoveryStatus,
 };

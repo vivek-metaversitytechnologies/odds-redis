@@ -865,6 +865,18 @@ async function reconcileFancyDefinitions(markets) {
             removed += 1;
             changed = true;
           }
+          // Discovery can repair a generic name after a live tick has already
+          // replaced the placeholder. Refresh metadata without resetting prices.
+          if (active && index >= 0 && group === "BallByBall") {
+            const metadata = ballByBallMetadata(market.marketName);
+            if (metadata.ballLine !== null &&
+                (payload[group][index].ballLine !== metadata.ballLine ||
+                 payload[group][index].nation !== metadata.name)) {
+              payload[group][index].ballLine = metadata.ballLine;
+              payload[group][index].nation = metadata.name;
+              changed = true;
+            }
+          }
         }
         if (!changed) return;
         moveTiedMatchLast(payload);

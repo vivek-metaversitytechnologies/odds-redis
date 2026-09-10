@@ -1327,12 +1327,13 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
   ]) {
     assert.doesNotMatch(duplicateClause, new RegExp(`${column}=VALUES\\(${column}\\)`));
   }
-  assert.doesNotMatch(duplicateClause, /name\s*=/);
+  assert.match(duplicateClause, /name=IF\(VALUES\(mtype\)='ball-by-ball' AND VALUES\(name\) REGEXP/);
+  assert.match(duplicateClause, /VALUES\(name\),name\)/);
   assert.match(duplicateClause, /updatedon=IF\(/);
   assert.doesNotMatch(duplicateClause, /updatedon=NOW\(\)/);
 });
 
-test("generic fancy names are identified while names remain insert-only", () => {
+test("generic fancy names are identified", () => {
   assert.equal(isGenericFancyName("Fancy2", "session", "4.1-F2"), true);
   assert.equal(isGenericFancyName("Khado", "khado", "4.1-KD"), true);
   assert.equal(isGenericFancyName("4 Over Run AF", "session", "4.1-F2"), false);
@@ -1894,6 +1895,29 @@ test("ball-by-ball socket ticks expose the discovery ball line separately from t
   assert.equal(output.d, null);
   assert.equal(output.di, null);
   assert.equal(output.srno, "");
+});
+
+test("ball-by-ball rediscovery repairs missing numbers without replacing live prices", async () => {
+  const { client, store } = createFakeRedisClient();
+  redisTesting.reset();
+  redisTesting.setRedisClient(client);
+  const payload = emptyEventPayload();
+  payload.BallByBall.push({ mid: "4.1-BB", nation: "BallByBall", ballLine: null, b1: 2, l1: 3, gstatus: "OPEN" });
+  store.set("Data-Rs:9002", JSON.stringify(payload));
+  const market = { eventId: 9002, marketId: "4.1-BB", marketType: "ball-by-ball", marketName: "17.2 Ball Run SB", isActive: true };
+  try {
+    await reconcileFancyDefinitions([market]);
+    const entry = JSON.parse(store.get("Data-Rs:9002")).BallByBall[0];
+    assert.equal(entry.ballLine, 17.2);
+    assert.equal(entry.nation, "Ball Run SB");
+    assert.equal(entry.b1, 2);
+    assert.equal(entry.l1, 3);
+    assert.equal(entry.gstatus, "OPEN");
+    await reconcileFancyDefinitions([{ ...market, marketName: "BallByBall" }]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9002")).BallByBall[0].ballLine, 17.2);
+  } finally {
+    redisTesting.reset();
+  }
 });
 
 test("ball-by-ball metadata splits a decimal ball line from its durable database name", () => {
