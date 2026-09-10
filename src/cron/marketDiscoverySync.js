@@ -259,9 +259,10 @@ function isGenericFancyName(name, marketType, marketId = "") {
 }
 
 function vendorMarketStatus(item) {
-  const value = String(item?.status ?? item?.sb ?? "")
+  const value = String(item?.sb ?? item?.status ?? "")
     .trim()
     .toUpperCase();
+  if (value === "S") return "SUSPENDED";
   return ["OPEN", "SUSPENDED"].includes(value) ? value : null;
 }
 

@@ -24,6 +24,7 @@ const {
   validMarketIdentifier,
   writeTicks,
   reconcileFancyDefinitions,
+  reconcileRegularDefinitions,
   __testing__: redisTesting,
 } = require("../src/config/redis");
 const {
@@ -1796,6 +1797,42 @@ test("top-level socket suspension overrides open line-market and runner statuses
   );
   assert.equal(output.status, "SUSPENDED");
   assert.equal(output.runners[0].status, "SUSPENDED");
+});
+
+test("line-market suspension handles runner flags and boolean activity without blocking explicit reopening", () => {
+  const market = { eventid: 99, marketname: "Runs Line", mtype: "line-market", status: "SUSPENDED", isactive: 1 };
+  const suspended = oddsPayload({ mid: "1.2", s: true, r: [{ rid: 11, sb: "S", s: "ACTIVE", b1: 79 }] }, market);
+  assert.equal(suspended.status, "SUSPENDED");
+  assert.equal(suspended.runners[0].status, "SUSPENDED");
+  assert.equal(oddsPayload({ mid: "1.2", s: "OPEN", r: [{ rid: 11, sb: "S" }] }, market).status, "SUSPENDED");
+  const reopened = oddsPayload({ mid: "1.2", s: "OPEN", r: [{ rid: 11, s: "ACTIVE", b1: 80 }] }, market);
+  assert.equal(reopened.status, "OPEN");
+  assert.equal(reopened.runners[0].status, "ACTIVE");
+  const partial = oddsPayload({ mid: "1.2", s: "OPEN", r: [{ rid: 11, sb: "S" }, { rid: 12, s: "ACTIVE" }] }, market);
+  assert.equal(partial.runners[0].status, "SUSPENDED");
+  assert.equal(partial.runners[1].status, "ACTIVE");
+});
+
+test("line discovery applies suspension to cached prices and socket ticks can reopen the market", async () => {
+  const { client, store } = createFakeRedisClient();
+  redisTesting.reset();
+  redisTesting.setRedisClient(client);
+  const market = { marketId: "1.9903", eventId: 9903, marketName: "Runs Line", marketType: "line-market", isActive: true, status: "SUSPENDED" };
+  const payload = emptyEventPayload();
+  payload.LineMarket.push({ marketId: market.marketId, status: "OPEN", runners: [{ selectionId: 1, status: "ACTIVE", ex: { availableToBack: [{ price: 80, size: 10 }] } }] });
+  store.set("Data-Rs:9903", JSON.stringify(payload));
+  redisTesting.primeMarketCache([[market.marketId, { marketid: market.marketId, eventid: 9903, marketname: "Runs Line", mtype: "line-market", isactive: true, status: "SUSPENDED" }]]);
+  try {
+    const result = await reconcileRegularDefinitions([market]);
+    assert.deepEqual(result.changedEventIds, ["9903"]);
+    const entry = JSON.parse(store.get("Data-Rs:9903")).LineMarket[0];
+    assert.equal(entry.status, "SUSPENDED");
+    assert.equal(entry.runners[0].status, "SUSPENDED");
+    assert.equal(entry.runners[0].ex.availableToBack[0].price, 80);
+    await writeTicks([{ eid: 9903, mid: market.marketId, s: "OPEN", r: [{ rid: 1, s: "ACTIVE", b1: 81 }] }]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9903")).LineMarket[0].status, "OPEN");
+    assert.equal(regularDefinitionEntries(market, []).entries[0].status, "SUSPENDED");
+  } finally { redisTesting.reset(); }
 });
 
 test("odds runners use cached provider selection names", () => {

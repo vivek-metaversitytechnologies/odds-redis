@@ -645,10 +645,22 @@ function bookmakerPayload(item, market) {
 
 function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item.mid))) {
   const runners = Array.isArray(item.r) ? item.r : [];
+  const lineMarket = payloadGroup(item, market) === "LineMarket";
+  // `s` can be a boolean activity flag. Only textual status values describe
+  // whether a line is open for betting; runner `sb` is also suspension evidence.
+  const explicitStatus = [item.sb, item.s, item.status].find(
+    (value) => typeof value === "string" && value.trim() !== "",
+  );
+  const allRunnersSuspended = runners.length > 0 && runners.every(
+    (runner) => status(runner.sb ?? runner.s ?? runner.status) === "SUSPENDED",
+  );
+  const lineStatus = allRunnersSuspended && explicitStatus !== "WAITING"
+    ? "SUSPENDED" : status(explicitStatus ?? market.status);
+  const marketStatus = lineMarket ? lineStatus : status(item.sb ?? item.s ?? item.status);
   return {
     matchName: marketMatchName(item, market),
     marketId: String(item.mid),
-    status: status(item.sb ?? item.s ?? item.status),
+    status: marketStatus,
     inplay: booleanOr(item.ip ?? market.inPlay, false),
     eventTime: market.opendate ?? null,
     lastMatchTime: item.tm ?? null,
@@ -663,7 +675,9 @@ function oddsPayload(item, market, runnerNames = runnerNameCache.get(String(item
     runners: runners.map((runner) => ({
       selectionId: runner?.rid ?? runner?.selectionId ?? null,
       handicap: numberOr(runner?.hc ?? runner?.handicap, 0),
-      status: status(item.sb ?? runner?.s ?? runner?.status ?? "ACTIVE"),
+      status: lineMarket
+        ? marketStatus === "SUSPENDED" ? "SUSPENDED" : status(runner?.sb ?? runner?.s ?? runner?.status ?? "ACTIVE")
+        : status(item.sb ?? runner?.s ?? runner?.status ?? "ACTIVE"),
       lastPriceTraded: numberOr(runner?.ltp ?? runner?.lastPriceTraded, 0),
       totalMatched: numberOr(runner?.tv ?? runner?.totalMatched, 0),
       adjustmentFactor: numberOr(runner?.af ?? runner?.adjustmentFactor, 0),
@@ -963,7 +977,7 @@ function regularDefinitionEntries(market, runners = []) {
           eid: market.eventId,
           mid: market.marketId,
           na: market.marketName,
-          s: "WAITING",
+          s: group === "LineMarket" && status(market.status) === "SUSPENDED" ? "SUSPENDED" : "WAITING",
           ip: market.inPlay,
           r: itemRunners,
         },
@@ -1040,6 +1054,19 @@ async function reconcileRegularDefinitions(markets) {
             }
             for (const groupName of PAYLOAD_GROUPS) {
               for (const entry of payload[groupName]) {
+                if (groupName === "LineMarket" && entryMarketId(entry) === marketId &&
+                    status(market.status) === "SUSPENDED") {
+                  if (entry.status !== "SUSPENDED") {
+                    entry.status = "SUSPENDED";
+                    changed = true;
+                  }
+                  for (const runner of entry.runners || []) {
+                    if (runner.status !== "SUSPENDED") {
+                      runner.status = "SUSPENDED";
+                      changed = true;
+                    }
+                  }
+                }
                 if (
                   entryMarketId(entry) === marketId &&
                   entry.display_message !== (market.displayMessage ?? null)
