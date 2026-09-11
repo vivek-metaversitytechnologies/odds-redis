@@ -2,6 +2,7 @@ const { createClient } = require("redis");
 const { getSourcePool } = require("./sourceDb");
 const Market = require("../models/Market");
 const provider = require("../services/providerApi");
+const { isGenericSessionName } = require("../services/fancyNameService");
 const logger = require("../utils/logger");
 const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
@@ -877,6 +878,11 @@ async function reconcileFancyDefinitions(markets) {
           } else if (!active && index >= 0) {
             payload[group].splice(index, 1);
             removed += 1;
+            changed = true;
+          }
+          if (active && index >= 0 && marketId.toUpperCase().endsWith("-F2") &&
+              isGenericSessionName(payload[group][index].nation) && !isGenericSessionName(market.marketName)) {
+            payload[group][index].nation = market.marketName;
             changed = true;
           }
           // Discovery can repair a generic name after a live tick has already

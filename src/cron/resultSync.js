@@ -388,6 +388,7 @@ async function persistMarketResult(connection, market, result) {
 }
 
 async function persistFancyResult(connection, fancy, result) {
+  await require("../services/fancyNameService").repairSessionNames(connection, fancy.marketid, fancy.marketname);
   if (result.isAbandoned) {
     await connection.execute(
       "UPDATE t_matchfancy SET isactive=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
@@ -459,6 +460,7 @@ async function applyResults(results, candidates) {
 
   const dbStartedAt = Date.now();
   const persisted = await settleWithConcurrency(matched, async ({ result, market, isFancy }) => {
+    if (isFancy) market.marketname = await require("../services/fancyNameService").resolveSessionName(market.marketid, market.marketname);
     const connection = await getSourcePool().getConnection();
     let transactionStarted = false;
     try {

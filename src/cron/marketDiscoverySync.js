@@ -1,5 +1,6 @@
 const cron = require("node-cron");
 const provider = require("../services/providerApi");
+const { isGenericSessionName, resolveSessionName, repairSessionNames } = require("../services/fancyNameService");
 const { getSourcePool } = require("../config/sourceDb");
 const {
   unsubscribeEventMarkets,
@@ -407,13 +408,13 @@ async function upsertFancies(fancies) {
   try {
     const ids = fancies.map((fancy) => fancy.marketId);
     const [existingRows] = await connection.query(
-      `SELECT fancyid,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      `SELECT fancyid,name,isactive,status FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
       ids,
     );
     const existing = new Map(
       existingRows.map((row) => [
         String(row.fancyid),
-        { isActive: Number(row.isactive) === 1, status: row.status },
+        { isActive: Number(row.isactive) === 1, status: row.status, name: row.name },
       ]),
     );
     const writable = fancies.filter(
@@ -424,6 +425,12 @@ async function upsertFancies(fancies) {
     );
     inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
     updated = writable.length - inserted;
+    for (const fancy of writable) {
+      if (!String(fancy.marketId).toUpperCase().endsWith("-F2")) continue;
+      const storedName = existing.get(fancy.marketId)?.name;
+      if (!isGenericSessionName(storedName)) fancy.marketName = storedName;
+      else fancy.marketName = await resolveSessionName(fancy.marketId, fancy.marketName);
+    }
     for (const batch of chunks(writable)) {
       await connection.beginTransaction();
       try {
@@ -471,6 +478,9 @@ async function upsertFancies(fancies) {
              status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
           [values],
         );
+        for (const fancy of batch) {
+          await repairSessionNames(connection, fancy.marketId, fancy.marketName);
+        }
         await connection.commit();
       } catch (error) {
         await connection.rollback();
