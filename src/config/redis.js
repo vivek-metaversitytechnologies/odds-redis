@@ -2,7 +2,7 @@ const { createClient } = require("redis");
 const { getSourcePool } = require("./sourceDb");
 const Market = require("../models/Market");
 const provider = require("../services/providerApi");
-const { isGenericSessionName } = require("../services/fancyNameService");
+const { supportsFancyNameRepair, isFallbackFancyName } = require("../services/fancyNameService");
 const logger = require("../utils/logger");
 const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
@@ -880,8 +880,8 @@ async function reconcileFancyDefinitions(markets) {
             removed += 1;
             changed = true;
           }
-          if (active && index >= 0 && marketId.toUpperCase().endsWith("-F2") &&
-              isGenericSessionName(payload[group][index].nation) && !isGenericSessionName(market.marketName)) {
+          if (active && index >= 0 && supportsFancyNameRepair(marketId) &&
+              isFallbackFancyName(payload[group][index].nation) && !isFallbackFancyName(market.marketName)) {
             payload[group][index].nation = market.marketName;
             changed = true;
           }

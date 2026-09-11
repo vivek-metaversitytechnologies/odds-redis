@@ -1,6 +1,6 @@
 const cron = require("node-cron");
 const provider = require("../services/providerApi");
-const { isGenericSessionName, resolveSessionName, repairSessionNames } = require("../services/fancyNameService");
+const { supportsFancyNameRepair, isFallbackFancyName, resolveFancyName, repairFancyNames } = require("../services/fancyNameService");
 const { getSourcePool } = require("../config/sourceDb");
 const {
   unsubscribeEventMarkets,
@@ -426,10 +426,10 @@ async function upsertFancies(fancies) {
     inserted = writable.filter((fancy) => !existing.has(fancy.marketId)).length;
     updated = writable.length - inserted;
     for (const fancy of writable) {
-      if (!String(fancy.marketId).toUpperCase().endsWith("-F2")) continue;
+      if (!supportsFancyNameRepair(fancy.marketId)) continue;
       const storedName = existing.get(fancy.marketId)?.name;
-      if (!isGenericSessionName(storedName)) fancy.marketName = storedName;
-      else fancy.marketName = await resolveSessionName(fancy.marketId, fancy.marketName);
+      if (!isFallbackFancyName(storedName)) fancy.marketName = storedName;
+      else fancy.marketName = await resolveFancyName(fancy.marketId, fancy.marketName);
     }
     for (const batch of chunks(writable)) {
       await connection.beginTransaction();
@@ -479,7 +479,7 @@ async function upsertFancies(fancies) {
           [values],
         );
         for (const fancy of batch) {
-          await repairSessionNames(connection, fancy.marketId, fancy.marketName);
+          await repairFancyNames(connection, fancy.marketId, fancy.marketName);
         }
         await connection.commit();
       } catch (error) {

@@ -49,3 +49,15 @@ test("bulk repair advances past unresolved records and continues after transacti
   assert.deepEqual(cursors, ["", "4.2-F2", "4.3-F2"]);
   assert.ok(c.calls.includes("rollback"));
 });
+
+test("bulk scan covers remaining fancy families in both tables", async () => {
+  let query;
+  await repairAll({ query: async (sql) => { query = sql; return [[]]; } }, () => {}, async () => {});
+  for (const suffix of ["F2", "F3", "OE", "KD", "MT", "CC"]) {
+    assert.equal(query.split(`LIKE '%-${suffix}'`).length - 1, 2);
+  }
+  for (const name of ["fancy2", "othermarket", "oddeven", "khado", "meter", "cricketcasino"]) {
+    assert.equal(query.split(`'${name}'`).length - 1, 2);
+  }
+  assert.ok(!query.includes("%-BB"), "ball numbers retain their dedicated metadata handling");
+});

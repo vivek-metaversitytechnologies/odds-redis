@@ -1,6 +1,6 @@
 require("dotenv").config({ quiet: true });
 const db = require("../src/config/sourceDb");
-const { isGenericSessionName, resolveSessionName, repairSessionNames } = require("../src/services/fancyNameService");
+const { supportsFancyNameRepair, genericNameSql, repairableIdSql, isFallbackFancyName, resolveFancyName, repairFancyNames } = require("../src/services/fancyNameService");
 
 async function repairOne(pool, marketId) {
   const [rows] = await pool.query(
@@ -8,15 +8,15 @@ async function repairOne(pool, marketId) {
     [marketId, marketId],
   );
   if (!rows.length) throw new Error("Fancy market not found");
-  const knownNames = [...new Set(rows.map((row) => row.name).filter((name) => !isGenericSessionName(name)))];
+  const knownNames = [...new Set(rows.map((row) => row.name).filter((name) => !isFallbackFancyName(name)))];
   // Reuse a descriptive stored name when one table is already correct.
   const seed = knownNames.length === 1 ? knownNames[0] : "Fancy2";
-  const name = await resolveSessionName(marketId, seed);
-  if (isGenericSessionName(name)) return { marketId, skipped: true, reason: "No unambiguous provider name" };
+  const name = await resolveFancyName(marketId, seed);
+  if (isFallbackFancyName(name)) return { marketId, skipped: true, reason: "No unambiguous provider name" };
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    await repairSessionNames(connection, marketId, name);
+    await repairFancyNames(connection, marketId, name);
     await connection.commit();
   } catch (error) {
     await connection.rollback();
@@ -31,12 +31,12 @@ async function repairAll(pool, report = console.log, pause = () => new Promise((
   while (true) {
     const [rows] = await pool.query(
       `SELECT fancyid FROM t_matchfancy
-         WHERE fancyid > ? AND fancyid LIKE '%-F2'
-           AND (name IS NULL OR LOWER(REPLACE(REPLACE(TRIM(name),' ',''),'-','')) IN ('','fancy2'))
+         WHERE fancyid > ? AND ${repairableIdSql("fancyid")}
+           AND ${genericNameSql("name")}
        UNION
        SELECT fancyid FROM t_fancyresult
-         WHERE fancyid > ? AND fancyid LIKE '%-F2'
-           AND (fancyname IS NULL OR LOWER(REPLACE(REPLACE(TRIM(fancyname),' ',''),'-','')) IN ('','fancy2'))
+         WHERE fancyid > ? AND ${repairableIdSql("fancyid")}
+           AND ${genericNameSql("fancyname")}
        ORDER BY fancyid LIMIT 100`,
       [cursor, cursor],
     );
@@ -65,7 +65,7 @@ async function main() {
     const summary = await repairAll(db.getSourcePool());
     return summary.failed ? 1 : 0;
   }
-  if (!marketId || !marketId.endsWith("-F2")) throw new Error("Usage: node scripts/repair-fancy-name.js <market-id-F2> | --all");
+  if (!marketId || !supportsFancyNameRepair(marketId)) throw new Error("Usage: node scripts/repair-fancy-name.js <fancy-market-id> | --all");
   const pool = db.getSourcePool();
   const result = await repairOne(pool, marketId);
   console.log(JSON.stringify(result));

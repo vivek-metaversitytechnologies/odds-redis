@@ -175,3 +175,10 @@ Line markets have a dedicated sequential discovery job every second, configurabl
 updates database and Redis definitions, and immediately subscribes to active markets.
 Overlapping cycles are skipped. Explicit inactive/game-over flags remove markets;
 omissions retain them. Provider latency and queue limits can extend a cycle beyond one second.
+
+Repair generic fancy names in existing database rows with
+`node scripts/repair-fancy-name.js --all`, or pass one market ID instead of `--all`.
+The repair covers F2, F3, OE, KD, MT, and CC in both `t_matchfancy` and
+`t_fancyresult`, including completed records. It preserves descriptive names and
+settlement fields, skips missing or ambiguous provider names, and reports a summary.
+Ball-by-ball retains its dedicated numbered-name discovery handling.
