@@ -10,6 +10,7 @@ const cronConfig = require("../config/cron");
 const { utcToIstSql } = require("../utils/dateTime");
 const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
+const { retryDeadlock } = require("../utils/dbRetry");
 
 let running = false;
 const state = {
@@ -152,51 +153,63 @@ async function retireCompletedEvents(events) {
   const completed = events.filter((event) => event.gameOver);
   if (!completed.length) return { events: 0, markets: 0 };
   const eventIds = [...new Set(completed.map((event) => event.eventId))];
-  const placeholders = eventIds.map(() => "?").join(",");
-  const connection = await getSourcePool().getConnection();
-  let marketIds = [];
+  // Select only active rows, one event at a time. Never rewrite the entire
+  // historical event list when just one of its markets still needs retirement.
+  const marketIds = [];
   try {
-    await connection.beginTransaction();
-    const [markets] = await connection.query(
-      `SELECT marketid FROM t_market WHERE eventid IN (${placeholders}) AND isactive = ?`,
-      [...eventIds, true],
-    );
-    const [fancies] = await connection.query(
-      `SELECT fancyid AS marketid FROM t_matchfancy WHERE eventid IN (${placeholders}) AND isactive = ?`,
-      [...eventIds, true],
-    );
-    marketIds = [...markets, ...fancies].map((row) => String(row.marketid));
-    await pendingResults.enqueue(markets.map((row) => row.marketid));
-    if (!marketIds.length) {
-      await connection.rollback();
-    } else {
-      await connection.query(
-        `UPDATE t_market SET isactive = ?, status = ?, issubscribed = ?, updatedon = NOW()
-         WHERE eventid IN (${placeholders})`,
-        [false, false, false, ...eventIds],
-      );
-      await connection.query(
-        `UPDATE t_matchfancy SET isactive = ?, isshow = ?, is_show = ?, issubscribed = ?,
-           updatedon = NOW() WHERE eventid IN (${placeholders})`,
-        [false, false, false, false, ...eventIds],
-      );
-      await connection.commit();
+    for (const eventId of eventIds.sort((a, b) => a - b)) {
+      const connection = await getSourcePool().getConnection();
+      try {
+        for (const { table, column, assignments } of [
+          { table: "t_market", column: "marketid", assignments: "status=false,issubscribed=false" },
+          {
+            table: "t_matchfancy",
+            column: "fancyid",
+            assignments: "isshow=false,is_show=false,issubscribed=false",
+          },
+        ]) {
+          const [rows] = await connection.query(
+            `SELECT id,${column} AS marketid FROM ${table} WHERE eventid=? AND isactive=? ORDER BY id`,
+            [eventId, true],
+          );
+          for (let offset = 0; offset < rows.length; offset += 100) {
+            const batch = rows.slice(offset, offset + 100);
+            // Redis work must not extend an open database transaction.
+            if (table === "t_market") await pendingResults.enqueue(batch.map((row) => row.marketid));
+            await retryDeadlock(async () => {
+              await connection.beginTransaction();
+              try {
+                await connection.query(
+                  `UPDATE ${table} SET isactive=false,${assignments},updatedon=NOW()
+                 WHERE id IN (${batch.map(() => "?").join(",")}) AND isactive=? ORDER BY id`,
+                  [...batch.map((row) => row.id), true],
+                );
+                await connection.commit();
+              } catch (error) {
+                await connection.rollback();
+                throw error;
+              }
+            });
+            const retiredIds = batch.map((row) => String(row.marketid));
+            marketIds.push(...retiredIds);
+          }
+        }
+      } finally {
+        connection.release();
+      }
     }
-  } catch (error) {
-    await connection.rollback();
-    throw error;
   } finally {
-    connection.release();
-  }
-  if (marketIds.length) {
-    try {
-      await subscriptions.unsubscribeEventMarkets(marketIds);
-    } catch (error) {
-      logger.warn("[EventSync] provider unsubscribe failed while retiring completed event", {
-        eventIds,
-        marketCount: marketIds.length,
-        error: error.message,
-      });
+    // Earlier batches remain committed if a later batch exhausts its retries.
+    if (marketIds.length) {
+      try {
+        await subscriptions.unsubscribeEventMarkets(marketIds);
+      } catch (error) {
+        logger.warn("[EventSync] provider unsubscribe failed while retiring completed event", {
+          eventIds,
+          marketCount: marketIds.length,
+          error: error.message,
+        });
+      }
     }
   }
   await Promise.allSettled(

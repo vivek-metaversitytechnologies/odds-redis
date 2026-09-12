@@ -432,59 +432,65 @@ async function upsertFancies(fancies) {
       else fancy.marketName = await resolveFancyName(fancy.marketId, fancy.marketName);
     }
     for (const batch of chunks(writable)) {
-      await connection.beginTransaction();
-      try {
-        const values = batch.map((fancy) => {
-          const active = fancy.isActive && !fancy.gameOver;
-          const marketStatus = fancy.status || existing.get(fancy.marketId)?.status || "OPEN";
-          return [
-            fancy.marketId,
-            fancy.marketName,
-            oddsType(fancy.marketId),
-            marketStatus,
-            fancy.maxBet,
-            fancy.betDelay,
-            fancy.minBet,
-            fancy.maxBet,
-            fancy.eventId,
-            false,
-            active,
-            fancy.marketType,
-            active,
-            active,
-            "",
-            fancy.displayMessage,
-            new Date(),
-            fancy.matchName,
-            fancy.sportId,
-            "RS",
-            1,
-            fancy.inPlay,
-            fancy.maxBet,
-          ];
-        });
-        await connection.query(
-          `INSERT INTO t_matchfancy
-            (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
-             issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
-             sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
-           ON DUPLICATE KEY UPDATE
-             updatedon=IF(
-               NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
-               NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
-               NOW(),updatedon
-             ),
-             name=IF(VALUES(mtype)='ball-by-ball' AND VALUES(name) REGEXP '^[0-9]+([.][0-9]+)? ',VALUES(name),name),
-             status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
-          [values],
-        );
-        for (const fancy of batch) {
+      await retryDeadlock(async () => {
+        await connection.beginTransaction();
+        try {
+          const values = batch.map((fancy) => {
+            const active = fancy.isActive && !fancy.gameOver;
+            const marketStatus = fancy.status || existing.get(fancy.marketId)?.status || "OPEN";
+            return [
+              fancy.marketId,
+              fancy.marketName,
+              oddsType(fancy.marketId),
+              marketStatus,
+              fancy.maxBet,
+              fancy.betDelay,
+              fancy.minBet,
+              fancy.maxBet,
+              fancy.eventId,
+              false,
+              active,
+              fancy.marketType,
+              active,
+              active,
+              "",
+              fancy.displayMessage,
+              new Date(),
+              fancy.matchName,
+              fancy.sportId,
+              "RS",
+              1,
+              fancy.inPlay,
+              fancy.maxBet,
+            ];
+          });
+          await connection.query(
+            `INSERT INTO t_matchfancy
+              (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
+               issuspendedbyadmin,isactive,mtype,isshow,is_show,suspendedby,remarks,createdon,matchname,
+               sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
+             ON DUPLICATE KEY UPDATE
+               updatedon=IF(
+                 NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
+                 NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
+                 NOW(),updatedon
+               ),
+               name=IF(VALUES(mtype)='ball-by-ball' AND VALUES(name) REGEXP '^[0-9]+([.][0-9]+)? ',VALUES(name),name),
+               status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
+            [values],
+          );
+          await connection.commit();
+        } catch (error) {
+          await connection.rollback();
+          throw error;
+        }
+      });
+      // Repair only fallback names, after releasing the batch row locks.
+      // Historical-only repairs belong to scripts/repair-fancy-name.js.
+      for (const fancy of batch) {
+        if (isFallbackFancyName(existing.get(fancy.marketId)?.name)) {
           await repairFancyNames(connection, fancy.marketId, fancy.marketName);
         }
-        await connection.commit();
-      } catch (error) {
-        await connection.rollback();
-        throw error;
       }
     }
     for (const fancy of writable) {
@@ -938,7 +944,7 @@ async function syncMarketDiscovery(events, lane = "active") {
     const primaryStoredFancies = primaryUnique.filter(storedInFancyTable);
     // Both writers can touch t_market (fancy persistence removes migrated rows), so
     // serialize them to avoid cross-transaction lock waits during busy discovery runs.
-    const primaryPersisted = await upsertMarkets(primaryStoredRegular);
+    const primaryPersisted = await retryDeadlock(() => upsertMarkets(primaryStoredRegular));
     const primaryFancyPersisted = await upsertFancies(primaryStoredFancies);
     // A currently active vendor market of any displayable family is positive
     // evidence that the event is still alive, even when Match Odds/Bookmaker is
@@ -1051,7 +1057,9 @@ async function syncMarketDiscovery(events, lane = "active") {
     );
     const changedIds = new Set(changed.map((market) => market.marketId));
     const changedMarkets = unique.filter((market) => changedIds.has(market.marketId));
-    const persisted = await upsertMarkets(changedMarkets.filter((market) => !storedInFancyTable(market)));
+    const persisted = await retryDeadlock(() =>
+      upsertMarkets(changedMarkets.filter((market) => !storedInFancyTable(market))),
+    );
     redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
     const fancyPersisted = await upsertFancies(changedMarkets.filter(storedInFancyTable));
     redisStore.invalidateMarkets(fancyPersisted.fancyIds);
@@ -1224,7 +1232,7 @@ async function syncLiveMarketCleanup() {
     const fancies = unique.filter(storedInFancyTable);
     const regular = unique.filter((market) => !storedInFancyTable(market));
     const regularResult = await retryDeadlock(() => upsertMarkets(regular));
-    const fancyResult = await retryDeadlock(() => upsertFancies(fancies));
+    const fancyResult = await upsertFancies(fancies);
     const marketIdsByEvent = new Map();
     for (const market of unique) {
       const eventId = String(market.eventId);
@@ -1408,7 +1416,7 @@ async function syncActiveBallByBallDiscovery() {
 
     const persistenceStartedAt = Date.now();
     const persisted = changedFancies.length
-      ? await retryDeadlock(() => upsertFancies(changedFancies))
+      ? await upsertFancies(changedFancies)
       : { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
     writeBallByBallLog("database.persisted", {
       cycleId,
@@ -1551,7 +1559,7 @@ async function syncActiveLineMarketDiscovery() {
         const changed = markets.filter(
           (market) => lineMarketFingerprints.get(String(market.marketId)) !== marketFingerprint(market),
         );
-        const persisted = await retryDeadlock(() => upsertFancies(changed));
+        const persisted = await upsertFancies(changed);
         redisStore.invalidateMarkets(persisted.fancyIds);
         const active = markets.filter((market) => market.isActive && !market.gameOver);
         await fetchAndStoreRunners(active.map((market) => market.marketId));

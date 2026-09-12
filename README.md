@@ -182,3 +182,16 @@ The repair covers F2, F3, OE, KD, MT, and CC in both `t_matchfancy` and
 `t_fancyresult`, including completed records. It preserves descriptive names and
 settlement fields, skips missing or ambiguous provider names, and reports a summary.
 Ball-by-ball retains its dedicated numbered-name discovery handling.
+
+Event retirement selects active rows per event and commits at most 100 rows at a
+time, avoiding rewrites of historical inactive markets. Retirement and fancy
+discovery retry deadlocked transactions up to three times. Discovery repairs
+fallback names after committing its market batch; it does not repeatedly repair
+historical results for markets whose stored names are already descriptive. Use
+the repair script above for that backfill.
+
+Migration `003_fancy_result_lookup_index.sql` adds a non-unique index on
+`t_fancyresult(fancyid)` unless a full-column leading index already exists. It
+preserves duplicate result history and the existing storage engine. On MyISAM,
+index creation can block table access, so apply it during a maintenance window.
+The code changes do not apply this migration automatically.
