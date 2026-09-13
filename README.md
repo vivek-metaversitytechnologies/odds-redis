@@ -191,7 +191,17 @@ historical results for markets whose stored names are already descriptive. Use
 the repair script above for that backfill.
 
 Migration `003_fancy_result_lookup_index.sql` adds a non-unique index on
-`t_fancyresult(fancyid)` unless a full-column leading index already exists. It
+`t_fancyresult(fancyid(191))` unless a leading index covering at least 191
+characters (or the full column) already exists. The prefix fits MyISAM’s
+1,000-byte key limit with utf8mb4. It
 preserves duplicate result history and the existing storage engine. On MyISAM,
 index creation can block table access, so apply it during a maintenance window.
 The code changes do not apply this migration automatically.
+
+Socket game-over cleanup also commits at most 100 market rows at a time and
+keeps Redis calls outside database transactions. Deadlock retries do not count
+as additional event-terminal observations. Migration
+`004_regular_result_lookup_indexes.sql` supplies MyISAM-safe regular and
+exceptional result lookup indexes. See [the settlement database plan](docs/settlement-db-plan.md)
+for the production findings, targeted migration rollout, and a separate InnoDB
+conversion plan.

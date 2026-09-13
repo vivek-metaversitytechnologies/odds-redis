@@ -1,14 +1,16 @@
 -- Result lookups and name repair use fancyid. Keep this non-unique: existing
--- result history may contain multiple rows per market. Do not change its engine.
+-- result history may contain multiple rows per market. A 191-character prefix
+-- fits MyISAM's 1000-byte limit even with utf8mb4. Do not change its engine.
 SET @fancy_result_lookup_exists = (
   SELECT COUNT(*) FROM information_schema.statistics
   WHERE table_schema = DATABASE()
     AND table_name = 't_fancyresult'
-    AND column_name = 'fancyid' AND seq_in_index = 1 AND sub_part IS NULL
+    AND column_name = 'fancyid' AND seq_in_index = 1
+    AND (sub_part IS NULL OR sub_part >= 191)
 );
 SET @fancy_result_lookup_sql = IF(
   @fancy_result_lookup_exists = 0,
-  'ALTER TABLE t_fancyresult ADD INDEX idx_fancyresult_fancyid (fancyid)',
+  'ALTER TABLE t_fancyresult ADD INDEX idx_fancyresult_fancyid (fancyid(191))',
   'SELECT 1'
 );
 PREPARE fancy_result_lookup_statement FROM @fancy_result_lookup_sql;

@@ -176,105 +176,140 @@ async function loadCandidates() {
   return { markets, fancies, cursorsUsed: { ...candidateCursors } };
 }
 
+const SOCKET_RETIRE_BATCH_SIZE = 100;
+
+async function commitSocketRetirement(connection, sql, params) {
+  await retryDeadlock(async () => {
+    await connection.beginTransaction();
+    try {
+      await connection.query(sql, params);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    }
+  });
+}
+
+async function retireSocketMarkets(connection, rows, regular, closedRows) {
+  const ordered = [...new Map(rows.map((row) => [row.id, row])).values()]
+    .sort((left, right) => Number(left.id) - Number(right.id));
+  for (let offset = 0; offset < ordered.length; offset += SOCKET_RETIRE_BATCH_SIZE) {
+    const batch = ordered.slice(offset, offset + SOCKET_RETIRE_BATCH_SIZE);
+    // Queue results before opening the transaction; Redis latency must not
+    // extend the lifetime of market row locks.
+    if (regular) await pendingResults.enqueue(batch.map((row) => row.marketid));
+    const placeholders = batch.map(() => "?").join(",");
+    const sql = regular
+      ? `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
+         WHERE id IN (${placeholders}) AND (isactive=1 OR status=1 OR issubscribed=1) ORDER BY id`
+      : `UPDATE t_matchfancy SET isactive=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+         WHERE id IN (${placeholders}) AND (isactive=1 OR isshow=1 OR is_show=1 OR issubscribed=1) ORDER BY id`;
+    await commitSocketRetirement(connection, sql, [
+      ...(regular ? [false, false, false] : [false, false, false, false]),
+      ...batch.map((row) => row.id),
+    ]);
+    // Retain committed progress for Redis/provider cleanup if a later batch fails.
+    closedRows.push(...batch);
+  }
+}
+
 async function handleSocketGameOver(marketIds) {
   const ids = [...new Set((marketIds || []).map(String).map((id) => id.trim()).filter(redis.validMarketIdentifier))]
     .sort((left, right) => left.localeCompare(right));
   if (!ids.length) return { markets: 0, events: 0, removed: 0 };
-  const placeholders = ids.map(() => "?").join(",");
-  const cleanup = await retryDeadlock(async () => {
-    const connection = await getSourcePool().getConnection();
-    try {
-      await connection.beginTransaction();
-      const [markets] = await connection.query(
-        `SELECT marketid,eventid,marketname FROM t_market WHERE marketid IN (${placeholders})`,
-        ids,
+  const connection = await getSourcePool().getConnection();
+  const closedRows = [];
+  const terminalEvents = [];
+  let databaseError;
+  try {
+    const markets = [];
+    const fancies = [];
+    for (let offset = 0; offset < ids.length; offset += SOCKET_RETIRE_BATCH_SIZE) {
+      const batch = ids.slice(offset, offset + SOCKET_RETIRE_BATCH_SIZE);
+      const placeholders = batch.map(() => "?").join(",");
+      const [regularRows] = await connection.query(
+        `SELECT id,marketid,eventid,marketname FROM t_market WHERE marketid IN (${placeholders})`, batch,
       );
-      const [fancies] = await connection.query(
-        `SELECT fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy
-         WHERE fancyid IN (${placeholders})`,
-        ids,
+      const [fancyRows] = await connection.query(
+        `SELECT id,fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy
+         WHERE fancyid IN (${placeholders})`, batch,
       );
-      const candidateTerminalEventIds = [...new Set([...markets, ...fancies]
-        .filter((market) => isEventTerminalMarketName(market.marketname))
-        .map((market) => Number(market.eventid))
-        .filter(Number.isInteger))].sort((left, right) => left - right);
-      const terminalEventIds = candidateTerminalEventIds.filter((eventId) =>
-        lifecycle.observe({
-          eventId,
-          source: "socket-primary-game-over",
-          terminal: true,
-          evidence: {
-            marketIds: [...markets, ...fancies]
-              .filter((market) => Number(market.eventid) === eventId)
-              .map((market) => String(market.marketid)),
-          },
-        }).execute,
-      );
-      await pendingResults.enqueue(markets.map((market) => market.marketid));
-      await connection.query(
-        `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
-         WHERE marketid IN (${placeholders})`,
-        [false, false, false, ...ids],
-      );
-      await connection.query(
-        `UPDATE t_matchfancy SET isactive=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
-         WHERE fancyid IN (${placeholders})`,
-        [false, false, false, false, ...ids],
-      );
-      let terminalEvents = [];
-      let eventMarkets = [];
-      let eventFancies = [];
-      if (terminalEventIds.length) {
-        const eventPlaceholders = terminalEventIds.map(() => "?").join(",");
-        [terminalEvents] = await connection.query(
-          `SELECT eventid,sportid FROM t_event WHERE eventid IN (${eventPlaceholders})`,
-          terminalEventIds,
-        );
-        [eventMarkets] = await connection.query(
-          `SELECT marketid,eventid,marketname FROM t_market WHERE eventid IN (${eventPlaceholders})`,
-          terminalEventIds,
-        );
-        [eventFancies] = await connection.query(
-          `SELECT fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy
-           WHERE eventid IN (${eventPlaceholders})`,
-          terminalEventIds,
-        );
-        await pendingResults.enqueue(eventMarkets.map((market) => market.marketid));
-        await connection.query(
-          `UPDATE t_event SET isactive=?,status=?,in_play=?,updatedon=NOW()
-           WHERE eventid IN (${eventPlaceholders})`,
-          [false, false, false, ...terminalEventIds],
-        );
-        await connection.query(
-          `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
-           WHERE eventid IN (${eventPlaceholders})`,
-          [false, false, false, ...terminalEventIds],
-        );
-        await connection.query(
-          `UPDATE t_matchfancy SET isactive=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
-           WHERE eventid IN (${eventPlaceholders})`,
-          [false, false, false, false, ...terminalEventIds],
-        );
-      }
-      await connection.commit();
-      const closedRows = [...new Map([...markets, ...fancies, ...eventMarkets, ...eventFancies]
-        .map((market) => [String(market.marketid), market])).values()];
-      return { closedRows, terminalEvents };
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
+      markets.push(...regularRows);
+      fancies.push(...fancyRows);
     }
-  });
+    const candidateTerminalEventIds = [...new Set([...markets, ...fancies]
+      .filter((market) => isEventTerminalMarketName(market.marketname))
+      .map((market) => Number(market.eventid))
+      .filter(Number.isInteger))].sort((left, right) => left - right);
+    // Observe once per incoming handler call, never once per DB retry. A
+    // deadlock is not a second piece of evidence that the event has finished.
+    const terminalEventIds = candidateTerminalEventIds.filter((eventId) =>
+      lifecycle.observe({
+        eventId,
+        source: "socket-primary-game-over",
+        terminal: true,
+        evidence: {
+          marketIds: [...markets, ...fancies]
+            .filter((market) => Number(market.eventid) === eventId)
+            .map((market) => String(market.marketid)),
+        },
+      }).execute,
+    );
+    for (const eventId of terminalEventIds) {
+      const [events] = await connection.query(
+        "SELECT id,eventid,sportid FROM t_event WHERE eventid=?", [eventId],
+      );
+      for (const event of events) {
+        await commitSocketRetirement(connection,
+          `UPDATE t_event SET isactive=?,status=?,in_play=?,updatedon=NOW()
+           WHERE id=? AND (isactive=1 OR status=1 OR in_play=1)`,
+          [false, false, false, event.id]);
+        terminalEvents.push(event);
+      }
+      // Historical inactive rows need no rewrite. The complete Redis event
+      // snapshot is removed after the event's terminal state is committed.
+      const [eventMarkets] = await connection.query(
+        "SELECT id,marketid,eventid,marketname FROM t_market WHERE eventid=? AND isactive=? ORDER BY id",
+        [eventId, true],
+      );
+      const [eventFancies] = await connection.query(
+        "SELECT id,fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy WHERE eventid=? AND isactive=? ORDER BY id",
+        [eventId, true],
+      );
+      markets.push(...eventMarkets);
+      fancies.push(...eventFancies);
+    }
+    await retireSocketMarkets(connection, markets, true, closedRows);
+    await retireSocketMarkets(connection, fancies, false, closedRows);
+  } catch (error) {
+    databaseError = error;
+  } finally {
+    connection.release();
+  }
+  // Publish only committed progress, including on a partially failed cleanup.
+  // No Redis or provider call below runs while a DB transaction is open.
+  let result;
+  try {
+    result = await publishSocketRetirement(closedRows, terminalEvents);
+  } catch (error) {
+    if (!databaseError) throw error;
+    logger.error("[ResultSync] partial socket cleanup publish failed", { error: error.message });
+  }
+  if (databaseError) throw databaseError;
+  return result;
+}
 
-  const { closedRows, terminalEvents } = cleanup;
+async function publishSocketRetirement(closedRows, terminalEvents) {
   const terminalEventIds = new Set(terminalEvents.map((event) => String(event.eventid)));
   const marketIdsByEvent = new Map();
   for (const row of closedRows) {
     const eventId = String(row.eventid);
     if (!marketIdsByEvent.has(eventId)) marketIdsByEvent.set(eventId, []);
     marketIdsByEvent.get(eventId).push(String(row.marketid));
+  }
+  for (const eventId of terminalEventIds) {
+    if (!marketIdsByEvent.has(eventId)) marketIdsByEvent.set(eventId, []);
   }
   const removals = await Promise.allSettled(
     [...marketIdsByEvent].map(([eventId, idsForEvent]) =>
