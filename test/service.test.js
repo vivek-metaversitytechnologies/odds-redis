@@ -89,10 +89,12 @@ const {
   discoveryEventBatchSize,
   prioritizedDiscoveryEvents,
   discoveryEventBatches,
+  lineMarketEventBatches,
   typedDiscoveryRequests,
   isBallByBallDiscoveryRequest,
   typedDiscoveryThrottle,
   ballByBallSnapshotDelta,
+  providerDataAge,
   discoveryPriority,
   nextDiscoveryLane,
   oddsType,
@@ -131,11 +133,26 @@ test("provider limiter stays below the vendor rolling-window cap", () => {
   assert.equal(limit.safeWindowCap, 800);
   assert.equal(limit.applicationHardCapPerMinute, 800);
   assert.equal(limit.vendorSafeWindowEquivalentPerMinute, 2400);
+  assert.deepEqual(limit.slowRequestThresholds, { requestMs: 750, p95Ms: 500, consecutive: 3 });
   assert.ok(limit.effectiveRequestsPerMinute <= 800);
   assert.ok(limit.minTimeMs >= 25);
   assert.equal(typeof limit.requests.last20Seconds.attempts, "number");
   assert.equal(typeof limit.requests.last60Seconds.byEndpoint, "object");
   assert.equal(typeof limit.requests.lifetime.attempts, "number");
+});
+
+test("provider data age measures only active Ball-by-Ball rows", () => {
+  const now = Date.parse("2026-09-13T10:00:10.000Z");
+  assert.deepEqual(providerDataAge([
+    { isActive: true, updatedAt: "2026-09-13T10:00:08.000Z" },
+    { isActive: true, updatedAt: "2026-09-13T10:00:04.000Z" },
+    { isActive: false, updatedAt: "2026-09-13T09:00:00.000Z" },
+  ], now), { samples: 2, averageMs: 4000, maxMs: 6000 });
+});
+
+test("line-market discovery sends at most ten events per vendor request", () => {
+  const events = Array.from({ length: 21 }, (_, index) => ({ eventId: index + 1 }));
+  assert.deepEqual(lineMarketEventBatches(events).map((batch) => batch.length), [10, 10, 1]);
 });
 
 test("provider limiter recognizes the vendor temporary IP block", () => {

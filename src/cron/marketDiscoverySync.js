@@ -33,6 +33,7 @@ let lineMarketRunning = false;
 const lineMarketFingerprints = new Map();
 let ballByBallStartedAt = 0;
 let ballByBallCycleSequence = 0;
+let lastBallByBallDataAgeWarningAt = 0;
 const ballByBallActiveSnapshots = new Map();
 const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
@@ -48,6 +49,17 @@ const state = {
   lastError: null,
   lastResult: null,
 };
+
+function providerDataAge(rows, now = Date.now()) {
+  const ages = (rows || [])
+    .filter((market) => market?.isActive !== false && market?.gameOver !== true)
+    .map((market) => Date.parse(market?.updatedAt))
+    .filter(Number.isFinite)
+    .map((updatedAt) => Math.max(0, now - updatedAt));
+  return ages.length
+    ? { samples: ages.length, averageMs: Math.round(ages.reduce((sum, age) => sum + age, 0) / ages.length), maxMs: Math.max(...ages) }
+    : { samples: 0, averageMs: null, maxMs: null };
+}
 const DB_WRITE_BATCH_SIZE = integer("MARKET_DB_WRITE_BATCH_SIZE", 500, { min: 50, max: 5000 });
 const DISCOVERY_CACHE_LIMIT = integer("MARKET_DISCOVERY_CACHE_LIMIT", 50000, { min: 1000 });
 const MISSING_LINE_MARKET_PASSES = integer("MARKET_MISSING_LINE_PASSES", 2, { min: 1, max: 20 });
@@ -79,6 +91,10 @@ function discoveryEventBatchSize(lane, sportId) {
   // valid markets hidden until the event enters the active discovery window.
   if (lane === "active" || Number(sportId) === cricketSportId()) return 1;
   return integer("MARKET_DISCOVERY_EVENT_BATCH_SIZE", 10, { min: 1, max: 100 });
+}
+
+function lineMarketEventBatches(events) {
+  return chunks(events || [], integer("LINE_MARKET_EVENT_BATCH_SIZE", 10, { min: 1, max: 20 }));
 }
 
 function cricketSportId() {
@@ -1337,6 +1353,20 @@ async function syncActiveBallByBallDiscovery() {
         const parsedRows = marketRows(response, eventsById);
         discovered.push(...parsedRows);
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);
+        const dataAge = providerDataAge(activeRows);
+        const dataAgeWarningMs = integer("BALL_BY_BALL_DATA_AGE_WARNING_MS", 5000, { min: 1000 });
+        const warningCooldownMs = integer("PROVIDER_WARNING_COOLDOWN_MS", 60000, { min: 1000 });
+        if (
+          dataAge.maxMs > dataAgeWarningMs &&
+          Date.now() - lastBallByBallDataAgeWarningAt >= warningCooldownMs
+        ) {
+          lastBallByBallDataAgeWarningAt = Date.now();
+          logger.warn("[BallByBallDiscovery] active provider data is stale", {
+            eventIds,
+            ...dataAge,
+            thresholdMs: dataAgeWarningMs,
+          });
+        }
         const summary = {
           cycleId,
           eventIds,
@@ -1346,6 +1376,7 @@ async function syncActiveBallByBallDiscovery() {
           active: activeRows.length,
           inactive: rawRows.filter((market) => market?.isActive === false).length,
           gameOver: rawRows.filter((market) => market?.gameOver === true).length,
+          providerDataAge: dataAge,
           activeMarkets: activeRows.slice(0, logMarketLimit).map((market) => ({
             id: market?.id,
             name: market?.name,
@@ -1508,16 +1539,18 @@ async function syncActiveBallByBallDiscovery() {
       providerSkipped,
       failedSubscriptionBatches,
       requestBatchSize: eventBatchSize,
-      requests: requestSummaries.map(({ eventIds, durationMs, received, parsed, active }) => ({
+      requests: requestSummaries.map(({ eventIds, durationMs, received, parsed, active, providerDataAge }) => ({
         eventIds,
         durationMs,
         received,
         parsed,
         active,
+        providerDataAge,
       })),
       durationMs: Date.now() - startedAt,
     };
     writeBallByBallLog("cycle.completed", result);
+    state.ballByBall = result;
     logger.info("[BallByBallDiscovery] completed", result);
     return result;
   } catch (error) {
@@ -1545,13 +1578,14 @@ async function syncActiveLineMarketDiscovery() {
     );
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const result = { events: events.length, markets: 0, changed: 0, failedRequests: 0, failedSubscriptions: 0 };
-    // One event per request avoids truncating large line-market responses.
-    // Await each event's complete processing before requesting the next one.
-    for (const event of events) {
+    // Keep batches sequential so a large response cannot create overlapping
+    // persistence, Redis reconciliation, or subscription work.
+    for (const eventBatch of lineMarketEventBatches(events)) {
+      const eventIds = eventBatch.map((event) => Number(event.eventId));
       try {
         const response = await provider.markets(
-          { eids: [Number(event.eventId)], type: ["line-market"] },
-          { priority: discoveryPriority(event.sportId, "active"), source: "line-market" },
+          { eids: eventIds, type: ["line-market"] },
+          { priority: discoveryPriority(eventBatch[0]?.sportId, "active"), source: "line-market" },
         );
         const markets = mergeDiscoveredMarkets(marketRows(response, eventsById)).filter(
           (market) => market.marketType === "line-market",
@@ -1597,7 +1631,7 @@ async function syncActiveLineMarketDiscovery() {
         result.changed += changed.length;
       } catch (error) {
         result.failedRequests += 1;
-        logger.error("[LineMarketDiscovery] event sync failed", { eventId: event.eventId, error: error.message });
+        logger.error("[LineMarketDiscovery] event batch sync failed", { eventIds, error: error.message });
       }
     }
     result.durationMs = Date.now() - startedAt;
@@ -1688,12 +1722,14 @@ module.exports = {
   inactiveLineMarkets,
   missingLineMarketIds,
   discoveryEventBatchSize,
+  lineMarketEventBatches,
   prioritizedDiscoveryEvents,
   discoveryEventBatches,
   typedDiscoveryRequests,
   isBallByBallDiscoveryRequest,
   typedDiscoveryThrottle,
   ballByBallSnapshotDelta,
+  providerDataAge,
   discoveryPriority,
   nextDiscoveryLane,
   reconcileMissingLineMarkets,

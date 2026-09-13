@@ -5,7 +5,7 @@ require("winston-daily-rotate-file");
 let instance;
 
 function enabled() {
-  return String(process.env.BALL_BY_BALL_LOG_TO_FILE || "true").toLowerCase() === "true";
+  return String(process.env.BALL_BY_BALL_LOG_TO_FILE || "false").toLowerCase() === "true";
 }
 
 function getLogger() {

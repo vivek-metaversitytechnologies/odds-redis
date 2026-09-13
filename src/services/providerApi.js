@@ -1,4 +1,5 @@
 const { writeProviderLog } = require("../utils/providerFileLogger");
+const logger = require("../utils/logger");
 const Bottleneck = require("bottleneck");
 const { integer } = require("../config/env");
 const providerMetrics = require("./providerMetrics");
@@ -27,6 +28,8 @@ const activeControllers = new Set();
 let shuttingDown = false;
 let blockedUntil = 0;
 const requestAttempts = [];
+const consecutiveSlowRequests = new Map();
+const lastP95WarningAt = new Map();
 const requestLifetime = {
   startedAt: new Date().toISOString(),
   attempts: 0,
@@ -83,6 +86,59 @@ function finishRequestAttempt(entry, { status = null, error } = {}) {
     entry.durationMs,
     entry.source,
   );
+  trackSlowRequest(entry);
+}
+
+function percentile(values, percentage) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.max(0, Math.ceil(sorted.length * percentage) - 1)];
+}
+
+function latencySummary(entries) {
+  const durations = entries
+    .map((entry) => entry.durationMs)
+    .filter((duration) => Number.isFinite(duration));
+  if (!durations.length) return { samples: 0, averageMs: null, p95Ms: null, maxMs: null };
+  return {
+    samples: durations.length,
+    averageMs: Math.round(durations.reduce((sum, duration) => sum + duration, 0) / durations.length),
+    p95Ms: percentile(durations, 0.95),
+    maxMs: Math.max(...durations),
+  };
+}
+
+function trackSlowRequest(entry) {
+  if (!Number.isFinite(entry.durationMs)) return;
+  const source = entry.source || "unclassified";
+  const slowMs = integer("PROVIDER_SLOW_REQUEST_MS", 750, { min: 100 });
+  const consecutiveLimit = integer("PROVIDER_SLOW_CONSECUTIVE_COUNT", 3, { min: 2, max: 100 });
+  const consecutive = entry.durationMs > slowMs ? (consecutiveSlowRequests.get(source) || 0) + 1 : 0;
+  consecutiveSlowRequests.set(source, consecutive);
+  if (entry.durationMs > slowMs) {
+    logger.warn("[Provider] slow request", {
+      source, method: entry.method, route: entry.route, durationMs: entry.durationMs, thresholdMs: slowMs,
+    });
+  }
+  if (consecutive === consecutiveLimit) {
+    logger.warn("[Provider] consecutive slow requests", { source, count: consecutive, thresholdMs: slowMs });
+  }
+
+  const sourceRows = requestAttempts.filter((row) => row.source === source && Number.isFinite(row.durationMs));
+  const latency = latencySummary(sourceRows);
+  const p95ThresholdMs = integer("PROVIDER_P95_WARNING_MS", 500, { min: 100 });
+  const minimumSamples = integer("PROVIDER_P95_MIN_SAMPLES", 10, { min: 2, max: 1000 });
+  const warningCooldownMs = integer("PROVIDER_WARNING_COOLDOWN_MS", 60000, { min: 1000 });
+  const now = Date.now();
+  if (
+    latency.samples >= minimumSamples && latency.p95Ms > p95ThresholdMs &&
+    now - (lastP95WarningAt.get(source) || 0) >= warningCooldownMs
+  ) {
+    lastP95WarningAt.set(source, now);
+    logger.warn("[Provider] rolling p95 response time exceeded", {
+      source, windowSeconds: 60, ...latency, thresholdMs: p95ThresholdMs,
+    });
+  }
 }
 
 function requestWindow(windowMs, now = Date.now()) {
@@ -108,6 +164,12 @@ function requestWindow(windowMs, now = Date.now()) {
       sourceCurrent.aborted += 1;
     } else if (entry.outcome === "failed") sourceCurrent.failed += 1;
     bySource[source] = sourceCurrent;
+  }
+  for (const [key, summary] of Object.entries(byEndpoint)) {
+    Object.assign(summary, latencySummary(rows.filter((entry) => `${entry.method} ${entry.route}` === key)));
+  }
+  for (const [source, summary] of Object.entries(bySource)) {
+    Object.assign(summary, latencySummary(rows.filter((entry) => (entry.source || "unclassified") === source)));
   }
   return {
     attempts: rows.length,
@@ -151,6 +213,11 @@ function getProviderRateLimitStatus() {
     minTimeMs: Math.max(configuredMinTime, rateLimitMinTime),
     configurationClamped: configuredRequestsPerMinute > maxRequestsPerMinute,
     blockedUntil: blockedUntil ? new Date(blockedUntil).toISOString() : null,
+    slowRequestThresholds: {
+      requestMs: integer("PROVIDER_SLOW_REQUEST_MS", 750, { min: 100 }),
+      p95Ms: integer("PROVIDER_P95_WARNING_MS", 500, { min: 100 }),
+      consecutive: integer("PROVIDER_SLOW_CONSECUTIVE_COUNT", 3, { min: 2, max: 100 }),
+    },
     requests: {
       last20Seconds: requestWindow(20_000, now),
       last60Seconds: requestWindow(60_000, now),
