@@ -129,6 +129,8 @@ test("provider limiter stays below the vendor rolling-window cap", () => {
   const limit = getProviderRateLimitStatus();
   assert.equal(limit.vendorWindowCap, 1000);
   assert.equal(limit.safeWindowCap, 800);
+  assert.equal(limit.applicationHardCapPerMinute, 800);
+  assert.equal(limit.vendorSafeWindowEquivalentPerMinute, 2400);
   assert.ok(limit.effectiveRequestsPerMinute <= 800);
   assert.ok(limit.minTimeMs >= 25);
   assert.equal(typeof limit.requests.last20Seconds.attempts, "number");

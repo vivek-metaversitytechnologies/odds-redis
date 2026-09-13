@@ -34,7 +34,9 @@ test("line discovery retries failed reconciliation, subscribes unchanged markets
   const subscribed = [];
   const retired = [];
   t.mock.method(subscriptions, "subscribeMarkets", async (ids) => { subscribed.push(ids); });
-  t.mock.method(subscriptions, "unsubscribeEventMarkets", async (ids) => { retired.push(ids); });
+  t.mock.method(subscriptions, "unsubscribeEventMarkets", async (ids, options) => {
+    retired.push({ ids, options });
+  });
   t.mock.method(subscriptions, "isMarketSuppressed", () => false);
   t.mock.method(websocket, "getSubscribedMarketIds", () => []);
   t.mock.method(frontend, "publishEventSnapshot", async () => {});
@@ -65,6 +67,9 @@ test("line discovery retries failed reconciliation, subscribes unchanged markets
   assert.equal(retired.length, 0, "omission must not retire a market");
   rows = [{ id: "1.900", eventId: 900, sportId: 4, type: "line-market", isActive: false }];
   await sync();
-  assert.deepEqual(retired, [["1.900"]]);
+  assert.deepEqual(retired, [{
+    ids: ["1.900"],
+    options: { trackedOnly: true, source: "line-market-discovery" },
+  }]);
   assert.equal(definitions.at(-1)[0].isActive, false);
 });

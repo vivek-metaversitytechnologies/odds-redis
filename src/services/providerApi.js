@@ -6,9 +6,14 @@ const providerMetrics = require("./providerMetrics");
 const VENDOR_WINDOW_MS = 20000;
 const VENDOR_WINDOW_CAP = 1000;
 const VENDOR_SAFE_WINDOW_CAP = 800;
+const APPLICATION_HARD_MINUTE_CAP = 800;
 const configuredRequestsPerMinute = integer("PROVIDER_MAX_REQUESTS_PER_MINUTE", 800, { min: 1 });
 const vendorSafeRequestsPerMinute = Math.floor((VENDOR_SAFE_WINDOW_CAP * 60000) / VENDOR_WINDOW_MS);
-const maxRequestsPerMinute = Math.min(800, configuredRequestsPerMinute, vendorSafeRequestsPerMinute);
+const maxRequestsPerMinute = Math.min(
+  APPLICATION_HARD_MINUTE_CAP,
+  configuredRequestsPerMinute,
+  vendorSafeRequestsPerMinute,
+);
 const configuredMinTime = integer("PROVIDER_MIN_TIME_MS", 0, { min: 0 });
 const rateLimitMinTime = Math.ceil(60000 / maxRequestsPerMinute);
 const providerLimiter = new Bottleneck({
@@ -138,6 +143,8 @@ function getProviderRateLimitStatus() {
     vendorWindowMs: VENDOR_WINDOW_MS,
     vendorWindowCap: VENDOR_WINDOW_CAP,
     safeWindowCap: VENDOR_SAFE_WINDOW_CAP,
+    applicationHardCapPerMinute: APPLICATION_HARD_MINUTE_CAP,
+    vendorSafeWindowEquivalentPerMinute: vendorSafeRequestsPerMinute,
     configuredRequestsPerMinute,
     effectiveRequestsPerMinute: maxRequestsPerMinute,
     backgroundRequestsPerMinute: 400,
@@ -305,7 +312,7 @@ async function closeProviderRequests() {
   await providerLimiter.stop({ dropWaitingJobs: true, dropErrorMessage: "Provider client is shutting down" });
 }
 
-function postIds(path, ids) {
+function postIds(path, ids, { source } = {}) {
   if (!Array.isArray(ids) || !ids.length) return null;
   // Subscription control is latency-sensitive and must not sit behind the much
   // larger discovery queue. Bottleneck priority 1 runs before default priority 5.
@@ -316,6 +323,7 @@ function postIds(path, ids) {
     body: { data: ids },
     priority: 1,
     retries: 0,
+    metricSource: source,
   });
 }
 
@@ -333,6 +341,6 @@ module.exports = {
   runners: (marketId, { priority = 5, source, retries = 2 } = {}) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`, { priority, metricSource: source, retries }),
   // Results must not sit behind the much larger discovery queue indefinitely.
   results: (body, { priority = 2, source, retries = 2 } = {}) => request("/v1/markets/results", { method: "POST", body, priority, metricSource: source, retries }),
-  subscribe: (ids) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids),
-  unsubscribe: (ids) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids),
+  subscribe: (ids, options) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids, options),
+  unsubscribe: (ids, options) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids, options),
 };

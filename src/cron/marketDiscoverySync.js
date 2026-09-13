@@ -1567,7 +1567,12 @@ async function syncActiveLineMarketDiscovery() {
           await regularMarketsWithRunners(markets),
         );
         const inactiveIds = inactiveLineMarkets(markets).map((market) => market.marketId);
-        if (inactiveIds.length) await unsubscribeEventMarkets(inactiveIds);
+        if (inactiveIds.length) {
+          await unsubscribeEventMarkets(inactiveIds, {
+            trackedOnly: true,
+            source: "line-market-discovery",
+          });
+        }
         await Promise.all(
           (definitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
         );

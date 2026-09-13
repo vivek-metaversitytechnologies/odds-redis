@@ -74,7 +74,7 @@ async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
     ),
   ].filter((id) => !completedMarketIds.has(id));
   if (!marketIds.length) return { subscribed: [], skipped: [] };
-  const response = await provider.subscribe(marketIds);
+  const response = await provider.subscribe(marketIds, { source: "market-subscription" });
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
   websocket.subscribeMarkets(acknowledgement.attached);
   acknowledgement.attached.forEach((id) => skippedMarketIds.delete(id));
@@ -107,7 +107,7 @@ async function flushResultUnsubscriptions() {
     for (let index = 0; index < queued.length && !retriesStopped; index += batchSize) {
       const batch = queued.slice(index, index + batchSize);
       try {
-        await provider.unsubscribe(batch);
+        await provider.unsubscribe(batch, { source: "result-unsubscribe" });
         websocket.unsubscribeMarkets(batch);
         batch.forEach((id) => pendingResultUnsubscriptions.delete(id));
         logger.info("[MarketSubscription] markets unsubscribed", { marketIds: batch });
@@ -176,7 +176,7 @@ async function unsubscribeEventMarkets(ids, { trackedOnly = false, source = "man
   const unsubscribed = [];
   for (let index = 0; index < providerMarketIds.length; index += batchSize) {
     const batch = providerMarketIds.slice(index, index + batchSize);
-    await provider.unsubscribe(batch);
+    await provider.unsubscribe(batch, { source });
     unsubscribed.push(...batch);
   }
   logger.info("[MarketSubscription] event markets unsubscribed", {
@@ -206,7 +206,7 @@ async function reconcileProviderSubscriptions(ids) {
   let unsubscribed = 0;
   for (let index = 0; index < marketIds.length; index += batchSize) {
     const batch = marketIds.slice(index, index + batchSize);
-    await provider.unsubscribe(batch);
+    await provider.unsubscribe(batch, { source: "startup-reconciliation" });
     websocket.unsubscribeMarkets(batch);
     batch.forEach((id) => skippedMarketIds.delete(id));
     unsubscribed += batch.length;
@@ -228,9 +228,9 @@ async function refreshMarkets(ids) {
     ),
   ].filter((id) => !completedMarketIds.has(id));
   if (!marketIds.length) return { requested: 0, subscribed: [], skipped: [] };
-  await provider.unsubscribe(marketIds);
+  await provider.unsubscribe(marketIds, { source: "market-refresh" });
   websocket.unsubscribeMarkets(marketIds);
-  const response = await provider.subscribe(marketIds);
+  const response = await provider.subscribe(marketIds, { source: "market-refresh" });
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
   websocket.subscribeMarkets(acknowledgement.subscribed);
   acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
@@ -294,9 +294,9 @@ async function retrySkippedMarkets() {
       // A provider "skipped" response can mean the IDs remain registered from an
       // earlier subscription while this socket is not attached to them. Clear that
       // stale provider state before retrying, otherwise the same IDs can skip forever.
-      await provider.unsubscribe(batch);
+      await provider.unsubscribe(batch, { source: "skipped-market-retry" });
       websocket.unsubscribeMarkets(batch);
-      const response = await provider.subscribe(batch);
+      const response = await provider.subscribe(batch, { source: "skipped-market-retry" });
       const acknowledgement = normalizeProviderAcknowledgement(response, batch);
       websocket.subscribeMarkets(acknowledgement.subscribed);
       acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
@@ -364,7 +364,7 @@ async function stopSkippedRetries() {
 
 async function unsubscribeAll() {
   const ids = websocket.getSubscribedMarketIds();
-  if (ids.length) await provider.unsubscribe(ids);
+  if (ids.length) await provider.unsubscribe(ids, { source: "shutdown" });
   websocket.unsubscribeMarkets(ids);
   ids.forEach((id) => skippedMarketIds.delete(id));
   return { requested: ids.length, unsubscribed: ids };
