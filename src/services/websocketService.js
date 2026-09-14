@@ -475,6 +475,11 @@ function connectSocket() {
       logShape("unknown", messages[0]);
     }
   });
+  socket.on("market", (data) => {
+    logRawSocketPayload(data);
+    logShape("market", data);
+    writeProviderLog("provider.socket.market", { payload: data });
+  });
   socket.on("disconnect", (reason) => {
     state.connected = false;
     state.socketId = null;
