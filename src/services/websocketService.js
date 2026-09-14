@@ -420,7 +420,19 @@ function connectSocket() {
       "x-api-key": process.env.PROVIDER_TOKEN || process.env.PROVIDER_X_API_KEY || "dummy_key",
     },
   });
+  // Log each incoming shape once so provider channels can be identified without
+  // logging the full odds stream. Reset this bounded diagnostic on reconnect.
+  const observedSocketShapes = new Set();
+  socket.onAny((eventName, data) => {
+    const sample = Array.isArray(data) ? data[0] : data;
+    const shape = messageShape(sample);
+    const signature = JSON.stringify([eventName, shape]);
+    if (observedSocketShapes.has(signature) || observedSocketShapes.size >= 20) return;
+    observedSocketShapes.add(signature);
+    logger.info("[ProviderWS] incoming event", { eventName, ...shape });
+  });
   socket.on("connect", () => {
+    observedSocketShapes.clear();
     state.connected = true;
     state.socketId = socket.id;
     state.lastConnectedAt = new Date().toISOString();
