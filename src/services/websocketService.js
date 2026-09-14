@@ -4,6 +4,7 @@ const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
 const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
+const { deleteMarketBetPause } = require("./betPauseCacheService");
 const { integer } = require("../config/env");
 const { setBounded } = require("../utils/boundedMap");
 
@@ -480,11 +481,20 @@ function connectSocket() {
   socket.on("market", (data) => {
     for (const item of Array.isArray(data) ? data : [data]) {
       writeMarketLimitsLog(item);
-      const write = redisStore.writeMarketSettings(item)
+      const cacheDelete = deleteMarketBetPause(item).catch((error) =>
+        logger.error("[BetPauseCache] market key deletion failed", {
+          eventId: item?.eid ?? null,
+          marketId: item?.mid ?? null,
+          error: error.message,
+        }),
+      );
+      const settingsWrite = redisStore
+        .writeMarketSettings(item)
         .then((update) => {
           if (update) tickPublisher(update.eventId, update.payload);
         })
         .catch((error) => logger.error("[ProviderWS] market settings write failed", { error: error.message }));
+      const write = Promise.allSettled([cacheDelete, settingsWrite]);
       marketSettingsWrites.add(write);
       void write.finally(() => marketSettingsWrites.delete(write));
     }

@@ -15,6 +15,7 @@ const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const { closeBallByBallLog } = require("./utils/ballByBallFileLogger");
 const { closeMarketLimitsLog } = require("./utils/marketLimitsFileLogger");
+const { closeBetPauseCache } = require("./services/betPauseCacheService");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
 const providerMetrics = require("./services/providerMetrics");
@@ -101,6 +102,7 @@ async function startServer() {
       // unsubscribe operations still use the provider unsubscribe API.
       await websocket.stopSocket();
       await closeRedis();
+      await closeBetPauseCache();
       await closeSourceDb();
       await closeProviderLog();
       await closeBallByBallLog();
@@ -119,6 +121,7 @@ if (require.main === module) {
     logger.error("Startup failed", { error: error.message });
     await Promise.allSettled([
       closeRedis(),
+      closeBetPauseCache(),
       closeSourceDb(),
       closeProviderLog(),
       closeBallByBallLog(),
