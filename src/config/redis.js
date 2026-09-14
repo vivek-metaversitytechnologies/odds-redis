@@ -6,6 +6,7 @@ const { supportsFancyNameRepair, isFallbackFancyName } = require("../services/fa
 const logger = require("../utils/logger");
 const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
+const { providerLimits, persistLimits } = require("../utils/marketLimits");
 
 let client;
 let connecting;
@@ -1172,7 +1173,59 @@ function preserveRunnerNames(entries, previousEntries) {
   }
 }
 
-async function writeTicks(items) {
+async function writeMarketSettings(item) {
+  const marketId = String(item?.mid ?? "");
+  const eventId = String(item?.eid ?? "");
+  const limits = providerLimits(item?.settings);
+  if (!validMarketIdentifier(marketId) || !/^\d+$/.test(eventId) || !Object.keys(limits).length) return null;
+  return withEventLock(eventId, async () => {
+    const connection = await getSourcePool().getConnection();
+    try {
+      await connection.beginTransaction();
+      const rows = [{ marketId, eventId, ...limits }];
+      await persistLimits(connection, rows);
+      await persistLimits(connection, rows, true);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+    invalidateMarkets([marketId]);
+    const redis = await getRedisClient();
+    if (!redis?.isOpen) return null;
+    const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+    const current = eventPayloadCache.get(eventId) || JSON.parse((await redis.get(key)) || "null");
+    if (!current) return null;
+    const payload = normalizeEventPayload(structuredClone(current));
+    let changed = false;
+    for (const group of PAYLOAD_GROUPS) {
+      for (const entry of payload[group]) {
+        if (entryMarketId(entry) !== marketId) continue;
+        for (const [field, value] of [["minBet", limits.providerMinBet], ["maxBet", limits.providerMaxBet]]) {
+          if (value != null && entry[field] !== value) {
+            entry[field] = value;
+            changed = true;
+          }
+        }
+      }
+    }
+    if (!changed) return null;
+    await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
+    setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+    return { eventId, payload };
+  });
+}
+
+function writeTicks(items) {
+  const first = (items || []).find((item) => item && typeof item === "object" && item.eid && item.mid);
+  if (!first) return Promise.resolve({ payload: false, accepted: [], rejected: [] });
+  // Include metadata reads in the lock so a tick cannot restore old bet limits.
+  return withEventLock(String(first.eid), () => writeEventTicks(items));
+}
+
+async function writeEventTicks(items) {
   const candidates = (items || []).filter((item) => item && typeof item === "object" && item.eid && item.mid);
   if (!candidates.length) return { payload: false, accepted: [], rejected: candidates };
   const redis = await getRedisClient();
@@ -1196,7 +1249,7 @@ async function writeTicks(items) {
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
-  const { payload, changed, serialized } = await withEventLock(eventId, async () => {
+  const { payload, changed, serialized } = await (async () => {
     let payload = eventPayloadCache.get(eventId);
     if (!payload) {
       payload = emptyEventPayload();
@@ -1255,7 +1308,7 @@ async function writeTicks(items) {
     }
     setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
     return { payload, changed, serialized };
-  });
+  })();
   for (const { item } of acceptedRows) recordTickActivity(`${key}:${item.mid}`, item.eid, item.mid);
   return {
     payload,
@@ -1477,6 +1530,7 @@ module.exports = {
   getRedisReadClient,
   writeTick,
   writeTicks,
+  writeMarketSettings,
   writeScore,
   getScore,
   writeEvents,

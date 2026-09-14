@@ -14,6 +14,7 @@ const frontendSocket = require("./services/frontendSocketService");
 const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const { closeBallByBallLog } = require("./utils/ballByBallFileLogger");
+const { closeMarketLimitsLog } = require("./utils/marketLimitsFileLogger");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
 const providerMetrics = require("./services/providerMetrics");
@@ -103,6 +104,7 @@ async function startServer() {
       await closeSourceDb();
       await closeProviderLog();
       await closeBallByBallLog();
+      await closeMarketLimitsLog();
       await logger.close();
     })();
     return shutdownPromise;
@@ -120,6 +122,7 @@ if (require.main === module) {
       closeSourceDb(),
       closeProviderLog(),
       closeBallByBallLog(),
+      closeMarketLimitsLog(),
       logger.close(),
     ]);
     process.exitCode = 1;

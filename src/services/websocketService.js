@@ -3,6 +3,7 @@ const crypto = require("node:crypto");
 const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
+const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
 const { integer } = require("../config/env");
 const { setBounded } = require("../utils/boundedMap");
 
@@ -10,6 +11,7 @@ let socket;
 const eventWriteChains = new Map();
 const queuedEventWrites = new Map();
 const pendingEventTicks = new Map();
+const marketSettingsWrites = new Set();
 // Coalesce each event within a short fixed window. Result ticks bypass the delay.
 const TICK_COALESCE_MS = integer("PROVIDER_TICK_COALESCE_MS", 100, { min: 0, max: 250 });
 let tickPublisher = () => {};
@@ -420,19 +422,7 @@ function connectSocket() {
       "x-api-key": process.env.PROVIDER_TOKEN || process.env.PROVIDER_X_API_KEY || "dummy_key",
     },
   });
-  // Log each incoming shape once so provider channels can be identified without
-  // logging the full odds stream. Reset this bounded diagnostic on reconnect.
-  const observedSocketShapes = new Set();
-  socket.onAny((eventName, data) => {
-    const sample = Array.isArray(data) ? data[0] : data;
-    const shape = messageShape(sample);
-    const signature = JSON.stringify([eventName, shape]);
-    if (observedSocketShapes.has(signature) || observedSocketShapes.size >= 20) return;
-    observedSocketShapes.add(signature);
-    logger.info("[ProviderWS] incoming event", { eventName, ...shape });
-  });
   socket.on("connect", () => {
-    observedSocketShapes.clear();
     state.connected = true;
     state.socketId = socket.id;
     state.lastConnectedAt = new Date().toISOString();
@@ -488,7 +478,16 @@ function connectSocket() {
     }
   });
   socket.on("market", (data) => {
-    logger.info("[ProviderWS] market", { payload: data });
+    for (const item of Array.isArray(data) ? data : [data]) {
+      writeMarketLimitsLog(item);
+      const write = redisStore.writeMarketSettings(item)
+        .then((update) => {
+          if (update) tickPublisher(update.eventId, update.payload);
+        })
+        .catch((error) => logger.error("[ProviderWS] market settings write failed", { error: error.message }));
+      marketSettingsWrites.add(write);
+      void write.finally(() => marketSettingsWrites.delete(write));
+    }
   });
   socket.on("disconnect", (reason) => {
     state.connected = false;
@@ -562,6 +561,7 @@ async function stopSocket() {
   await Promise.allSettled([...pendingEventTicks.keys()].map(flushPendingEvent));
   // Completing an active write may promote its single queued replacement.
   while (eventWriteChains.size) await Promise.allSettled([...eventWriteChains.values()]);
+  await Promise.allSettled([...marketSettingsWrites]);
 }
 
 function getSocketStatus() {
