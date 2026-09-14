@@ -476,9 +476,7 @@ function connectSocket() {
     }
   });
   socket.on("market", (data) => {
-    logRawSocketPayload(data);
-    logShape("market", data);
-    writeProviderLog("provider.socket.market", { payload: data });
+    logger.info("[ProviderWS] market", { payload: data });
   });
   socket.on("disconnect", (reason) => {
     state.connected = false;
