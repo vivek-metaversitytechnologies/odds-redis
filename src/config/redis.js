@@ -1208,10 +1208,15 @@ function preserveLineLiquidity(entries, previousEntries) {
       const previous = previousRunners.get(String(runner.selectionId));
       if (!previous) continue;
       for (const side of ["availableToBack", "availableToLay"]) {
-        const previousByPrice = new Map((previous.ex?.[side] || []).map((price) => [Number(price.price), price]));
-        for (const price of runner.ex?.[side] || []) {
+        const previousPrices = previous.ex?.[side] || [];
+        const previousByPrice = new Map(previousPrices.map((price) => [Number(price.price), price]));
+        for (const [index, price] of (runner.ex?.[side] || []).entries()) {
           const prior = previousByPrice.get(Number(price.price));
-          if (Number(price.size) <= 0 && Number(prior?.size) > 0) price.size = prior.size;
+          const levelPrior = previousPrices[index];
+          if (Number(price.size) <= 0) {
+            if (Number(prior?.size) > 0) price.size = prior.size;
+            else if (Number(levelPrior?.size) > 0) price.size = levelPrior.size;
+          }
         }
       }
     }

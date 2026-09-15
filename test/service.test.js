@@ -2001,7 +2001,7 @@ test("line market ticks preserve runner names", () => {
 
 test("line market heartbeats preserve non-zero liquidity", () => {
   const entries = [{ runners: [{ selectionId: 11, ex: {
-    availableToBack: [{ price: 50, size: 0 }], availableToLay: [{ price: 49, size: 0 }],
+    availableToBack: [{ price: 51, size: 0 }], availableToLay: [{ price: 48, size: 0 }],
   } }] }];
   const previous = [{ runners: [{ selectionId: 11, ex: {
     availableToBack: [{ price: 50, size: 1234 }], availableToLay: [{ price: 49, size: 5678 }],
