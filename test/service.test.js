@@ -110,6 +110,7 @@ const {
   fancyResultValue,
   isEventTerminalMarketName,
   interleaveResultCandidates,
+  prioritizeResultCandidates,
   settleWithConcurrency: settleResultsWithConcurrency,
   advanceCandidateCursors,
   __testing__: resultTesting,
@@ -663,14 +664,21 @@ test("future subscription horizon does not restrict cricket markets", () => {
   );
 });
 
-test("all open fancies without results are eligible for vendor result polling", () => {
+test("open fancies remain eligible and recently inactive rows receive priority", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   assert.match(source, /WHERE UPPER\(f\.status\)=\?/);
-  assert.doesNotMatch(source, /WHERE f\.isactive=\?/);
-  assert.doesNotMatch(source, /f\.updatedon >= DATE_SUB/);
+  assert.match(source, /f\.isactive=\?[\s\S]*?f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 24 HOUR\)/);
   assert.match(
     source,
     /\["OPEN", \.\.\.sportIds, candidateCursors\.fancy, candidateCursors\.fancy, limit\]/,
+  );
+  assert.deepEqual(
+    prioritizeResultCandidates(
+      [{ marketid: "recent" }],
+      [{ marketid: "old" }, { marketid: "recent" }, { marketid: "later" }],
+      2,
+    ).map((market) => market.marketid),
+    ["recent", "old"],
   );
 });
 

@@ -101,6 +101,16 @@ function interleaveResultCandidates(markets = [], fancies = []) {
   return combined;
 }
 
+function prioritizeResultCandidates(priority = [], candidates = [], limit = Infinity) {
+  const seen = new Set();
+  return [...priority, ...candidates].filter((market) => {
+    const id = String(market.marketid);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  }).slice(0, limit);
+}
+
 async function settleWithConcurrency(items, mapper, concurrency) {
   const results = new Array(items.length);
   let cursor = 0;
@@ -160,7 +170,22 @@ async function loadCandidates() {
      LIMIT ?`,
     [true, ...sportIds, candidateCursors.market, candidateCursors.market, limit],
   );
-  const [fancies] = await getSourcePool().query(
+  // Results commonly appear a few minutes after a fancy is made inactive. Those
+  // rows must not wait for the large keyset cursor to wrap back around.
+  const [priorityFancies] = await getSourcePool().query(
+    `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
+            f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
+            COALESCE(f.sportid,e.sportid) AS sportid
+     FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
+     WHERE UPPER(f.status)=? AND f.isactive=?
+       AND f.updatedon >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
+       AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
+       AND ${eventWindowSql("e", "active")}
+       AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
+     ORDER BY f.updatedon DESC, f.id DESC LIMIT 500`,
+    ["OPEN", false, ...sportIds],
+  );
+  const [fancyCandidates] = await getSourcePool().query(
     `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
             COALESCE(f.sportid,e.sportid) AS sportid
@@ -173,6 +198,7 @@ async function loadCandidates() {
      LIMIT ?`,
     ["OPEN", ...sportIds, candidateCursors.fancy, candidateCursors.fancy, limit],
   );
+  const fancies = prioritizeResultCandidates(priorityFancies, fancyCandidates, limit);
   return { markets, fancies, cursorsUsed: { ...candidateCursors } };
 }
 
@@ -823,6 +849,7 @@ module.exports = {
   rejectedResultReason,
   rejectedResultDetail,
   interleaveResultCandidates,
+  prioritizeResultCandidates,
   settleWithConcurrency,
   advanceCandidateCursors,
   isEventTerminalMarketName,
