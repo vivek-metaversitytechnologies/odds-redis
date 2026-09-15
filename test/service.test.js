@@ -1901,6 +1901,16 @@ test("standard odds ticks match the frontend Redis contract", () => {
   assert.deepEqual(output.runners[0].ex.availableToLay, [{ price: 1.82, size: 300 }]);
 });
 
+test("line markets refresh prices from the runner endpoint", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  assert.match(source, /SEEDABLE_MARKET_TYPES = new Set\(\["match-odd", "bookmaker", "toss", "line-market"\]\)/);
+  assert.match(source, /LINE_MARKET_PRICE_REFRESH_MS", 2000/);
+  assert.match(source, /const prices = await seedInitialMarketPrices\(active\)/);
+  for (const field of ["b2", "b3", "l2", "l3", "bs2", "bs3", "ls2", "ls3"]) {
+    assert.match(source, new RegExp(`${field}: runner\\.`));
+  }
+});
+
 test("top-level socket suspension overrides open line-market and runner statuses", () => {
   const output = oddsPayload(
     {

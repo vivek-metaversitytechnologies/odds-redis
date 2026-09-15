@@ -773,21 +773,27 @@ async function regularMarketsWithRunners(markets) {
 // guessing) — a name-based check also swept in season-long outright markets like
 // "Winner"/"Winner Bookmaker.", which stay isActive for a whole tournament and
 // then never stop showing once seeded with real prices.
-const SEEDABLE_MARKET_TYPES = new Set(["match-odd", "bookmaker", "toss"]);
+const SEEDABLE_MARKET_TYPES = new Set(["match-odd", "bookmaker", "toss", "line-market"]);
 
 function isSeedableRegularMarket(market) {
   return SEEDABLE_MARKET_TYPES.has(String(market.marketType || "").toLowerCase());
 }
 
 async function seedInitialMarketPrices(markets) {
+  const now = Date.now();
+  const lineRefreshMs = integer("LINE_MARKET_PRICE_REFRESH_MS", 2000, { min: 500, max: 60000 });
   const seedableMarkets = (markets || []).filter(
-    (market) =>
-      market.isActive &&
+    (market) => {
+      const marketId = String(market.marketId);
+      const lineMarket = String(market.marketType || "").toLowerCase() === "line-market";
+      const seededAt = Number(initialPriceSeeded.get(marketId)) || 0;
+      return market.isActive &&
       !market.gameOver &&
-      !initialPriceSeeded.has(String(market.marketId)) &&
+      (!initialPriceSeeded.has(marketId) || (lineMarket && now - seededAt >= lineRefreshMs)) &&
       // Already receiving live ticks (or a prior seed already landed) — no vendor call needed.
-      !redisStore.getTickActivity(String(market.marketId)) &&
-      isSeedableRegularMarket(market),
+      (lineMarket || !redisStore.getTickActivity(marketId)) &&
+      isSeedableRegularMarket(market);
+    },
   );
   const results = await Promise.allSettled(
     seedableMarkets.map(async (market) => {
@@ -805,13 +811,21 @@ async function seedInitialMarketPrices(markets) {
           back: runner.back,
           lay: runner.lay,
           b1: runner.b1,
+          b2: runner.b2,
+          b3: runner.b3,
           l1: runner.l1,
+          l2: runner.l2,
+          l3: runner.l3,
           bs1: runner.br1,
+          bs2: runner.br2,
+          bs3: runner.br3,
           ls1: runner.lr1,
+          ls2: runner.lr2,
+          ls3: runner.lr3,
           sb: runner.sb,
         })),
       });
-      if (written) setBounded(initialPriceSeeded, String(market.marketId), true, DISCOVERY_CACHE_LIMIT);
+      if (written) setBounded(initialPriceSeeded, String(market.marketId), Date.now(), DISCOVERY_CACHE_LIMIT);
       return written;
     }),
   );
@@ -1597,6 +1611,7 @@ async function syncActiveLineMarketDiscovery() {
         redisStore.invalidateMarkets(persisted.fancyIds);
         const active = markets.filter((market) => market.isActive && !market.gameOver);
         await fetchAndStoreRunners(active.map((market) => market.marketId));
+        const prices = await seedInitialMarketPrices(active);
         const definitions = await redisStore.reconcileRegularDefinitions(
           await regularMarketsWithRunners(markets),
         );
@@ -1629,6 +1644,7 @@ async function syncActiveLineMarketDiscovery() {
         }
         result.markets += markets.length;
         result.changed += changed.length;
+        result.priceSnapshots = (result.priceSnapshots || 0) + prices.seeded;
       } catch (error) {
         result.failedRequests += 1;
         logger.error("[LineMarketDiscovery] event batch sync failed", { eventIds, error: error.message });
