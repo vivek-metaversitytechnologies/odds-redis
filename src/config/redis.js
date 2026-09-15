@@ -1132,11 +1132,25 @@ async function loadRunnerNames(marketId) {
   const normalized = String(marketId);
   if (runnerNameCache.has(normalized)) return runnerNameCache.get(normalized);
   if (runnerNameLoads.has(normalized)) return runnerNameLoads.get(normalized);
-  const loading = provider
-    .runners(normalized)
-    .then((response) => {
+  const loading = getSourcePool()
+    .query(
+      `SELECT selectionid,runner_name FROM t_selectionid
+        WHERE marketid = ? AND runner_name IS NOT NULL AND runner_name <> '' ORDER BY id ASC`,
+      [normalized],
+    )
+    .then(([rows]) => new Map(
+      rows.map((runner) => [String(runner.selectionid), runner.runner_name]),
+    ))
+    .catch((error) => {
+      logger.warn("[Redis] stored runner metadata lookup failed", {
+        marketId: normalized,
+        error: error.message,
+      });
+      return new Map();
+    })
+    .then((storedNames) => storedNames.size ? storedNames : provider.runners(normalized).then((response) => {
       const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
-      const names = new Map(
+      return new Map(
         rows
           .map((runner) => [
             String(runner?.runnerId ?? runner?.selectionId ?? runner?.id),
@@ -1144,7 +1158,11 @@ async function loadRunnerNames(marketId) {
           ])
           .filter(([selectionId, name]) => selectionId && name),
       );
-      setBounded(runnerNameCache, normalized, names, CACHE_LIMIT);
+    }))
+    .then((names) => {
+      // Do not cache an empty response: the provider may expose prices before its
+      // runner metadata endpoint is ready. A later tick must be allowed to retry.
+      if (names.size) setBounded(runnerNameCache, normalized, names, CACHE_LIMIT);
       return names;
     })
     .catch((error) => {
@@ -1584,6 +1602,8 @@ module.exports = {
       client = undefined;
       readClient = undefined;
       marketCache.clear();
+      runnerNameCache.clear();
+      runnerNameLoads.clear();
       eventPayloadCache.clear();
       eventLocks.clear();
     },
