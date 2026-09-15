@@ -111,6 +111,7 @@ const {
   isEventTerminalMarketName,
   interleaveResultCandidates,
   prioritizeResultCandidates,
+  allocateResultCandidates,
   settleWithConcurrency: settleResultsWithConcurrency,
   advanceCandidateCursors,
   __testing__: resultTesting,
@@ -693,11 +694,21 @@ test("bounded result polling cannot starve fancy candidates", () => {
   );
 });
 
+test("result allocation favors fancy backlog and spills unused capacity", () => {
+  const regular = Array.from({ length: 500 }, (_, i) => ({ marketid: `r${i}` }));
+  const fancies = Array.from({ length: 700 }, (_, i) => ({ marketid: `f${i}` }));
+  const selected = allocateResultCandidates(regular, fancies, 800, 200);
+  assert.equal(selected.length, 800);
+  assert.equal(selected.filter((row) => row.marketid.startsWith("r")).length, 200);
+  assert.equal(selected.filter((row) => row.marketid.startsWith("f")).length, 600);
+  assert.equal(allocateResultCandidates(regular.slice(0, 20), fancies, 800, 200).length, 720);
+});
+
 test("result polling has a hard 800-market ceiling", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   assert.match(source, /RESULT_MAX_MARKETS_PER_RUN \|\| 800/);
   assert.match(source, /Math\.min\(800,/);
-  assert.match(source, /const eligible = all\.slice\(0, maxMarketsPerRun\)/);
+  assert.match(source, /const eligible = allocateResultCandidates\(/);
 });
 
 test("result requests use bounded concurrency", async () => {

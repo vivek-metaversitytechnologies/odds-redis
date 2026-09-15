@@ -111,6 +111,21 @@ function prioritizeResultCandidates(priority = [], candidates = [], limit = Infi
   }).slice(0, limit);
 }
 
+function allocateResultCandidates(markets = [], fancies = [], totalLimit = 800, regularReserve = 200) {
+  const total = Math.max(1, Math.floor(totalLimit));
+  const regularTarget = Math.min(markets.length, Math.max(0, Math.min(total, Math.floor(regularReserve))));
+  const fancyTarget = Math.min(fancies.length, total - regularTarget);
+  const selectedMarkets = markets.slice(0, regularTarget);
+  const selectedFancies = fancies.slice(0, fancyTarget);
+  let remaining = total - selectedMarkets.length - selectedFancies.length;
+  if (remaining > 0) {
+    selectedMarkets.push(...markets.slice(selectedMarkets.length, selectedMarkets.length + remaining));
+    remaining = total - selectedMarkets.length - selectedFancies.length;
+  }
+  if (remaining > 0) selectedFancies.push(...fancies.slice(selectedFancies.length, selectedFancies.length + remaining));
+  return interleaveResultCandidates(selectedMarkets, selectedFancies);
+}
+
 async function settleWithConcurrency(items, mapper, concurrency) {
   const results = new Array(items.length);
   let cursor = 0;
@@ -672,7 +687,15 @@ async function syncResults() {
     const configuredMarketCap = Number(process.env.RESULT_MAX_MARKETS_PER_RUN || 800);
     const maxMarketsPerRun = Number.isFinite(configuredMarketCap)
       ? Math.min(800, Math.max(1, Math.floor(configuredMarketCap))) : 800;
-    const eligible = all.slice(0, maxMarketsPerRun);
+    const configuredRegularReserve = Number(process.env.RESULT_REGULAR_RESERVE || 200);
+    const regularReserve = Number.isFinite(configuredRegularReserve)
+      ? Math.min(maxMarketsPerRun, Math.max(0, Math.floor(configuredRegularReserve))) : 200;
+    const eligible = allocateResultCandidates(
+      candidates.markets,
+      candidates.fancies,
+      maxMarketsPerRun,
+      regularReserve,
+    );
     const batches = [];
     for (let index = 0; index < eligible.length && batches.length < maxCalls; index += batchSize) {
       batches.push(eligible.slice(index, index + batchSize).map((market) => market.marketid));
@@ -715,6 +738,7 @@ async function syncResults() {
       fancies: candidates.fancies.length,
       calls: batches.length,
       maxMarketsPerRun,
+      regularReserve,
       requestConcurrency,
       requestedRegular: requested.filter((market) => !fancyObjects.has(market)).length,
       requestedFancies: requested.filter((market) => fancyObjects.has(market)).length,
@@ -862,6 +886,7 @@ module.exports = {
   rejectedResultDetail,
   interleaveResultCandidates,
   prioritizeResultCandidates,
+  allocateResultCandidates,
   settleWithConcurrency,
   advanceCandidateCursors,
   isEventTerminalMarketName,
