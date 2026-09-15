@@ -1199,6 +1199,25 @@ function preserveRunnerNames(entries, previousEntries) {
   }
 }
 
+function preserveLineLiquidity(entries, previousEntries) {
+  const previousRunners = new Map((previousEntries || []).flatMap((entry) =>
+    (entry.runners || []).map((runner) => [String(runner.selectionId), runner])
+  ));
+  for (const entry of entries) {
+    for (const runner of entry.runners || []) {
+      const previous = previousRunners.get(String(runner.selectionId));
+      if (!previous) continue;
+      for (const side of ["availableToBack", "availableToLay"]) {
+        const previousByPrice = new Map((previous.ex?.[side] || []).map((price) => [Number(price.price), price]));
+        for (const price of runner.ex?.[side] || []) {
+          const prior = previousByPrice.get(Number(price.price));
+          if (Number(price.size) <= 0 && Number(prior?.size) > 0) price.size = prior.size;
+        }
+      }
+    }
+  }
+}
+
 async function writeMarketSettings(item) {
   const marketId = String(item?.mid ?? "");
   const eventId = String(item?.eid ?? "");
@@ -1304,6 +1323,7 @@ async function writeEventTicks(items) {
           payload[payloadGroupName].some((entry) => entryMarketId(entry) === marketId),
       );
       if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
+      if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
       const newEntries = shouldRemoveFromPayload(group, item, market) ? [] : entries;
       const marketChanged =
         movedFromOtherGroup ||
@@ -1594,6 +1614,7 @@ module.exports = {
   loadRunnerNames,
   primeRunnerNames,
   preserveRunnerNames,
+  preserveLineLiquidity,
   shouldRemoveFromPayload,
   isFullySuspendedToss,
   moveTiedMatchLast,

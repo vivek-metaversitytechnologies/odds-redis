@@ -13,6 +13,7 @@ const {
   emptyEventPayload,
   runnerPrices,
   preserveRunnerNames,
+  preserveLineLiquidity,
   shouldRemoveFromPayload,
   isFullySuspendedToss,
   moveTiedMatchLast,
@@ -1996,6 +1997,18 @@ test("existing runner names survive unnamed socket updates", () => {
 test("line market ticks preserve runner names", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/config/redis.js"), "utf8");
   assert.match(source, /\["Odds", "LineMarket"\]\.includes\(group\)\) preserveRunnerNames/);
+});
+
+test("line market heartbeats preserve non-zero liquidity", () => {
+  const entries = [{ runners: [{ selectionId: 11, ex: {
+    availableToBack: [{ price: 50, size: 0 }], availableToLay: [{ price: 49, size: 0 }],
+  } }] }];
+  const previous = [{ runners: [{ selectionId: 11, ex: {
+    availableToBack: [{ price: 50, size: 1234 }], availableToLay: [{ price: 49, size: 5678 }],
+  } }] }];
+  preserveLineLiquidity(entries, previous);
+  assert.equal(entries[0].runners[0].ex.availableToBack[0].size, 1234);
+  assert.equal(entries[0].runners[0].ex.availableToLay[0].size, 5678);
 });
 
 test("compact socket odds fields become three-level price ladders", () => {
