@@ -685,6 +685,14 @@ test("open fancies remain eligible and recently inactive rows receive priority",
   );
 });
 
+test("inactive regular markets remain eligible for results", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
+  assert.match(source, /RESULT_RECENT_REGULAR_LIMIT \|\| 100/);
+  assert.match(source, /WHERE m\.isactive=\?[\s\S]*?m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 24 HOUR\)/);
+  assert.match(source, /const markets = prioritizeResultCandidates\(priorityMarkets, marketCandidates, limit\)/);
+  assert.doesNotMatch(source, /const \[marketCandidates\][\s\S]*?WHERE m\.isactive=\?/);
+});
+
 test("bounded result polling cannot starve fancy candidates", () => {
   const regular = [{ marketid: "r1" }, { marketid: "r2" }, { marketid: "r3" }];
   const fancies = [{ marketid: "f1" }, { marketid: "f2" }, { marketid: "f3" }];

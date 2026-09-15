@@ -181,17 +181,32 @@ async function loadCandidates() {
     1,
     Math.min(limit, Number(process.env.RESULT_RECENT_FANCY_LIMIT || 200)),
   );
-  const [markets] = await getSourcePool().query(
+  const recentRegularLimit = Math.max(
+    1,
+    Math.min(limit, Number(process.env.RESULT_RECENT_REGULAR_LIMIT || 100)),
+  );
+  const [priorityMarkets] = await getSourcePool().query(
     `SELECT m.id AS candidateid, m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive=?
+       AND m.updatedon >= DATE_SUB(NOW(), INTERVAL 24 HOUR)
        AND m.sportid IN (${placeholders})
+       AND ${eventWindowSql("e", "active")}
+       AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+     ORDER BY m.updatedon DESC, m.id DESC LIMIT ?`,
+    [false, ...sportIds, recentRegularLimit],
+  );
+  const [marketCandidates] = await getSourcePool().query(
+    `SELECT m.id AS candidateid, m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
+     FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
+     WHERE m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ORDER BY CASE WHEN ? IS NULL OR m.id < ? THEN 0 ELSE 1 END, m.id DESC
      LIMIT ?`,
-    [true, ...sportIds, candidateCursors.market, candidateCursors.market, limit],
+    [...sportIds, candidateCursors.market, candidateCursors.market, limit],
   );
+  const markets = prioritizeResultCandidates(priorityMarkets, marketCandidates, limit);
   // Results commonly appear a few minutes after a fancy is made inactive. Those
   // rows must not wait for the large keyset cursor to wrap back around.
   const [priorityFancies] = await getSourcePool().query(
