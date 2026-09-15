@@ -2092,7 +2092,7 @@ test("invalid sentinel market IDs are rejected and removed from snapshots", () =
   assert.equal(payload.Odds.length, 0);
 });
 
-test("frontend snapshots hide waiting markets but retain live and suspended markets", () => {
+test("frontend snapshots hide waiting markets but retain waiting line placeholders", () => {
   const payload = frontendEventPayload({
     Odds: [
       { marketId: "1.waiting", Name: "Match Odds", status: "WAITING" },
@@ -2102,6 +2102,9 @@ test("frontend snapshots hide waiting markets but retain live and suspended mark
     Fancy2: [
       { mid: "4.waiting-F2", gstatus: "waiting" },
       { mid: "4.open-F2", gstatus: "ACTIVE" },
+    ],
+    LineMarket: [
+      { marketId: "1.line", Name: "10 Overs Line", status: "WAITING", runners: [] },
     ],
   });
 
@@ -2113,6 +2116,7 @@ test("frontend snapshots hide waiting markets but retain live and suspended mark
     payload.Fancy2.map((market) => market.mid),
     ["4.open-F2"],
   );
+  assert.deepEqual(payload.LineMarket.map((market) => market.marketId), ["1.line"]);
 });
 
 test("frontend snapshots hide unidentified standard odds without discarding stored ticks", () => {

@@ -425,7 +425,10 @@ function frontendEventPayload(payload) {
         const state = String(entry?.status ?? entry?.gstatus ?? entry?.s ?? "")
           .trim()
           .toUpperCase();
-        if (state === "WAITING") return false;
+        // Line markets are discovered authoritatively over HTTP, but their price
+        // stream can pause or resume late. Keep their suspended placeholder
+        // visible while subscription recovery waits for the next socket tick.
+        if (state === "WAITING" && group !== "LineMarket") return false;
         // Socket odds can arrive before the vendor exposes market/runner metadata.
         // Keep those ticks in Redis, but do not present a generic "Market <id>"
         // as a bettable market until discovery supplies its authoritative name.
