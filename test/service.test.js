@@ -1911,6 +1911,13 @@ test("line markets refresh prices from the runner endpoint", () => {
   }
 });
 
+test("line-market lookup checks fancy metadata even when a regular placeholder exists", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/config/redis.js"), "utf8");
+  assert.match(source, /const fancyLookupIds = missing/);
+  assert.match(source, /String\(row\.mtype \|\| row\.markettype \|\| ""\).*=== "line-market"/);
+  assert.doesNotMatch(source, /const unresolved = missing\.filter/);
+});
+
 test("top-level socket suspension overrides open line-market and runner statuses", () => {
   const output = oddsPayload(
     {

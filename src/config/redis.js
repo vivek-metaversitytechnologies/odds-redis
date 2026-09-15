@@ -524,26 +524,31 @@ async function findMarkets(marketIds) {
     found.set(id, market);
     setBounded(marketCache, id, market, CACHE_LIMIT);
   }
-  const unresolved = missing.filter((id) => !found.has(id));
-  if (!unresolved.length) return found;
-  const fancyPlaceholders = unresolved.map(() => "?").join(",");
+  // Line markets can exist in both tables: t_market may contain a stale
+  // inactive placeholder while t_matchfancy contains the authoritative active
+  // line definition. Always inspect the fancy row before caching the choice.
+  const fancyLookupIds = missing;
+  const fancyPlaceholders = fancyLookupIds.map(() => "?").join(",");
   const [fancies] = await getSourcePool().query(
     `SELECT f.*, f.fancyid AS marketid, f.name AS marketname,
        COALESCE(f.sportid,e.sportid) AS sportid, e.eventname AS matchname,
        e.open_date AS opendate, e.in_play AS inplay
      FROM t_matchfancy f LEFT JOIN t_event e ON e.eventid=f.eventid
      WHERE f.fancyid IN (${fancyPlaceholders})`,
-    unresolved,
+    fancyLookupIds,
   );
   for (const row of fancies) {
     const id = String(row.marketid);
     const market = Market.fromRow(row);
+    const existing = found.get(id);
+    const lineMarket = String(row.mtype || row.markettype || "").toLowerCase() === "line-market";
+    if (existing && !lineMarket && !(booleanOr(row.isactive, false) && !booleanOr(existing.isactive, false))) continue;
     found.set(id, market);
     setBounded(marketCache, id, market, CACHE_LIMIT);
   }
   // Discovery invalidates every inserted or changed ID, so caching a miss avoids
   // repeated database reads for unsupported provider ticks without hiding new markets.
-  for (const id of unresolved) {
+  for (const id of fancyLookupIds) {
     if (!found.has(id)) setBounded(marketCache, id, null, CACHE_LIMIT);
   }
   return found;
