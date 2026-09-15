@@ -704,11 +704,11 @@ test("result allocation favors fancy backlog and spills unused capacity", () => 
   assert.equal(allocateResultCandidates(regular.slice(0, 20), fancies, 800, 200).length, 720);
 });
 
-test("result polling has a hard 800-market ceiling", () => {
+test("result polling bounds API calls rather than market IDs", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
-  assert.match(source, /RESULT_MAX_MARKETS_PER_RUN \|\| 800/);
-  assert.match(source, /Math\.min\(800,/);
+  assert.match(source, /const candidateCapacity = batchSize \* maxCalls/);
   assert.match(source, /const eligible = allocateResultCandidates\(/);
+  assert.doesNotMatch(source, /RESULT_MAX_MARKETS_PER_RUN/);
 });
 
 test("result requests use bounded concurrency", async () => {

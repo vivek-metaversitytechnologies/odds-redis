@@ -684,16 +684,17 @@ async function syncResults() {
     const batchSize = Number.isFinite(configuredBatchSize)
       ? Math.min(100, Math.max(1, Math.floor(configuredBatchSize))) : 100;
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
-    const configuredMarketCap = Number(process.env.RESULT_MAX_MARKETS_PER_RUN || 800);
-    const maxMarketsPerRun = Number.isFinite(configuredMarketCap)
-      ? Math.min(800, Math.max(1, Math.floor(configuredMarketCap))) : 800;
+    // Vendor quota counts HTTP requests, not market IDs. Each request carries
+    // up to batchSize IDs; the shared provider limiter enforces the global
+    // 800-request rolling-minute budget across every endpoint.
+    const candidateCapacity = batchSize * maxCalls;
     const configuredRegularReserve = Number(process.env.RESULT_REGULAR_RESERVE || 200);
     const regularReserve = Number.isFinite(configuredRegularReserve)
-      ? Math.min(maxMarketsPerRun, Math.max(0, Math.floor(configuredRegularReserve))) : 200;
+      ? Math.min(candidateCapacity, Math.max(0, Math.floor(configuredRegularReserve))) : 200;
     const eligible = allocateResultCandidates(
       candidates.markets,
       candidates.fancies,
-      maxMarketsPerRun,
+      candidateCapacity,
       regularReserve,
     );
     const batches = [];
@@ -737,7 +738,7 @@ async function syncResults() {
       regular: candidates.markets.length,
       fancies: candidates.fancies.length,
       calls: batches.length,
-      maxMarketsPerRun,
+      candidateCapacity,
       regularReserve,
       requestConcurrency,
       requestedRegular: requested.filter((market) => !fancyObjects.has(market)).length,
