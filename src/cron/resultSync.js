@@ -159,6 +159,13 @@ async function loadCandidates() {
     .filter(Number.isFinite);
   const placeholders = sportIds.map(() => "?").join(",");
   const limit = Math.max(1, Number(process.env.RESULT_MARKET_LIMIT || 2000));
+  // Keep only part of the fancy polling lane reserved for recently retired
+  // markets. The remainder must come from the rotating cursor, otherwise a
+  // busy feed can permanently starve anything below the newest rows.
+  const recentFancyLimit = Math.max(
+    1,
+    Math.min(limit, Number(process.env.RESULT_RECENT_FANCY_LIMIT || 200)),
+  );
   const [markets] = await getSourcePool().query(
     `SELECT m.id AS candidateid, m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
@@ -182,8 +189,8 @@ async function loadCandidates() {
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
-     ORDER BY f.updatedon DESC, f.id DESC LIMIT 500`,
-    ["OPEN", false, ...sportIds],
+     ORDER BY f.updatedon DESC, f.id DESC LIMIT ?`,
+    ["OPEN", false, ...sportIds, recentFancyLimit],
   );
   const [fancyCandidates] = await getSourcePool().query(
     `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
