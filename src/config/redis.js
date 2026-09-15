@@ -1303,7 +1303,7 @@ async function writeEventTicks(items) {
           payloadGroupName !== group &&
           payload[payloadGroupName].some((entry) => entryMarketId(entry) === marketId),
       );
-      if (group === "Odds") preserveRunnerNames(entries, previousEntries);
+      if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
       const newEntries = shouldRemoveFromPayload(group, item, market) ? [] : entries;
       const marketChanged =
         movedFromOtherGroup ||

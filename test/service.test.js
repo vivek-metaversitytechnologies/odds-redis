@@ -1991,6 +1991,11 @@ test("existing runner names survive unnamed socket updates", () => {
   assert.equal(entries[0].runners[0].name, "India");
 });
 
+test("line market ticks preserve runner names", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/config/redis.js"), "utf8");
+  assert.match(source, /\["Odds", "LineMarket"\]\.includes\(group\)\) preserveRunnerNames/);
+});
+
 test("compact socket odds fields become three-level price ladders", () => {
   const runner = {
     b1: "10.00",
