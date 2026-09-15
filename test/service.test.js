@@ -1906,6 +1906,8 @@ test("line markets refresh prices from the runner endpoint", () => {
   assert.match(source, /SEEDABLE_MARKET_TYPES = new Set\(\["match-odd", "bookmaker", "toss", "line-market"\]\)/);
   assert.match(source, /LINE_MARKET_PRICE_REFRESH_MS", 2000/);
   assert.match(source, /const prices = await seedInitialMarketPrices\(active\)/);
+  assert.match(source, /\.\.\.\(prices\.eventIds \|\| \[\]\)\.map\(String\)/);
+  assert.match(source, /publishEventSnapshot\(eventId\)/);
   for (const field of ["b2", "b3", "l2", "l3", "bs2", "bs3", "ls2", "ls3"]) {
     assert.match(source, new RegExp(`${field}: runner\\.`));
   }

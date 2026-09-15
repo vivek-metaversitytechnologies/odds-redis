@@ -829,10 +829,14 @@ async function seedInitialMarketPrices(markets) {
       return written;
     }),
   );
+  const seededEventIds = [...new Set(results.flatMap((result, index) =>
+    result.status === "fulfilled" && result.value ? [String(seedableMarkets[index].eventId)] : []
+  ))];
   return {
     requested: seedableMarkets.length,
     seeded: results.filter((result) => result.status === "fulfilled" && result.value).length,
     failed: results.filter((result) => result.status === "rejected").length,
+    eventIds: seededEventIds,
   };
 }
 
@@ -1622,9 +1626,11 @@ async function syncActiveLineMarketDiscovery() {
             source: "line-market-discovery",
           });
         }
-        await Promise.all(
-          (definitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
-        );
+        const changedEventIds = [...new Set([
+          ...(definitions.changedEventIds || []).map(String),
+          ...(prices.eventIds || []).map(String),
+        ])];
+        await Promise.all(changedEventIds.map((eventId) => publishEventSnapshot(eventId)));
         const subscribed = new Set(websocket.getSubscribedMarketIds().map(String));
         const pending = active.map((market) => String(market.marketId)).filter(
           (id) => !subscribed.has(id) && !isMarketSuppressed(id),
