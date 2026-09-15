@@ -67,13 +67,17 @@ function admissionBatches(pending, isLive, batchSize, isHealthy) {
 function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
   const subscribed = new Set((subscribedIds || []).map(String));
   const graceMs = integer("MARKET_FIRST_TICK_GRACE_MS", 60000, { min: 10000 });
+  const staleMs = integer("MARKET_STALE_TICK_MS", 60000, { min: 10000 });
   const cooldownMs = integer("MARKET_RECOVERY_COOLDOWN_MS", 300000, { min: 60000 });
   const maxAttempts = integer("MARKET_RECOVERY_MAX_ATTEMPTS", 3, { min: 1, max: 10 });
   return (markets || []).filter((market) => {
     const id = String(market.marketid || "");
-    if (!subscribed.has(id) || redisStore.getTickActivity(id)) return false;
+    if (!subscribed.has(id)) return false;
     const subscribedAt = websocket.getMarketSubscribedAt(id);
     if (!subscribedAt || now - subscribedAt < graceMs) return false;
+    const activity = redisStore.getTickActivity(id);
+    const lastTickAt = Date.parse(activity?.lastUpdatedAt || "");
+    if (Number.isFinite(lastTickAt) && now - lastTickAt < staleMs) return false;
     const startsAt = new Date(market.opendate).getTime();
     if (Number(market.inplay) !== 1 && Number.isFinite(startsAt) && startsAt > now) return false;
     const recovery = noTickRecovery.get(id);
@@ -248,8 +252,12 @@ async function syncMarketSubscriptions(lane = "active") {
         });
       }
     }
-    for (const id of [...noTickRecovery.keys()]) {
-      if (redisStore.getTickActivity(id) || !discovered.includes(id)) noTickRecovery.delete(id);
+    for (const [id, recovery] of noTickRecovery) {
+      const lastTickAt = Date.parse(redisStore.getTickActivity(id)?.lastUpdatedAt || "");
+      if (
+        !discovered.includes(id) ||
+        (Number.isFinite(lastTickAt) && lastTickAt >= recovery.lastAttemptAt)
+      ) noTickRecovery.delete(id);
     }
     const currentActiveMarketIds = websocket.getSubscribedMarketIds();
     const result = {

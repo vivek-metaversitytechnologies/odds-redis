@@ -232,10 +232,10 @@ async function refreshMarkets(ids) {
   websocket.unsubscribeMarkets(marketIds);
   const response = await provider.subscribe(marketIds, { source: "market-refresh" });
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
-  websocket.subscribeMarkets(acknowledgement.subscribed);
-  acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
-  acknowledgement.skipped.forEach((id) => skippedMarketIds.add(id));
-  scheduleSkippedRetry();
+  // `skipped` means already registered at the provider. It still has to be
+  // attached to this socket, exactly as in the normal subscription path.
+  websocket.subscribeMarkets(acknowledgement.attached);
+  acknowledgement.attached.forEach((id) => skippedMarketIds.delete(id));
   return { requested: marketIds.length, ...acknowledgement };
 }
 

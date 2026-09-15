@@ -30,6 +30,7 @@ const {
 const {
   normalizeProviderAcknowledgement,
   unsubscribeEventMarkets,
+  refreshMarkets,
 } = require("../src/services/marketSubscriptionService");
 const { isFutureMarket } = require("../src/controllers/subscriptionController");
 
@@ -120,7 +121,7 @@ const { checksum, migrationFiles } = require("../scripts/migrate");
 const { lockName: migrationLockName } = require("../scripts/migration-lock");
 const { eventIdFromKey } = require("../src/cron/redisEventCleanup");
 const { eventInWindow, eventWindowSql } = require("../src/utils/eventWindow");
-const { subscriptionDiff, admissionBatches } = require("../src/cron/marketSync");
+const { subscriptionDiff, admissionBatches, noTickRecoveryCandidates } = require("../src/cron/marketSync");
 const { resultFilters, resultWhere } = require("../src/utils/resultFilters");
 const { environmentErrors, cronErrors } = require("../src/services/startupPreflight");
 const { pipelineCheck } = require("../src/services/healthSupervisor");
@@ -186,6 +187,67 @@ test("automatic cleanup unsubscribes only locally tracked markets at the vendor"
   } finally {
     provider.unsubscribe = originalProviderUnsubscribe;
     websocket.unsubscribeMarkets = originalSocketUnsubscribe;
+  }
+});
+
+test("stale and never-ticked live subscriptions are selected for recovery", () => {
+  const websocket = require("../src/services/websocketService");
+  const redisStore = require("../src/config/redis");
+  const originalSubscribedAt = websocket.getMarketSubscribedAt;
+  const originalActivity = redisStore.getTickActivity;
+  const originalGrace = process.env.MARKET_FIRST_TICK_GRACE_MS;
+  const originalStale = process.env.MARKET_STALE_TICK_MS;
+  const now = Date.parse("2026-09-15T18:00:00.000Z");
+  process.env.MARKET_FIRST_TICK_GRACE_MS = "10000";
+  process.env.MARKET_STALE_TICK_MS = "60000";
+  websocket.getMarketSubscribedAt = () => now - 120000;
+  redisStore.getTickActivity = (id) => ({
+    marketId: id,
+    lastUpdatedAt: id === "fresh" ? new Date(now - 5000).toISOString() : new Date(now - 120000).toISOString(),
+  });
+  try {
+    const markets = ["fresh", "stale"].map((marketid) => ({ marketid, inplay: 1 }));
+    assert.deepEqual(
+      noTickRecoveryCandidates(markets, ["fresh", "stale", "never"], now).map((row) => row.marketid),
+      ["stale"],
+    );
+    redisStore.getTickActivity = () => null;
+    assert.deepEqual(
+      noTickRecoveryCandidates([{ marketid: "never", inplay: 1 }], ["never"], now)
+        .map((row) => row.marketid),
+      ["never"],
+    );
+  } finally {
+    websocket.getMarketSubscribedAt = originalSubscribedAt;
+    redisStore.getTickActivity = originalActivity;
+    if (originalGrace === undefined) delete process.env.MARKET_FIRST_TICK_GRACE_MS;
+    else process.env.MARKET_FIRST_TICK_GRACE_MS = originalGrace;
+    if (originalStale === undefined) delete process.env.MARKET_STALE_TICK_MS;
+    else process.env.MARKET_STALE_TICK_MS = originalStale;
+  }
+});
+
+test("market refresh reattaches IDs the provider reports as already registered", async () => {
+  const provider = require("../src/services/providerApi");
+  const websocket = require("../src/services/websocketService");
+  const originalProviderUnsubscribe = provider.unsubscribe;
+  const originalProviderSubscribe = provider.subscribe;
+  const originalSocketUnsubscribe = websocket.unsubscribeMarkets;
+  const originalSocketSubscribe = websocket.subscribeMarkets;
+  const attached = [];
+  provider.unsubscribe = async () => ({ message: "OK" });
+  provider.subscribe = async () => ({ subscribed: [], skipped: ["1.line"] });
+  websocket.unsubscribeMarkets = (ids) => ids;
+  websocket.subscribeMarkets = (ids) => attached.push(...ids);
+  try {
+    const result = await refreshMarkets(["1.line"]);
+    assert.deepEqual(result.attached, ["1.line"]);
+    assert.deepEqual(attached, ["1.line"]);
+  } finally {
+    provider.unsubscribe = originalProviderUnsubscribe;
+    provider.subscribe = originalProviderSubscribe;
+    websocket.unsubscribeMarkets = originalSocketUnsubscribe;
+    websocket.subscribeMarkets = originalSocketSubscribe;
   }
 });
 

@@ -1430,6 +1430,14 @@ function getTickActivity(marketId) {
   );
 }
 
+function clearTickActivity(marketIds) {
+  const ids = new Set((marketIds || []).map(String));
+  if (!ids.size) return;
+  for (const [key, activity] of tickActivity) {
+    if (ids.has(activity.marketId)) tickActivity.delete(key);
+  }
+}
+
 async function getEventSnapshot(eventId) {
   const redis = await getRedisReadClient();
   if (!redis?.isOpen) return emptyEventPayload();
@@ -1564,6 +1572,7 @@ module.exports = {
   getEventSnapshots,
   inspectTicks,
   getTickActivity,
+  clearTickActivity,
   getRedisStatus,
   closeRedis,
   bookmakerPayload,
