@@ -669,11 +669,15 @@ async function syncResults() {
     const batchSize = Number.isFinite(configuredBatchSize)
       ? Math.min(100, Math.max(1, Math.floor(configuredBatchSize))) : 100;
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
+    const configuredMarketCap = Number(process.env.RESULT_MAX_MARKETS_PER_RUN || 800);
+    const maxMarketsPerRun = Number.isFinite(configuredMarketCap)
+      ? Math.min(800, Math.max(1, Math.floor(configuredMarketCap))) : 800;
+    const eligible = all.slice(0, maxMarketsPerRun);
     const batches = [];
-    for (let index = 0; index < all.length && batches.length < maxCalls; index += batchSize) {
-      batches.push(all.slice(index, index + batchSize).map((market) => market.marketid));
+    for (let index = 0; index < eligible.length && batches.length < maxCalls; index += batchSize) {
+      batches.push(eligible.slice(index, index + batchSize).map((market) => market.marketid));
     }
-    const requested = all.slice(0, batches.length * batchSize);
+    const requested = eligible.slice(0, batches.length * batchSize);
     const fancyObjects = new Set(candidates.fancies);
     const nextCursors = advanceCandidateCursors(
       requested,
@@ -710,6 +714,7 @@ async function syncResults() {
       regular: candidates.markets.length,
       fancies: candidates.fancies.length,
       calls: batches.length,
+      maxMarketsPerRun,
       requestConcurrency,
       requestedRegular: requested.filter((market) => !fancyObjects.has(market)).length,
       requestedFancies: requested.filter((market) => fancyObjects.has(market)).length,

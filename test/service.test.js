@@ -693,6 +693,13 @@ test("bounded result polling cannot starve fancy candidates", () => {
   );
 });
 
+test("result polling has a hard 800-market ceiling", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
+  assert.match(source, /RESULT_MAX_MARKETS_PER_RUN \|\| 800/);
+  assert.match(source, /Math\.min\(800,/);
+  assert.match(source, /const eligible = all\.slice\(0, maxMarketsPerRun\)/);
+});
+
 test("result requests use bounded concurrency", async () => {
   let running = 0;
   let peak = 0;
