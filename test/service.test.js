@@ -694,6 +694,14 @@ test("inactive regular markets remain eligible for results", () => {
   assert.doesNotMatch(source, /const \[marketCandidates\][\s\S]*?WHERE m\.isactive=\?/);
 });
 
+test("exceptional results are excluded from future result polling", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
+  assert.match(source, /t_matchabondendtie x WHERE x\.marketid=m\.marketid/);
+  assert.match(source, /t_matchabondendtie x WHERE x\.marketid=f\.fancyid/);
+  assert.match(source, /exceptional result table is absent; fancy remains pending/);
+  assert.match(source, /"Abandoned", fancy\.sportid/);
+});
+
 test("bounded result polling cannot starve fancy candidates", () => {
   const regular = [{ marketid: "r1" }, { marketid: "r2" }, { marketid: "r3" }];
   const fancies = [{ marketid: "f1" }, { marketid: "f2" }, { marketid: "f3" }];

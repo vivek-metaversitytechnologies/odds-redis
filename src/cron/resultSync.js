@@ -173,6 +173,11 @@ async function loadCandidates() {
     .map((value) => Number(value.trim()))
     .filter(Number.isFinite);
   const placeholders = sportIds.map(() => "?").join(",");
+  const exceptionalAvailable = await hasExceptionalTable(getSourcePool());
+  const regularExceptionalFilter = exceptionalAvailable
+    ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie x WHERE x.marketid=m.marketid)" : "";
+  const fancyExceptionalFilter = exceptionalAvailable
+    ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie x WHERE x.marketid=f.fancyid)" : "";
   const limit = Math.max(1, Number(process.env.RESULT_MARKET_LIMIT || 2000));
   // Keep only part of the fancy polling lane reserved for recently retired
   // markets. The remainder must come from the rotating cursor, otherwise a
@@ -193,6 +198,7 @@ async function loadCandidates() {
        AND m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+       ${regularExceptionalFilter}
      ORDER BY m.updatedon DESC, m.id DESC LIMIT ?`,
     [false, ...sportIds, recentRegularLimit],
   );
@@ -202,6 +208,7 @@ async function loadCandidates() {
      WHERE m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+       ${regularExceptionalFilter}
      ORDER BY CASE WHEN ? IS NULL OR m.id < ? THEN 0 ELSE 1 END, m.id DESC
      LIMIT ?`,
     [...sportIds, candidateCursors.market, candidateCursors.market, limit],
@@ -219,6 +226,7 @@ async function loadCandidates() {
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
+       ${fancyExceptionalFilter}
      ORDER BY f.updatedon DESC, f.id DESC LIMIT ?`,
     ["OPEN", false, ...sportIds, recentFancyLimit],
   );
@@ -231,6 +239,7 @@ async function loadCandidates() {
        AND COALESCE(f.sportid,e.sportid) IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
+       ${fancyExceptionalFilter}
      ORDER BY CASE WHEN ? IS NULL OR f.id < ? THEN 0 ELSE 1 END, f.id DESC
      LIMIT ?`,
     ["OPEN", ...sportIds, candidateCursors.fancy, candidateCursors.fancy, limit],
@@ -488,6 +497,21 @@ async function persistMarketResult(connection, market, result) {
 async function persistFancyResult(connection, fancy, result) {
   await require("../services/fancyNameService").repairFancyNames(connection, fancy.marketid, fancy.marketname);
   if (result.isAbandoned) {
+    if (!(await hasExceptionalTable(connection))) {
+      logger.warn("[ResultSync] exceptional result table is absent; fancy remains pending", {
+        marketId: fancy.marketid,
+      });
+      return false;
+    }
+    await connection.execute(
+      `INSERT INTO t_matchabondendtie
+       (date,marketid,marketname,matchid,matchname,result,sportid,sportname,status,declared_by)
+       SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS
+         (SELECT 1 FROM t_matchabondendtie WHERE marketid=? LIMIT 1)`,
+      [new Date().toISOString(), fancy.marketid, fancy.marketname, fancy.eventid, fancy.matchname,
+        "Abandoned", fancy.sportid, String(fancy.sportid) === "4" ? "Cricket" : null,
+        true, "API", fancy.marketid],
+    );
     await connection.execute(
       "UPDATE t_matchfancy SET isactive=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
       [false, false, false, false, fancy.marketid],
