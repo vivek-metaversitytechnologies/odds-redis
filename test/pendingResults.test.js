@@ -4,15 +4,18 @@ const { retryDelay } = require("../src/services/pendingResultQueue");
 const queue = require("../src/services/pendingResultQueue");
 const redis = require("../src/config/redis");
 
-test("pending results back off without expiring unresolved settlements", () => {
-  assert.equal(retryDelay(1), 5000);
+const KEY = "Pending-Regular-Results";
+const ATTEMPTS_KEY = `${KEY}:attempts`;
+const FIRST_QUEUED_KEY = `${KEY}:firstQueuedAt`;
+const REVIEW_KEY = `${KEY}:review`;
+
+test("retries stay on a flat ten-second cadence", () => {
+  assert.equal(retryDelay(1), 10000);
   assert.equal(retryDelay(2), 10000);
-  assert.equal(retryDelay(3), 20000);
-  assert.equal(retryDelay(4), 40000);
-  assert.equal(retryDelay(100), 40000);
+  assert.equal(retryDelay(10), 10000);
 });
 
-test("repeated deactivation preserves retry schedule and settlement clears queue state", async () => {
+function makeFakeRedis() {
   const scores = new Map();
   const attempts = new Map();
   const firstQueued = new Map();
@@ -20,24 +23,27 @@ test("repeated deactivation preserves retry schedule and settlement clears queue
   const fake = {
     isOpen: true,
     async eval(_script, { keys, arguments: args }) {
-      const now = Number(args[0]);
-      if (keys.length === 3) {
+      if (keys[1] === FIRST_QUEUED_KEY && keys[2] === REVIEW_KEY) {
+        // enqueue
+        const now = args[0];
         for (const id of args.slice(1)) {
           if (review.has(id)) continue;
-          if (!firstQueued.has(id)) firstQueued.set(id, String(now));
-          if (!scores.has(id)) scores.set(id, now);
+          if (!firstQueued.has(id)) firstQueued.set(id, now);
+          if (!scores.has(id)) scores.set(id, Number(now));
         }
         return 1;
       }
+      // moveExpired: keys = [key, attempts, firstQueuedAt]
+      const maxAttempts = Number(args[0]);
       const moved = [];
-      for (const id of args.slice(2)) {
-        if (!firstQueued.has(id) || now - Number(firstQueued.get(id)) < Number(args[1])) continue;
-        review.set(id, { marketId: id, attempts: attempts.get(id) || 0 });
-        scores.delete(id); firstQueued.delete(id); attempts.delete(id); moved.push(id);
+      for (const id of args.slice(1)) {
+        if (Number(attempts.get(id) || 0) >= maxAttempts) {
+          scores.delete(id); attempts.delete(id); firstQueued.delete(id);
+          moved.push(id);
+        }
       }
       return moved;
     },
-    async hmGet(_key, ids) { return ids.map((id) => firstQueued.get(id)); },
     async zAdd(_key, entries, options) {
       for (const { value, score } of entries) {
         if (options.NX && scores.has(value)) continue;
@@ -52,37 +58,54 @@ test("repeated deactivation preserves retry schedule and settlement clears queue
           ops.push(() => { if (!firstQueued.has(id)) firstQueued.set(id, value); });
           return tx;
         },
-        zAdd(key, entries, options) { ops.push(() => fake.zAdd(key, entries, options)); return tx; },
+        zAdd(k, entries, options) { ops.push(() => fake.zAdd(k, entries, options)); return tx; },
         hIncrBy(_key, id) {
           ops.push(() => { attempts.set(id, (attempts.get(id) || 0) + 1); return attempts.get(id); });
           return tx;
         },
         zRem(_key, ids) { ops.push(() => ids.forEach((id) => scores.delete(id))); return tx; },
-        hDel(key, ids) { ops.push(() => ids.forEach((id) => (key.endsWith(":firstQueuedAt") ? firstQueued : attempts).delete(id))); return tx; },
+        hDel(k, ids) { ops.push(() => ids.forEach((id) => (k === FIRST_QUEUED_KEY ? firstQueued : attempts).delete(id))); return tx; },
         async exec() { return ops.map((op) => op()); },
       };
       return tx;
     },
   };
+  return { fake, scores, attempts, firstQueued, review };
+}
+
+test("a market retried every ten seconds is dropped after an hour of failed attempts", async () => {
+  const { fake, scores, attempts } = makeFakeRedis();
   redis.__testing__.setRedisClient(fake);
   try {
-    await queue.enqueue(["1.262087180", "1.262087180"]);
+    await queue.enqueue(["1.262087180"]);
     assert.equal(scores.size, 1);
-    await queue.defer(["1.262087180"]);
-    const due = scores.get("1.262087180");
-    assert.ok(due >= Date.now() + retryDelay(1) - 1000);
-    await queue.enqueue(["1.262087180"]);
-    assert.equal(scores.get("1.262087180"), due);
-    firstQueued.set("1.262087180", String(Date.now() - 86400000));
-    await queue.enqueue(["1.262087180"]);
+
+    for (let attempt = 1; attempt <= 359; attempt += 1) {
+      await queue.defer(["1.262087180"]);
+      assert.equal(attempts.get("1.262087180"), attempt);
+      assert.ok(scores.has("1.262087180"), `still queued after attempt ${attempt}`);
+      assert.equal(scores.get("1.262087180") - Date.now() >= retryDelay(attempt) - 1000, true);
+    }
+
+    // 360th failed attempt (1 hour at 10s intervals) exhausts the retry budget and drops the market entirely.
     await queue.defer(["1.262087180"]);
     assert.equal(scores.has("1.262087180"), false);
-    assert.equal(review.has("1.262087180"), true);
+    assert.equal(attempts.has("1.262087180"), false);
+  } finally { redis.__testing__.reset(); }
+});
+
+test("dropped markets are not tracked for manual review", async () => {
+  const { fake, scores, attempts, review } = makeFakeRedis();
+  redis.__testing__.setRedisClient(fake);
+  try {
     await queue.enqueue(["1.262087180"]);
+    for (let attempt = 1; attempt <= 360; attempt += 1) await queue.defer(["1.262087180"]);
     assert.equal(scores.has("1.262087180"), false);
-    await queue.remove(["1.262087180"]);
-    assert.equal(scores.size, 0);
-    assert.equal(attempts.size, 0);
-    assert.equal(firstQueued.size, 0);
+    assert.equal(attempts.has("1.262087180"), false);
+    assert.equal(review.size, 0);
+
+    // A dropped market can be re-enqueued fresh (e.g. rediscovered by the backlog scan).
+    await queue.enqueue(["1.262087180"]);
+    assert.equal(scores.has("1.262087180"), true);
   } finally { redis.__testing__.reset(); }
 });

@@ -2,8 +2,9 @@ const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
 
 const key = "Pending-Regular-Results";
-const REVIEW_AFTER_MS = 43200000; // 12 hours
 const reviewKey = `${key}:review`;
+const RETRY_DELAY_MS = 10000; // 10 seconds
+const MAX_ATTEMPTS = 360; // 360 * 10s retry delay = 1 hour
 // Older scans interpreted MySQL BIT buffers with Number(), skipping inactive rows.
 // Invalidate those checkpoints once so a corrected full pass starts immediately.
 const RECOVERY_VERSION = 2;
@@ -46,21 +47,18 @@ async function moveExpired(ids) {
   const c = await client();
   return c.eval(`
     local moved = {}
-    for i=3,#ARGV do
+    for i=2,#ARGV do
       local id = ARGV[i]
-      local first = tonumber(redis.call('HGET',KEYS[2],id))
-      if first and tonumber(ARGV[1])-first >= tonumber(ARGV[2]) then
-        redis.call('HSET',KEYS[4],id,cjson.encode({marketId=id,firstQueuedAt=first,
-          reviewAt=tonumber(ARGV[1]),attempts=tonumber(redis.call('HGET',KEYS[3],id) or '0'),
-          reason='unresolved-after-review-threshold'}))
+      local attempts = tonumber(redis.call('HGET',KEYS[2],id) or '0')
+      if attempts >= tonumber(ARGV[1]) then
         redis.call('ZREM',KEYS[1],id)
         redis.call('HDEL',KEYS[2],id)
         redis.call('HDEL',KEYS[3],id)
         table.insert(moved,id)
       end
     end
-    return moved`, { keys: [key, `${key}:firstQueuedAt`, `${key}:attempts`, reviewKey],
-    arguments: [String(Date.now()), String(REVIEW_AFTER_MS), ...ids] });
+    return moved`, { keys: [key, `${key}:attempts`, `${key}:firstQueuedAt`],
+    arguments: [String(MAX_ATTEMPTS), ...ids] });
 }
 
 async function listReview(cursor = "0") {
@@ -161,18 +159,11 @@ async function load({ adaptive = false } = {}) {
   return { rows: rows.filter((row) => sports.has(Number(row.sportid))), recovered, depth: await c.zCard(key), reviewCount };
 }
 
-const RETRY_DELAY_BASE_MS = 5000;
-const RETRY_DELAY_MAX_MS = 40000;
-
-function retryDelay(attempt) {
-  const exponent = Math.max(0, Math.floor(attempt) - 1);
-  return Math.min(RETRY_DELAY_BASE_MS * 2 ** exponent, RETRY_DELAY_MAX_MS);
+function retryDelay() {
+  return RETRY_DELAY_MS;
 }
 
 async function defer(ids) {
-  if (!ids.length) return;
-  const moved = new Set(await moveExpired(ids));
-  ids = ids.filter((id) => !moved.has(id));
   if (!ids.length) return;
   const c = await client();
   const now = Date.now();
@@ -181,11 +172,14 @@ async function defer(ids) {
   // Existing queue entries acquire an age on their first retry after upgrade.
   for (const id of ids) tx.hSetNX(`${key}:firstQueuedAt`, id, String(now));
   const attempts = await tx.exec();
-  const firstQueued = await c.hmGet(`${key}:firstQueuedAt`, ids);
-  await c.zAdd(key, ids.map((value, index) => ({
-    value,
-    score: Math.min(now + retryDelay(Number(attempts[index])), Number(firstQueued[index] || now) + REVIEW_AFTER_MS),
-  })), { XX: true });
+  const exhausted = ids.filter((_id, index) => Number(attempts[index]) >= MAX_ATTEMPTS);
+  const retry = ids.filter((_id, index) => Number(attempts[index]) < MAX_ATTEMPTS);
+  if (exhausted.length) {
+    await c.multi().zRem(key, exhausted).hDel(`${key}:attempts`, exhausted).hDel(`${key}:firstQueuedAt`, exhausted).exec();
+  }
+  if (retry.length) {
+    await c.zAdd(key, retry.map((value) => ({ value, score: now + RETRY_DELAY_MS })), { XX: true });
+  }
 }
 
 module.exports = { enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus, __testing__: { recover } };
