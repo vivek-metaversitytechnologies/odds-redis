@@ -2,7 +2,7 @@ const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
 
 const key = "Pending-Regular-Results";
-const DAY_MS = 86400000;
+const REVIEW_AFTER_MS = Number(process.env.RESULT_REVIEW_AFTER_MS || 43200000);
 const reviewKey = `${key}:review`;
 // Older scans interpreted MySQL BIT buffers with Number(), skipping inactive rows.
 // Invalidate those checkpoints once so a corrected full pass starts immediately.
@@ -52,7 +52,7 @@ async function moveExpired(ids) {
       if first and tonumber(ARGV[1])-first >= tonumber(ARGV[2]) then
         redis.call('HSET',KEYS[4],id,cjson.encode({marketId=id,firstQueuedAt=first,
           reviewAt=tonumber(ARGV[1]),attempts=tonumber(redis.call('HGET',KEYS[3],id) or '0'),
-          reason='unresolved-after-24-hours'}))
+          reason='unresolved-after-review-threshold'}))
         redis.call('ZREM',KEYS[1],id)
         redis.call('HDEL',KEYS[2],id)
         redis.call('HDEL',KEYS[3],id)
@@ -60,7 +60,7 @@ async function moveExpired(ids) {
       end
     end
     return moved`, { keys: [key, `${key}:firstQueuedAt`, `${key}:attempts`, reviewKey],
-    arguments: [String(Date.now()), String(DAY_MS), ...ids] });
+    arguments: [String(Date.now()), String(REVIEW_AFTER_MS), ...ids] });
 }
 
 async function listReview(cursor = "0") {
@@ -162,7 +162,10 @@ async function load({ adaptive = false } = {}) {
 }
 
 function retryDelay(attempt) {
-  return attempt <= 1 ? 60000 : attempt === 2 ? 300000 : 1800000;
+  const base = Number(process.env.RESULT_RETRY_DELAY_BASE_MS || 5000);
+  const max = Number(process.env.RESULT_RETRY_DELAY_MAX_MS || 40000);
+  const exponent = Math.max(0, Math.floor(attempt) - 1);
+  return Math.min(base * 2 ** exponent, max);
 }
 
 async function defer(ids) {
@@ -180,7 +183,7 @@ async function defer(ids) {
   const firstQueued = await c.hmGet(`${key}:firstQueuedAt`, ids);
   await c.zAdd(key, ids.map((value, index) => ({
     value,
-    score: Math.min(now + retryDelay(Number(attempts[index])), Number(firstQueued[index] || now) + DAY_MS),
+    score: Math.min(now + retryDelay(Number(attempts[index])), Number(firstQueued[index] || now) + REVIEW_AFTER_MS),
   })), { XX: true });
 }
 

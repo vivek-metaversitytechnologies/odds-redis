@@ -5,10 +5,11 @@ const queue = require("../src/services/pendingResultQueue");
 const redis = require("../src/config/redis");
 
 test("pending results back off without expiring unresolved settlements", () => {
-  assert.equal(retryDelay(1), 60000);
-  assert.equal(retryDelay(2), 300000);
-  assert.equal(retryDelay(3), 1800000);
-  assert.equal(retryDelay(100), 1800000);
+  assert.equal(retryDelay(1), 5000);
+  assert.equal(retryDelay(2), 10000);
+  assert.equal(retryDelay(3), 20000);
+  assert.equal(retryDelay(4), 40000);
+  assert.equal(retryDelay(100), 40000);
 });
 
 test("repeated deactivation preserves retry schedule and settlement clears queue state", async () => {
@@ -69,7 +70,7 @@ test("repeated deactivation preserves retry schedule and settlement clears queue
     assert.equal(scores.size, 1);
     await queue.defer(["1.262087180"]);
     const due = scores.get("1.262087180");
-    assert.ok(due >= Date.now() + 59000);
+    assert.ok(due >= Date.now() + retryDelay(1) - 1000);
     await queue.enqueue(["1.262087180"]);
     assert.equal(scores.get("1.262087180"), due);
     firstQueued.set("1.262087180", String(Date.now() - 86400000));
