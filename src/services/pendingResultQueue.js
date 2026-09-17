@@ -2,7 +2,7 @@ const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
 
 const key = "Pending-Regular-Results";
-const REVIEW_AFTER_MS = Number(process.env.RESULT_REVIEW_AFTER_MS || 43200000);
+const REVIEW_AFTER_MS = 43200000; // 12 hours
 const reviewKey = `${key}:review`;
 // Older scans interpreted MySQL BIT buffers with Number(), skipping inactive rows.
 // Invalidate those checkpoints once so a corrected full pass starts immediately.
@@ -161,11 +161,12 @@ async function load({ adaptive = false } = {}) {
   return { rows: rows.filter((row) => sports.has(Number(row.sportid))), recovered, depth: await c.zCard(key), reviewCount };
 }
 
+const RETRY_DELAY_BASE_MS = 5000;
+const RETRY_DELAY_MAX_MS = 40000;
+
 function retryDelay(attempt) {
-  const base = Number(process.env.RESULT_RETRY_DELAY_BASE_MS || 5000);
-  const max = Number(process.env.RESULT_RETRY_DELAY_MAX_MS || 40000);
   const exponent = Math.max(0, Math.floor(attempt) - 1);
-  return Math.min(base * 2 ** exponent, max);
+  return Math.min(RETRY_DELAY_BASE_MS * 2 ** exponent, RETRY_DELAY_MAX_MS);
 }
 
 async function defer(ids) {
