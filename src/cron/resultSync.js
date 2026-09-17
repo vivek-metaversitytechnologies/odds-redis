@@ -721,11 +721,11 @@ async function syncResults() {
     const all = interleaveResultCandidates(candidates.markets, candidates.fancies);
     const configuredBatchSize = Number(process.env.RESULT_BATCH_SIZE || 100);
     const batchSize = Number.isFinite(configuredBatchSize)
-      ? Math.min(100, Math.max(1, Math.floor(configuredBatchSize))) : 100;
+      ? Math.min(1000, Math.max(1, Math.floor(configuredBatchSize))) : 100;
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
     // Vendor quota counts HTTP requests, not market IDs. Each request carries
-    // up to batchSize IDs; the shared provider limiter enforces the global
-    // 800-request rolling-minute budget across every endpoint.
+    // up to batchSize IDs (vendor cap: 1000); the shared provider limiter
+    // enforces the global 800-request rolling-minute budget across every endpoint.
     const candidateCapacity = batchSize * maxCalls;
     const configuredRegularReserve = Number(process.env.RESULT_REGULAR_RESERVE || 200);
     const regularReserve = Number.isFinite(configuredRegularReserve)
