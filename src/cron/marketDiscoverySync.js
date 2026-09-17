@@ -552,8 +552,18 @@ async function upsertMarkets(markets) {
       ids,
     );
     const existing = new Map(existingRows.map((row) => [String(row.marketid), Number(row.isactive) === 1]));
+    // A market misclassified as regular (e.g. vendor omits its type in the unfiltered
+    // snapshot) must not create a duplicate placeholder row for an ID already tracked
+    // as fancy — t_matchfancy stays the authoritative registration for that ID.
+    const [fancyRows] = await connection.query(
+      `SELECT fancyid FROM t_matchfancy WHERE fancyid IN (${ids.map(() => "?").join(",")})`,
+      ids,
+    );
+    const registeredAsFancy = new Set(fancyRows.map((row) => String(row.fancyid)));
     const writable = markets.filter(
-      (market) => existing.has(market.marketId) || (market.isActive && !market.gameOver),
+      (market) =>
+        existing.has(market.marketId) ||
+        (!registeredAsFancy.has(market.marketId) && market.isActive && !market.gameOver),
     );
     inserted = writable.filter((market) => !existing.has(market.marketId)).length;
     updated = writable.length - inserted;

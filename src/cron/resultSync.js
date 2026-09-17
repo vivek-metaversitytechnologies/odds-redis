@@ -572,12 +572,17 @@ async function applyResults(results, candidates) {
   let persistenceFailures = 0;
   let rejectedResults = 0;
   for (const result of results) {
-    const market = regularById.get(result.marketId) || fancyById.get(result.marketId);
+    // Line markets are dual-registered: t_market carries them for bet-limit/
+    // subscription purposes while t_matchfancy is authoritative for results.
+    // Prefer the fancy candidate whenever one exists so those IDs settle via
+    // t_fancyresult instead of being misread as a regular winner-selection id.
+    const isFancy = fancyById.has(result.marketId);
+    const market = isFancy ? fancyById.get(result.marketId) : regularById.get(result.marketId);
     if (!market) {
       unmatchedResults += 1;
       continue;
     }
-    matched.push({ result, market, isFancy: fancyById.has(result.marketId) });
+    matched.push({ result, market, isFancy });
   }
 
   const dbStartedAt = Date.now();
