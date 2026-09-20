@@ -78,10 +78,12 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - `GET /betfair_api/fancy/score/:eventId` - latest provider HTML scorecard for an event
 - `GET /betfair_api/active_match/:sportId` - public active-event dashboard list (legacy-compatible shape)
 - `GET /betfair_api/live_match` - only live (in-play) events, grouped by every sport in `SPORT_IDS`;
-  `GET /betfair_api/live_match/:sportId` returns one sport. Each event has `matchId`, `matchName`,
-  `openDate`, `inPlay` and `li` (series ID), ordered by kickoff. Read from the Redis event metadata,
-  so a live event appears even before it has a displayable market. Responds `503` if any requested
-  sport has no event metadata in Redis, and `404` for a sport that is not configured.
+  `GET /betfair_api/live_match/:sportId` returns one sport. Each event row is exactly an
+  `active_match` row (`matchId`, `matchName`, `openDate`, `inPlay`, `marketId`, `bm`, `GM`,
+  `outright`, back/lay prices, `li`), with `inPlay` always true, ordered like `active_match`. The
+  live list comes from the Redis event metadata, so a live event with no displayable market yet is
+  still listed, with a null `marketId` and zero prices. Responds `503` if any requested sport has
+  no event metadata in Redis, and `404` for a sport that is not configured.
 
 The public API process reads all four endpoints from Redis. If the `Events-Rs:<sportId>`
 metadata required by `active_match` is absent, it returns `503` instead of falling back to

@@ -233,43 +233,31 @@ async function activeMatchesFromRedis(sportId, timings) {
   return data;
 }
 
-function liveEventEntry(event) {
-  const seriesId = Number(event.seriesId);
-  return {
-    matchId: Number(event.eventId),
-    matchName: event.eventName ?? null,
-    openDate: openDateValue(event.openDate),
-    inPlay: true,
-    li: event.seriesId == null || !Number.isFinite(seriesId) ? null : seriesId,
-  };
-}
-
-function compareLiveEntries(left, right) {
-  const leftTime = Date.parse(left.openDate);
-  const rightTime = Date.parse(right.openDate);
-  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime - rightTime;
-  }
-  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? -1 : 1;
-  return left.matchId - right.matchId;
-}
-
-// Live means the vendor reports the event in play and not finished. Unlike the active-match
-// list, an in-play event is kept even before it has a displayable market.
-function liveEventsFromMetadata(events) {
+// Live means the vendor reports the event in play and not finished. Rows are exactly the
+// active-match rows, so one frontend row component serves both lists. An in-play event that
+// has no displayable market yet (and so is absent from the active-match projection) is still
+// listed, as an event-only row with zero prices and a null marketId.
+function liveEventsFromMetadata(events, projection) {
+  const projected = new Map((projection || []).map((entry) => [String(entry.matchId), entry]));
   return (events || [])
     .filter((event) => event?.inPlay === true && event?.gameOver !== true)
-    .map(liveEventEntry)
-    .sort(compareLiveEntries);
+    .map((event) => ({
+      ...(projected.get(String(event.eventId)) ?? eventOnlyDashboardEntry(event)),
+      inPlay: true,
+    }))
+    .sort((left, right) => compareDashboardEntries(left, right) || left.matchId - right.matchId);
 }
 
 // Returns null when any requested sport has no event metadata in Redis, so an outage is
 // reported instead of looking like "no live events".
 async function liveMatchesFromRedis(sportIds) {
-  const metadata = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  const [metadata, projections] = await Promise.all([
+    Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId))),
+    Promise.all(sportIds.map((sportId) => redisStore.getActiveMatches(sportId))),
+  ]);
   if (metadata.some((events) => events === null)) return null;
   return sportIds.map((sportId, index) => {
-    const events = liveEventsFromMetadata(metadata[index]);
+    const events = liveEventsFromMetadata(metadata[index], projections[index]);
     return { sportId, count: events.length, events };
   });
 }

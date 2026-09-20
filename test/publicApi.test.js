@@ -48,10 +48,12 @@ test("active-match response exposes its Redis and application timings", async (t
 
 test("live-match API returns only in-play events for each configured sport", async (t) => {
   const originalGetEvents = redis.getEvents;
+  const originalGetActiveMatches = redis.getActiveMatches;
   const originalCache = process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
   const originalSports = process.env.SPORT_IDS;
   t.after(() => {
     redis.getEvents = originalGetEvents;
+    redis.getActiveMatches = originalGetActiveMatches;
     if (originalCache === undefined) delete process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
     else process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS = originalCache;
     if (originalSports === undefined) delete process.env.SPORT_IDS;
@@ -71,6 +73,25 @@ test("live-match API returns only in-play events for each configured sport", asy
     ],
   };
   redis.getEvents = async (sportId) => metadata[sportId] ?? null;
+  // Event 11 has a displayable market, so the active-match projection holds its full row.
+  const projectedRow = {
+    matchName: "Alpha v Beta",
+    openDate: "2026-09-20T10:00:00",
+    inPlay: false,
+    matchId: 11,
+    marketId: "1.111",
+    bm: true,
+    GM: false,
+    outright: false,
+    team1Back: 1.5,
+    team1Lay: 1.6,
+    team2Back: 2.4,
+    team2Lay: 2.5,
+    drawBack: 3.3,
+    drawLay: 3.4,
+    li: 5,
+  };
+  redis.getActiveMatches = async (sportId) => (Number(sportId) === 1 ? [projectedRow] : null);
   const app = createPublicApiApp();
 
   const all = await request(app).get("/betfair_api/live_match").expect(200);
@@ -84,14 +105,32 @@ test("live-match API returns only in-play events for each configured sport", asy
     ],
     "in-play only, finished events dropped, oldest kickoff first",
   );
-  assert.deepEqual(all.body.data[0].events[0], {
-    matchId: 11,
-    matchName: "Alpha v Beta",
-    openDate: "2026-09-20T10:00:00.000Z",
+  // A live event with a market is exactly its active-match row (in play by definition).
+  assert.deepEqual(all.body.data[0].events[0], { ...projectedRow, inPlay: true });
+  // A live event without a displayable market keeps the same shape, with zero prices.
+  assert.deepEqual(all.body.data[1].events[0], {
+    matchName: "Earlier live",
+    openDate: "2026-09-20T08:00:00.000Z",
     inPlay: true,
-    li: 5,
+    matchId: 41,
+    marketId: null,
+    bm: false,
+    GM: false,
+    outright: false,
+    team1Back: 0,
+    team1Lay: 0,
+    team2Back: 0,
+    team2Lay: 0,
+    drawBack: 0,
+    drawLay: 0,
+    li: 9,
   });
   assert.equal(all.body.data[1].events[1].li, null);
+  assert.deepEqual(
+    Object.keys(all.body.data[1].events[0]),
+    Object.keys(all.body.data[0].events[0]),
+    "every live row has the same fields as an active-match row",
+  );
 
   const one = await request(app).get("/betfair_api/live_match/4").expect(200);
   assert.deepEqual(one.body.data.map((sport) => sport.sportId), [4]);
@@ -104,14 +143,17 @@ test("live-match API returns only in-play events for each configured sport", asy
 
 test("live-match API reports missing Redis data instead of an empty list", async (t) => {
   const originalGetEvents = redis.getEvents;
+  const originalGetActiveMatches = redis.getActiveMatches;
   const originalCache = process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
   t.after(() => {
     redis.getEvents = originalGetEvents;
+    redis.getActiveMatches = originalGetActiveMatches;
     if (originalCache === undefined) delete process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
     else process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS = originalCache;
   });
   process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS = "0";
   redis.getEvents = async (sportId) => (Number(sportId) === 2 ? null : []);
+  redis.getActiveMatches = async () => null;
   const response = await request(createPublicApiApp()).get("/betfair_api/live_match").expect(503);
   assert.equal(response.body.status, false);
   assert.deepEqual(response.body.data, []);
