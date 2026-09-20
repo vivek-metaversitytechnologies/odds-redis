@@ -38,6 +38,11 @@ const ballByBallActiveSnapshots = new Map();
 const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
 const initialPriceSeeded = new Map();
+const seedsInFlight = new Set();
+// Active line markets seen by the discovery cycle; the price-refresh loop polls only these.
+const activeLineMarkets = new Map();
+const LINE_PRICE_SEEN_TTL_MS = 15000;
+let linePriceRefreshRunning = false;
 const missingLineMarketPasses = new Map();
 const discoveryFingerprints = new Map();
 const lastFullDiscoveryAt = new Map();
@@ -789,7 +794,9 @@ function isSeedableRegularMarket(market) {
   return SEEDABLE_MARKET_TYPES.has(String(market.marketType || "").toLowerCase());
 }
 
-async function seedInitialMarketPrices(markets) {
+// A line market's periodic price refresh is one vendor call per market, so it runs in its own
+// loop (see startLinePriceRefresh). Discovery only seeds line markets it has never priced.
+async function seedInitialMarketPrices(markets, { refreshLines = true } = {}) {
   const now = Date.now();
   const lineRefreshMs = integer("LINE_MARKET_PRICE_REFRESH_MS", 2000, { min: 500, max: 60000 });
   const seedableMarkets = (markets || []).filter(
@@ -799,12 +806,14 @@ async function seedInitialMarketPrices(markets) {
       const seededAt = Number(initialPriceSeeded.get(marketId)) || 0;
       return market.isActive &&
       !market.gameOver &&
-      (!initialPriceSeeded.has(marketId) || (lineMarket && now - seededAt >= lineRefreshMs)) &&
+      !seedsInFlight.has(marketId) &&
+      (!initialPriceSeeded.has(marketId) || (lineMarket && refreshLines && now - seededAt >= lineRefreshMs)) &&
       // Already receiving live ticks (or a prior seed already landed) — no vendor call needed.
       (lineMarket || !redisStore.getTickActivity(marketId)) &&
       isSeedableRegularMarket(market);
     },
   );
+  seedableMarkets.forEach((market) => seedsInFlight.add(String(market.marketId)));
   const results = await Promise.allSettled(
     seedableMarkets.map(async (market) => {
       const response = await provider.runners(market.marketId);
@@ -837,7 +846,9 @@ async function seedInitialMarketPrices(markets) {
       });
       if (written) setBounded(initialPriceSeeded, String(market.marketId), Date.now(), DISCOVERY_CACHE_LIMIT);
       return written;
-    }),
+    }).map((seed, index) =>
+      seed.finally(() => seedsInFlight.delete(String(seedableMarkets[index].marketId))),
+    ),
   );
   const seededEventIds = [...new Set(results.flatMap((result, index) =>
     result.status === "fulfilled" && result.value ? [String(seedableMarkets[index].eventId)] : []
@@ -856,23 +867,27 @@ function inactiveLineMarkets(markets) {
   );
 }
 
-async function reconcileInactiveLineMarkets(markets) {
+// Removal is what users wait on: persist, drop from Redis and publish first. The vendor
+// unsubscribe only cleans up provider state and takes over a second, so it comes last and
+// callers may defer it (`unsubscribe: false`) using the returned `deactivatedMarketIds`.
+async function reconcileInactiveLineMarkets(markets, { unsubscribe = true } = {}) {
   const inactive = inactiveLineMarkets(markets);
-  if (!inactive.length) return { checked: 0, deactivated: 0, removed: 0 };
+  if (!inactive.length) return { checked: 0, deactivated: 0, removed: 0, deactivatedMarketIds: [] };
   const persisted = await upsertFancies(inactive);
   redisStore.invalidateMarkets([...inactive.map((market) => market.marketId), ...persisted.fancyIds]);
   const redisDefinitions = await redisStore.reconcileRegularDefinitions(inactive);
-  const deactivatedMarketIds = persisted.deactivatedFancyIds;
-  if (deactivatedMarketIds.length) {
-    await unsubscribeEventMarkets(deactivatedMarketIds);
-  }
   await Promise.allSettled(
     (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
   );
+  const deactivatedMarketIds = persisted.deactivatedFancyIds;
+  if (unsubscribe && deactivatedMarketIds.length) {
+    await unsubscribeEventMarkets(deactivatedMarketIds);
+  }
   return {
     checked: inactive.length,
     deactivated: deactivatedMarketIds.length,
     removed: redisDefinitions.removed,
+    deactivatedMarketIds,
   };
 }
 
@@ -1596,6 +1611,55 @@ async function syncActiveBallByBallDiscovery() {
   }
 }
 
+function isClosedLineMarket(market) {
+  return inactiveLineMarkets([market]).length > 0;
+}
+
+// Polls prices for active line markets in a loop of its own. Doing this inside the discovery
+// cycle made every cycle take (active line markets x provider request spacing), and a closed
+// market was only noticed once the previous cycle's price calls had finished.
+async function refreshLineMarketPrices(now = Date.now()) {
+  if (linePriceRefreshRunning) return { skipped: true, reason: "already-running" };
+  linePriceRefreshRunning = true;
+  try {
+    const markets = [];
+    for (const [marketId, entry] of activeLineMarkets) {
+      if (now - entry.seenAt > LINE_PRICE_SEEN_TTL_MS) activeLineMarkets.delete(marketId);
+      else markets.push(entry.market);
+    }
+    if (!markets.length) return { requested: 0, seeded: 0, failed: 0, eventIds: [] };
+    const prices = await seedInitialMarketPrices(markets);
+    await Promise.allSettled((prices.eventIds || []).map((eventId) => publishEventSnapshot(eventId)));
+    return prices;
+  } catch (error) {
+    logger.error("[LineMarketPrices] refresh failed", { error: error.message });
+    return { requested: 0, seeded: 0, failed: 0, eventIds: [], error: error.message };
+  } finally {
+    linePriceRefreshRunning = false;
+  }
+}
+
+function startLinePriceRefresh() {
+  let stopped = false;
+  let timer;
+  const delayMs = () => integer("LINE_MARKET_PRICE_REFRESH_MS", 2000, { min: 500, max: 60000 });
+  const schedule = () => {
+    if (stopped) return;
+    timer = setTimeout(async () => {
+      await refreshLineMarketPrices();
+      schedule();
+    }, delayMs());
+    timer.unref?.();
+  };
+  schedule();
+  return {
+    stop: () => {
+      stopped = true;
+      clearTimeout(timer);
+    },
+  };
+}
+
 async function syncActiveLineMarketDiscovery() {
   if (lineMarketRunning) return { skipped: true, reason: "already-running" };
   lineMarketRunning = true;
@@ -1606,36 +1670,75 @@ async function syncActiveLineMarketDiscovery() {
     );
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const result = { events: events.length, markets: 0, changed: 0, failedRequests: 0, failedSubscriptions: 0 };
-    // Keep batches sequential so a large response cannot create overlapping
-    // persistence, Redis reconciliation, or subscription work.
-    for (const eventBatch of lineMarketEventBatches(events)) {
-      const eventIds = eventBatch.map((event) => Number(event.eventId));
+    // Vendor reads are cheap, so every batch is requested together. A market that closed is
+    // then visible after one round trip instead of after the batches before it have finished.
+    const fetched = await Promise.all(
+      lineMarketEventBatches(events).map(async (eventBatch) => {
+        const eventIds = eventBatch.map((event) => Number(event.eventId));
+        try {
+          const response = await provider.markets(
+            { eids: eventIds, type: ["line-market"] },
+            { priority: discoveryPriority(eventBatch[0]?.sportId, "active"), source: "line-market" },
+          );
+          const markets = mergeDiscoveredMarkets(marketRows(response, eventsById)).filter(
+            (market) => market.marketType === "line-market",
+          );
+          return { eventIds, markets };
+        } catch (error) {
+          result.failedRequests += 1;
+          logger.error("[LineMarketDiscovery] event batch sync failed", { eventIds, error: error.message });
+          return null;
+        }
+      }),
+    );
+    const seenAt = Date.now();
+    const isChanged = (market) => lineMarketFingerprints.get(String(market.marketId)) !== marketFingerprint(market);
+
+    // Pass 1, removals only: closed markets leave Redis and frontends before any slower
+    // work (runner lookups, price seeding, subscriptions) for any batch.
+    for (const batch of fetched) {
+      if (!batch) continue;
+      for (const market of batch.markets) {
+        if (isClosedLineMarket(market)) activeLineMarkets.delete(String(market.marketId));
+        else activeLineMarkets.set(String(market.marketId), { market, seenAt });
+      }
+      const closing = batch.markets.filter((market) => isClosedLineMarket(market) && isChanged(market));
+      if (!closing.length) continue;
       try {
-        const response = await provider.markets(
-          { eids: eventIds, type: ["line-market"] },
-          { priority: discoveryPriority(eventBatch[0]?.sportId, "active"), source: "line-market" },
-        );
-        const markets = mergeDiscoveredMarkets(marketRows(response, eventsById)).filter(
-          (market) => market.marketType === "line-market",
-        );
-        const changed = markets.filter(
-          (market) => lineMarketFingerprints.get(String(market.marketId)) !== marketFingerprint(market),
-        );
+        await reconcileInactiveLineMarkets(closing, { unsubscribe: false });
+        for (const market of closing) {
+          setBounded(lineMarketFingerprints, String(market.marketId), marketFingerprint(market), DISCOVERY_CACHE_LIMIT);
+        }
+        result.changed += closing.length;
+        result.retired = (result.retired || 0) + closing.length;
+      } catch (error) {
+        result.failedRequests += 1;
+        logger.error("[LineMarketDiscovery] removal failed", {
+          eventIds: batch.eventIds,
+          marketIds: closing.map((market) => market.marketId),
+          error: error.message,
+        });
+      }
+    }
+
+    // Pass 2: additions and updates. Batches stay sequential so a large response cannot
+    // create overlapping persistence, Redis reconciliation, or subscription work.
+    const inactiveIds = [];
+    for (const batch of fetched) {
+      if (!batch) continue;
+      const { eventIds, markets } = batch;
+      try {
+        const changed = markets.filter(isChanged);
         const persisted = await upsertFancies(changed);
         redisStore.invalidateMarkets(persisted.fancyIds);
         const active = markets.filter((market) => market.isActive && !market.gameOver);
         await fetchAndStoreRunners(active.map((market) => market.marketId));
-        const prices = await seedInitialMarketPrices(active);
+        // Only never-priced markets are seeded here; the refresh loop keeps the rest current.
+        const prices = await seedInitialMarketPrices(active, { refreshLines: false });
         const definitions = await redisStore.reconcileRegularDefinitions(
           await regularMarketsWithRunners(markets),
         );
-        const inactiveIds = inactiveLineMarkets(markets).map((market) => market.marketId);
-        if (inactiveIds.length) {
-          await unsubscribeEventMarkets(inactiveIds, {
-            trackedOnly: true,
-            source: "line-market-discovery",
-          });
-        }
+        inactiveIds.push(...inactiveLineMarkets(markets).map((market) => market.marketId));
         const changedEventIds = [...new Set([
           ...(definitions.changedEventIds || []).map(String),
           ...(prices.eventIds || []).map(String),
@@ -1645,12 +1748,12 @@ async function syncActiveLineMarketDiscovery() {
         const pending = active.map((market) => String(market.marketId)).filter(
           (id) => !subscribed.has(id) && !isMarketSuppressed(id),
         );
-        for (const batch of chunks(pending, integer("PROVIDER_SUBSCRIPTION_BATCH_SIZE", 5, { min: 1, max: 20 }))) {
+        for (const batchIds of chunks(pending, integer("PROVIDER_SUBSCRIPTION_BATCH_SIZE", 5, { min: 1, max: 20 }))) {
           try {
-            await subscribeMarkets(batch, { scheduleRetry: false });
+            await subscribeMarkets(batchIds, { scheduleRetry: false });
           } catch (error) {
             result.failedSubscriptions += 1;
-            logger.error("[LineMarketDiscovery] immediate subscription failed", { marketIds: batch, error: error.message });
+            logger.error("[LineMarketDiscovery] immediate subscription failed", { marketIds: batchIds, error: error.message });
           }
         }
         // Commit fingerprints only after persistence and reconciliation succeed.
@@ -1665,6 +1768,15 @@ async function syncActiveLineMarketDiscovery() {
         result.failedRequests += 1;
         logger.error("[LineMarketDiscovery] event batch sync failed", { eventIds, error: error.message });
       }
+    }
+    // The vendor unsubscribe is slow (over a second) and only cleans up provider state, so it
+    // never holds up the next cycle. Markets are dropped locally first, so an overlapping call
+    // for the same ids finds nothing tracked and sends nothing.
+    if (inactiveIds.length) {
+      void unsubscribeEventMarkets(inactiveIds, { trackedOnly: true, source: "line-market-discovery" }).catch(
+        (error) =>
+          logger.error("[LineMarketDiscovery] unsubscribe failed", { marketIds: inactiveIds, error: error.message }),
+      );
     }
     result.durationMs = Date.now() - startedAt;
     logger.info("[LineMarketDiscovery] completed", result);
@@ -1697,6 +1809,7 @@ function startMarketDiscoverySync() {
       logger.error("[LineMarketDiscovery] failed", { error: error.message }),
     );
   });
+  const linePriceRefresh = startLinePriceRefresh();
   logger.info("[LineMarketDiscovery] scheduled", {
     expression: cronConfig.lineMarketDiscovery.expression,
     synchronous: true,
@@ -1717,6 +1830,7 @@ function startMarketDiscoverySync() {
       futureTask.stop();
       ballByBallTask.stop();
       lineMarketTask.stop();
+      linePriceRefresh.stop();
       cleanupTask.stop();
     },
   };
@@ -1771,6 +1885,8 @@ module.exports = {
   syncMarketDiscovery,
   syncStoredEventMarkets,
   syncActiveBallByBallDiscovery,
+  refreshLineMarketPrices,
+  reconcileInactiveLineMarkets,
   syncActiveLineMarketDiscovery,
   startMarketDiscoverySync,
   getMarketDiscoveryStatus,
