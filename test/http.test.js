@@ -52,6 +52,8 @@ test("active-match endpoint validates the sport ID", async () => {
   const response = await request(createApp()).get("/betfair_api/active_match/not-an-id").expect(400);
   assert.equal(response.body.status, false);
   assert.deepEqual(response.body.data, []);
+  const live = await request(createApp()).get("/betfair_api/live_match/not-an-id").expect(400);
+  assert.equal(live.body.status, false);
 });
 
 test("admin pages redirect to login without a session", async () => {

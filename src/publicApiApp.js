@@ -68,6 +68,8 @@ function createPublicApiApp() {
   app.get("/betfair_api/fancy/score/:eventId", redisController.eventScore);
   app.get("/betfair_api/fancy/:eventId", redisController.eventSnapshot);
   app.get("/betfair_api/active_match/:sportId", redisController.activeMatchesRedisOnly);
+  app.get("/betfair_api/live_match", redisController.liveMatchesRedisOnly);
+  app.get("/betfair_api/live_match/:sportId", redisController.liveMatchesRedisOnly);
   app.use(notFound);
   app.use(errorHandler);
   return app;

@@ -1,8 +1,11 @@
 const redis = require("../config/redis");
 const dashboard = require("../services/dashboardService");
+const { csvIntegers } = require("../config/env");
 
 const activeMatchCache = new Map();
 const activeMatchLoads = new Map();
+const liveMatchCache = new Map();
+const liveMatchLoads = new Map();
 
 function activeMatchCacheMs() {
   const value = Number(process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS || 350);
@@ -29,6 +32,23 @@ async function loadActiveMatches(sportId, timings) {
     })
     .finally(() => activeMatchLoads.delete(sportId));
   activeMatchLoads.set(sportId, loading);
+  return loading;
+}
+
+// Same short cache and request coalescing as the active-match list, keyed by sport selection.
+async function loadLiveMatches(sportIds) {
+  const key = sportIds.join(",");
+  const cached = liveMatchCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+  if (liveMatchLoads.has(key)) return liveMatchLoads.get(key);
+  const loading = dashboard
+    .liveMatchesFromRedis(sportIds)
+    .then((data) => {
+      if (data !== null) liveMatchCache.set(key, { data, expiresAt: Date.now() + activeMatchCacheMs() });
+      return data;
+    })
+    .finally(() => liveMatchLoads.delete(key));
+  liveMatchLoads.set(key, loading);
   return loading;
 }
 
@@ -159,4 +179,43 @@ async function activeMatchesRedisOnly(req, res, next) {
   }
 }
 
-module.exports = { list, market, eventSnapshot, eventScore, activeMatches, activeMatchesRedisOnly };
+// Live (in-play) events for every configured sport, or for one sport when :sportId is given.
+async function liveMatchesRedisOnly(req, res, next) {
+  try {
+    disableCaching(res);
+    let sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
+    if (req.params.sportId !== undefined) {
+      if (!/^\d+$/.test(req.params.sportId) || Number(req.params.sportId) <= 0) {
+        return res
+          .status(400)
+          .json({ status: false, message: "A positive numeric sport ID is required", data: [] });
+      }
+      const sportId = Number(req.params.sportId);
+      if (!sportIds.includes(sportId)) {
+        return res.status(404).json({ status: false, message: "Sport is not configured", data: [] });
+      }
+      sportIds = [sportId];
+    }
+    const data = await loadLiveMatches(sportIds);
+    if (data === null) {
+      return res.status(503).json({
+        status: false,
+        message: "Live-match data is not available in Redis",
+        data: [],
+      });
+    }
+    res.json({ status: true, message: "Data Fetch Successfully", data });
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = {
+  list,
+  market,
+  eventSnapshot,
+  eventScore,
+  activeMatches,
+  activeMatchesRedisOnly,
+  liveMatchesRedisOnly,
+};

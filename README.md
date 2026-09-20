@@ -24,7 +24,7 @@ npm start
 ```
 
 Start the isolated public REST process separately with `npm run start:api`. It serves only
-the three `/betfair_api` endpoints and its own `/health`; it does not start vendor ingestion,
+the four `/betfair_api` endpoints and its own `/health`; it does not start vendor ingestion,
 cron jobs, MySQL access, or either Socket.IO server.
 
 Configure `.env` before starting. The service uses only the read-only source database
@@ -77,8 +77,13 @@ Logging uses Winston with daily rotation, size limits, and retention controls.
 - `GET /betfair_api/fancy/:eventId` - public frontend-ready Redis snapshot (legacy-compatible shape)
 - `GET /betfair_api/fancy/score/:eventId` - latest provider HTML scorecard for an event
 - `GET /betfair_api/active_match/:sportId` - public active-event dashboard list (legacy-compatible shape)
+- `GET /betfair_api/live_match` - only live (in-play) events, grouped by every sport in `SPORT_IDS`;
+  `GET /betfair_api/live_match/:sportId` returns one sport. Each event has `matchId`, `matchName`,
+  `openDate`, `inPlay` and `li` (series ID), ordered by kickoff. Read from the Redis event metadata,
+  so a live event appears even before it has a displayable market. Responds `503` if any requested
+  sport has no event metadata in Redis, and `404` for a sport that is not configured.
 
-The public API process reads all three endpoints from Redis. If the `Events-Rs:<sportId>`
+The public API process reads all four endpoints from Redis. If the `Events-Rs:<sportId>`
 metadata required by `active_match` is absent, it returns `503` instead of falling back to
 MySQL. The original process retains its existing routes and database fallback during proxy
 cutover; route production traffic to `PUBLIC_API_PORT` before removing that compatibility path.
@@ -176,7 +181,7 @@ pm2 startup
 ```
 
 Run the command printed by `pm2 startup`, then use `pm2 status`, `pm2 logs odds-redis`, and
-`pm2 logs odds-public-api` to verify both processes. Point the three `/betfair_api/` Nginx
+`pm2 logs odds-public-api` to verify both processes. Point the four `/betfair_api/` Nginx
 locations to `127.0.0.1:$PUBLIC_API_PORT`; keep `/socket.io/` on the ingestion service port.
 
 Line markets have a dedicated sequential discovery job every second, configurable with

@@ -233,6 +233,47 @@ async function activeMatchesFromRedis(sportId, timings) {
   return data;
 }
 
+function liveEventEntry(event) {
+  const seriesId = Number(event.seriesId);
+  return {
+    matchId: Number(event.eventId),
+    matchName: event.eventName ?? null,
+    openDate: openDateValue(event.openDate),
+    inPlay: true,
+    li: event.seriesId == null || !Number.isFinite(seriesId) ? null : seriesId,
+  };
+}
+
+function compareLiveEntries(left, right) {
+  const leftTime = Date.parse(left.openDate);
+  const rightTime = Date.parse(right.openDate);
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime;
+  }
+  if (Number.isFinite(leftTime) !== Number.isFinite(rightTime)) return Number.isFinite(leftTime) ? -1 : 1;
+  return left.matchId - right.matchId;
+}
+
+// Live means the vendor reports the event in play and not finished. Unlike the active-match
+// list, an in-play event is kept even before it has a displayable market.
+function liveEventsFromMetadata(events) {
+  return (events || [])
+    .filter((event) => event?.inPlay === true && event?.gameOver !== true)
+    .map(liveEventEntry)
+    .sort(compareLiveEntries);
+}
+
+// Returns null when any requested sport has no event metadata in Redis, so an outage is
+// reported instead of looking like "no live events".
+async function liveMatchesFromRedis(sportIds) {
+  const metadata = await Promise.all(sportIds.map((sportId) => redisStore.getEvents(sportId)));
+  if (metadata.some((events) => events === null)) return null;
+  return sportIds.map((sportId, index) => {
+    const events = liveEventsFromMetadata(metadata[index]);
+    return { sportId, count: events.length, events };
+  });
+}
+
 async function activeMatches(sportId) {
   const cached = await activeMatchesFromRedis(sportId);
   if (cached !== null) return cached;
@@ -259,6 +300,8 @@ async function activeMatches(sportId) {
 }
 
 module.exports = {
+  liveEventsFromMetadata,
+  liveMatchesFromRedis,
   activeMatches,
   activeMatchesFromRedis,
   activeMatchesFromCache,
