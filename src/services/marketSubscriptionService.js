@@ -1,5 +1,6 @@
 const provider = require("./providerApi");
 const websocket = require("./websocketService");
+const marketSettings = require("./marketSettingsService");
 const logger = require("../utils/logger");
 const redisStore = require("../config/redis");
 const { integer } = require("../config/env");
@@ -26,6 +27,13 @@ function getRetryDelayMs() {
   const base = integer("PROVIDER_SKIPPED_RETRY_MS", 5000, { min: 100 });
   const maximum = integer("PROVIDER_SKIPPED_RETRY_MAX_MS", 60000, { min: base });
   return Math.min(maximum, base * 2 ** Math.min(consecutiveFailedRetryRuns, 6));
+}
+
+// Fire-and-forget: stake limits must never delay or fail a subscription.
+function loadInitialSettings(ids) {
+  void marketSettings.loadInitialSettings(ids, websocket.applyMarketSettings).catch((error) =>
+    logger.error("[MarketSubscription] initial settings load failed", { error: error.message }),
+  );
 }
 
 function providerBatchSize() {
@@ -77,6 +85,7 @@ async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
   const response = await provider.subscribe(marketIds, { source: "market-subscription" });
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
   websocket.subscribeMarkets(acknowledgement.attached);
+  loadInitialSettings(acknowledgement.attached);
   acknowledgement.attached.forEach((id) => skippedMarketIds.delete(id));
   const unresolved = acknowledgement.skipped.filter((id) => !acknowledgement.attached.includes(id));
   queueSkippedMarkets(unresolved, { schedule: scheduleRetry });
@@ -235,6 +244,7 @@ async function refreshMarkets(ids) {
   // `skipped` means already registered at the provider. It still has to be
   // attached to this socket, exactly as in the normal subscription path.
   websocket.subscribeMarkets(acknowledgement.attached);
+  loadInitialSettings(acknowledgement.attached);
   acknowledgement.attached.forEach((id) => skippedMarketIds.delete(id));
   return { requested: marketIds.length, ...acknowledgement };
 }
@@ -299,6 +309,7 @@ async function retrySkippedMarkets() {
       const response = await provider.subscribe(batch, { source: "skipped-market-retry" });
       const acknowledgement = normalizeProviderAcknowledgement(response, batch);
       websocket.subscribeMarkets(acknowledgement.subscribed);
+      loadInitialSettings(acknowledgement.subscribed);
       acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
       acknowledgement.skipped.forEach((id) => {
         if (!completedMarketIds.has(id)) skippedMarketIds.add(id);

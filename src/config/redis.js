@@ -1631,6 +1631,7 @@ module.exports = {
   frontendEventPayload,
   hasAuthoritativeOddsName,
   validMarketIdentifier,
+  findMarkets,
   invalidateMarkets,
   __testing__: {
     reconcileActiveMatchProjection,

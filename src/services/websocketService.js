@@ -5,6 +5,7 @@ const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
 const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
 const { deleteMarketBetPause } = require("./betPauseCacheService");
+const { noteRoomUpdate } = require("./marketSettingsService");
 const { integer } = require("../config/env");
 const { setBounded } = require("../utils/boundedMap");
 
@@ -400,6 +401,24 @@ function flushPendingEvent(key) {
   return active;
 }
 
+// Shared by the `market` room and the one-time settings fetch: persist limits, then push the
+// updated payload to subscribed frontends.
+function applyMarketSettings(item) {
+  return redisStore
+    .writeMarketSettings(item)
+    .then((update) => {
+      if (update) tickPublisher(update.eventId, update.payload);
+    })
+    .catch((error) => logger.error("[ProviderWS] market settings write failed", { error: error.message }));
+}
+
+function trackedApplyMarketSettings(item) {
+  const write = applyMarketSettings(item);
+  marketSettingsWrites.add(write);
+  void write.finally(() => marketSettingsWrites.delete(write));
+  return write;
+}
+
 function connectSocket() {
   state.connectionRequested = true;
   if (socket) {
@@ -488,13 +507,8 @@ function connectSocket() {
           error: error.message,
         }),
       );
-      const settingsWrite = redisStore
-        .writeMarketSettings(item)
-        .then((update) => {
-          if (update) tickPublisher(update.eventId, update.payload);
-        })
-        .catch((error) => logger.error("[ProviderWS] market settings write failed", { error: error.message }));
-      const write = Promise.allSettled([cacheDelete, settingsWrite]);
+      noteRoomUpdate(item?.mid);
+      const write = Promise.allSettled([cacheDelete, applyMarketSettings(item)]);
       marketSettingsWrites.add(write);
       void write.finally(() => marketSettingsWrites.delete(write));
     }
@@ -604,6 +618,7 @@ module.exports = {
   stopSocket,
   getSocketStatus,
   reconnectSocket,
+  applyMarketSettings: trackedApplyMarketSettings,
   getSubscribedMarketIds: () => [...subscribedMarketIds],
   getMarketSubscribedAt: (marketId) => marketSubscribedAt.get(String(marketId)) || null,
   collectOddsTicks,

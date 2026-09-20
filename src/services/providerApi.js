@@ -405,6 +405,9 @@ module.exports = {
   events: (query) => request("/v1/events", { query }),
   markets: (body, { priority = 5, source } = {}) =>
     request("/v1/markets", { method: "POST", body, priority, metricSource: source }),
+  // One-time fetch of stake limits and other settings; later changes arrive through the `market` room.
+  marketSettings: (mids, { priority = 5, source, retries = 2 } = {}) =>
+    request("/v1/markets/settings", { method: "POST", body: { mids }, priority, metricSource: source, retries }),
   runners: (marketId, { priority = 5, source, retries = 2 } = {}) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`, { priority, metricSource: source, retries }),
   // Results must not sit behind the much larger discovery queue indefinitely.
   results: (body, { priority = 2, source, retries = 2 } = {}) => request("/v1/markets/results", { method: "POST", body, priority, metricSource: source, retries }),
