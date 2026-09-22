@@ -3,6 +3,7 @@ const crypto = require("node:crypto");
 const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
+const { writeBallByBallObservation } = require("../utils/ballByBallFileLogger");
 const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
 const { deleteMarketBetPause } = require("./betPauseCacheService");
 const { noteRoomUpdate } = require("./marketSettingsService");
@@ -268,12 +269,34 @@ function logSocketTiming(details) {
   writeProviderLog("provider.socket.timing", details);
 }
 
+function logBallByBallSocketTicks(items, payload, receivedAtMs) {
+  const byMarketId = new Map(
+    (payload?.BallByBall || []).map((entry) => [String(entry.mid ?? entry.marketId), entry]),
+  );
+  for (const item of items || []) {
+    const market = byMarketId.get(String(item.mid));
+    if (!market) continue;
+    writeBallByBallObservation("socket", {
+      eventId: String(item.eid),
+      marketId: String(item.mid),
+      ballLine: market.ballLine ?? null,
+      receivedAt: new Date(receivedAtMs).toISOString(),
+      providerTimestamp: Number.isFinite(Number(item.t)) ? Number(item.t) : null,
+      status: market.gstatus ?? null,
+      backPrice: market.b1 ?? null,
+      layPrice: market.l1 ?? null,
+      gameOver: Boolean(item.go),
+    });
+  }
+}
+
 async function persist(items, receivedAtMs = Date.now()) {
   const resultedMarketIds = new Set();
   const writeStartedAt = Date.now();
   try {
     const result = await redisStore.writeTicks(items);
     const accepted = result.accepted || [];
+    logBallByBallSocketTicks(accepted, result.payload, receivedAtMs);
     if (result.changed) state.persistedTickCount += accepted.length;
     else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;
@@ -626,6 +649,7 @@ module.exports = {
   messageShape,
   logRawSocketPayload,
   logSocketTiming,
+  logBallByBallSocketTicks,
   getRawSocketPayloads,
   payloadContainsMarket,
   isResultTick,

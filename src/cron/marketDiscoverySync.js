@@ -9,7 +9,7 @@ const {
 } = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
-const { writeBallByBallLog } = require("../utils/ballByBallFileLogger");
+const { writeBallByBallLog, writeBallByBallObservation } = require("../utils/ballByBallFileLogger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
@@ -325,9 +325,11 @@ function marketRows(response, eventsById) {
         gameOver: marketType === "line-market" ? item?.gameOver === true : Boolean(item?.gameOver),
         isActive: item?.isActive !== false,
         status: vendorMarketStatus(item),
+        providerTimestamp: item?.updatedAt ?? item?.t ?? null,
         betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3,
         minBet: 100,
         maxBet: fancy ? 100000 : bookmaker ? 25000 : 10000,
+        ballLine: marketType === "ball-by-ball" && ballLine ? Number(ballLine) : null,
         displayMessage,
         seriesId: event?.seriesId ?? null,
       };
@@ -1375,7 +1377,7 @@ async function syncActiveBallByBallDiscovery() {
     const discovered = [];
     let failedRequests = 0;
     const requestSummaries = [];
-    const logMarketLimit = integer("BALL_BY_BALL_LOG_MARKET_LIMIT", 100, { min: 1, max: 1000 });
+    const logMarketLimit = 100;
     const eventBatchSize = integer("BALL_BY_BALL_EVENT_BATCH_SIZE", 5, { min: 1, max: 20 });
 
     // Batches remain sequential: the next vendor request does not start until the
@@ -1395,6 +1397,19 @@ async function syncActiveBallByBallDiscovery() {
         const rawRows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
         const parsedRows = marketRows(response, eventsById);
         discovered.push(...parsedRows);
+        for (const market of parsedRows.filter((row) => row.marketType === "ball-by-ball")) {
+          writeBallByBallObservation("api", {
+            cycleId,
+            eventId: market.eventId,
+            marketId: market.marketId,
+            ballLine: market.ballLine,
+            marketName: market.marketName,
+            status: market.status,
+            providerTimestamp: market.providerTimestamp,
+            isActive: market.isActive,
+            gameOver: market.gameOver,
+          });
+        }
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);
         const dataAge = providerDataAge(activeRows);
         const dataAgeWarningMs = integer("BALL_BY_BALL_DATA_AGE_WARNING_MS", 5000, { min: 1000 });

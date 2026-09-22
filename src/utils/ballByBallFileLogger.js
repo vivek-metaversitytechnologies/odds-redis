@@ -3,10 +3,7 @@ const winston = require("winston");
 require("winston-daily-rotate-file");
 
 let instance;
-
-function enabled() {
-  return String(process.env.BALL_BY_BALL_LOG_TO_FILE || "false").toLowerCase() === "true";
-}
+let sequence = 0;
 
 function getLogger() {
   if (instance) return instance;
@@ -20,11 +17,11 @@ function getLogger() {
     ),
     transports: [
       new winston.transports.DailyRotateFile({
-        dirname: path.resolve(process.env.BALL_BY_BALL_LOG_DIR || "logs/ball-by-ball"),
+        dirname: path.resolve("logs/ball-by-ball"),
         filename: "ball-by-ball-%DATE%.log",
         datePattern: "YYYY-MM-DD",
-        maxSize: process.env.BALL_BY_BALL_LOG_MAX_SIZE || "25m",
-        maxFiles: process.env.BALL_BY_BALL_LOG_MAX_FILES || "7d",
+        maxSize: "25m",
+        maxFiles: "7d",
         zippedArchive: false,
       }),
     ],
@@ -34,14 +31,27 @@ function getLogger() {
 }
 
 function writeBallByBallLog(type, details = {}) {
-  if (enabled()) getLogger().info("ball-by-ball", { type, details });
+  sequence += 1;
+  getLogger().info("ball-by-ball", { type, details: { sequence, ...details } });
+}
+
+// API discovery and Socket.IO ticks share this one append-only stream. `sequence`
+// is assigned at observation time, so records retain their process-local chronology
+// even when the provider timestamps are missing or arrive out of order.
+function writeBallByBallObservation(source, details = {}) {
+  writeBallByBallLog("market.observed", {
+    source,
+    observedAt: new Date().toISOString(),
+    ...details,
+  });
 }
 
 async function closeBallByBallLog() {
   if (!instance) return;
   const current = instance;
   instance = undefined;
+  sequence = 0;
   current.close();
 }
 
-module.exports = { writeBallByBallLog, closeBallByBallLog };
+module.exports = { writeBallByBallLog, writeBallByBallObservation, closeBallByBallLog };
