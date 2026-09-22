@@ -1299,6 +1299,7 @@ async function writeEventTicks(items) {
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
+  const ballByBallTransitions = [];
   const { payload, changed, serialized } = await (async () => {
     let payload = eventPayloadCache.get(eventId);
     if (!payload) {
@@ -1329,7 +1330,29 @@ async function writeEventTicks(items) {
       );
       if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
       if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
-      const newEntries = shouldRemoveFromPayload(group, item, market) ? [] : entries;
+      const removeFromPayload = shouldRemoveFromPayload(group, item, market);
+      const newEntries = removeFromPayload ? [] : entries;
+      if (group === "BallByBall") {
+        const entry = entries[0] || {};
+        ballByBallTransitions.push({
+          eventId: String(item.eid),
+          marketId,
+          ballLine: entry.ballLine ?? null,
+          status: entry.gstatus ?? null,
+          backPrice: entry.b1 ?? null,
+          layPrice: entry.l1 ?? null,
+          action: removeFromPayload ? "redis.remove" : "redis.upsert",
+          reason: removeFromPayload
+            ? booleanOr(item.go, false)
+              ? "socket-game-over"
+              : "socket-inactive"
+            : null,
+          socketActive: booleanOr(item.s, true),
+          gameOver: booleanOr(item.go, false),
+          providerTimestamp: Number.isFinite(Number(item.t)) ? Number(item.t) : null,
+          rawSocket: item,
+        });
+      }
       const marketChanged =
         movedFromOtherGroup ||
         previousEntries.length !== newEntries.length ||
@@ -1366,6 +1389,7 @@ async function writeEventTicks(items) {
     accepted: acceptedRows.map(({ item }) => item),
     rejected,
     changed,
+    ballByBallTransitions,
     persistedBytes: changed ? Buffer.byteLength(serialized) : 0,
   };
 }

@@ -47,6 +47,7 @@ for example `logs/ball-by-ball/ball-line-17.2-YYYY-MM-DD.log`. Each record has a
 increasing `sequence`, `source` (`api` or `socket`), and timestamps, so one file contains the
 complete observation order for that ball line. This diagnostic log is always enabled and rotates
 at 25 MB with seven days of retention.
+Each API observation includes `rawApi`; each socket observation includes `rawSocket`.
 
 For example, inspect one ball line in chronological order with:
 

@@ -269,23 +269,11 @@ function logSocketTiming(details) {
   writeProviderLog("provider.socket.timing", details);
 }
 
-function logBallByBallSocketTicks(items, payload, receivedAtMs) {
-  const byMarketId = new Map(
-    (payload?.BallByBall || []).map((entry) => [String(entry.mid ?? entry.marketId), entry]),
-  );
-  for (const item of items || []) {
-    const market = byMarketId.get(String(item.mid));
-    if (!market) continue;
+function logBallByBallSocketTicks(transitions, receivedAtMs) {
+  for (const transition of transitions || []) {
     writeBallByBallObservation("socket", {
-      eventId: String(item.eid),
-      marketId: String(item.mid),
-      ballLine: market.ballLine ?? null,
+      ...transition,
       receivedAt: new Date(receivedAtMs).toISOString(),
-      providerTimestamp: Number.isFinite(Number(item.t)) ? Number(item.t) : null,
-      status: market.gstatus ?? null,
-      backPrice: market.b1 ?? null,
-      layPrice: market.l1 ?? null,
-      gameOver: Boolean(item.go),
     });
   }
 }
@@ -296,7 +284,7 @@ async function persist(items, receivedAtMs = Date.now()) {
   try {
     const result = await redisStore.writeTicks(items);
     const accepted = result.accepted || [];
-    logBallByBallSocketTicks(accepted, result.payload, receivedAtMs);
+    logBallByBallSocketTicks(result.ballByBallTransitions, receivedAtMs);
     if (result.changed) state.persistedTickCount += accepted.length;
     else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;

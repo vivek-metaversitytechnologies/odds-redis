@@ -1397,6 +1397,7 @@ async function syncActiveBallByBallDiscovery() {
         const rawRows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
         const parsedRows = marketRows(response, eventsById);
         discovered.push(...parsedRows);
+        const rawByMarketId = new Map(rawRows.map((market) => [String(market?.id || ""), market]));
         for (const market of parsedRows.filter((row) => row.marketType === "ball-by-ball")) {
           writeBallByBallObservation("api", {
             cycleId,
@@ -1408,6 +1409,9 @@ async function syncActiveBallByBallDiscovery() {
             providerTimestamp: market.providerTimestamp,
             isActive: market.isActive,
             gameOver: market.gameOver,
+            action: market.isActive && !market.gameOver ? "vendor-active" : "vendor-deactivated",
+            reason: market.gameOver ? "vendor-game-over" : market.isActive ? null : "vendor-inactive",
+            rawApi: rawByMarketId.get(String(market.marketId)) ?? null,
           });
         }
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);
