@@ -55,6 +55,10 @@ For example, inspect one ball line in chronological order with:
 tail -f logs/ball-by-ball/ball-line-17.2-*.log
 ```
 
+Line-market API definitions and socket ticks are recorded per market in readable files such as
+`logs/line-market/line-market-2nd-innings-25-overs-line-1.234567-YYYY-MM-DD.log`, with raw
+`rawApi` or `rawSocket` payloads and a chronological `sequence`.
+
 ## Runtime flow
 
 - On startup and according to `MARKET_SYNC_CRON`, query active `t_market` rows.

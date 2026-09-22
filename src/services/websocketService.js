@@ -4,6 +4,7 @@ const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
 const { writeBallByBallObservation } = require("../utils/ballByBallFileLogger");
+const { writeLineMarketObservation } = require("../utils/lineMarketFileLogger");
 const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
 const { deleteMarketBetPause } = require("./betPauseCacheService");
 const { noteRoomUpdate } = require("./marketSettingsService");
@@ -278,6 +279,12 @@ function logBallByBallSocketTicks(transitions, receivedAtMs) {
   }
 }
 
+function logLineMarketSocketTicks(transitions, receivedAtMs) {
+  for (const transition of transitions || []) {
+    writeLineMarketObservation("socket", { ...transition, receivedAt: new Date(receivedAtMs).toISOString() });
+  }
+}
+
 async function persist(items, receivedAtMs = Date.now()) {
   const resultedMarketIds = new Set();
   const writeStartedAt = Date.now();
@@ -285,6 +292,7 @@ async function persist(items, receivedAtMs = Date.now()) {
     const result = await redisStore.writeTicks(items);
     const accepted = result.accepted || [];
     logBallByBallSocketTicks(result.ballByBallTransitions, receivedAtMs);
+    logLineMarketSocketTicks(result.lineMarketTransitions, receivedAtMs);
     if (result.changed) state.persistedTickCount += accepted.length;
     else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;
@@ -638,6 +646,7 @@ module.exports = {
   logRawSocketPayload,
   logSocketTiming,
   logBallByBallSocketTicks,
+  logLineMarketSocketTicks,
   getRawSocketPayloads,
   payloadContainsMarket,
   isResultTick,

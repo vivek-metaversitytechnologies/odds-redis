@@ -10,6 +10,7 @@ const {
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
 const { writeBallByBallLog, writeBallByBallObservation } = require("../utils/ballByBallFileLogger");
+const { writeLineMarketObservation } = require("../utils/lineMarketFileLogger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
@@ -197,6 +198,7 @@ function marketFingerprint(market) {
     market.openDate,
     market.inPlay,
     market.gameOver,
+    market.recalled,
     market.isActive,
     market.status,
     market.betDelay,
@@ -214,7 +216,7 @@ function ballByBallSnapshotDelta(markets, previousSnapshot = new Map()) {
 
   for (const market of markets || []) {
     const marketId = String(market.marketId);
-    const isActive = market.isActive && !market.gameOver;
+    const isActive = market.isActive && !market.gameOver && !market.recalled;
     if (isActive) {
       active += 1;
       const fingerprint = marketFingerprint(market);
@@ -323,6 +325,7 @@ function marketRows(response, eventsById) {
         openDate: event?.openDate || null,
         inPlay: Boolean(event?.inPlay),
         gameOver: marketType === "line-market" ? item?.gameOver === true : Boolean(item?.gameOver),
+        recalled: item?.rt === true,
         isActive: item?.isActive !== false,
         status: vendorMarketStatus(item),
         providerTimestamp: item?.updatedAt ?? item?.t ?? null,
@@ -1699,9 +1702,27 @@ async function syncActiveLineMarketDiscovery() {
             { eids: eventIds, type: ["line-market"] },
             { priority: discoveryPriority(eventBatch[0]?.sportId, "active"), source: "line-market" },
           );
-          const markets = mergeDiscoveredMarkets(marketRows(response, eventsById)).filter(
+          const parsedMarkets = marketRows(response, eventsById);
+          const markets = mergeDiscoveredMarkets(parsedMarkets).filter(
             (market) => market.marketType === "line-market",
           );
+          const rawByMarketId = new Map(
+            (Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [])
+              .map((market) => [String(market?.id || ""), market]),
+          );
+          for (const market of parsedMarkets.filter((row) => row.marketType === "line-market")) {
+            writeLineMarketObservation("api", {
+              eventId: market.eventId,
+              marketId: market.marketId,
+              marketName: market.marketName,
+              isActive: market.isActive,
+              gameOver: market.gameOver,
+              status: market.status,
+              providerTimestamp: market.providerTimestamp,
+              action: market.isActive && !market.gameOver ? "vendor-active" : "vendor-deactivated",
+              rawApi: rawByMarketId.get(String(market.marketId)) ?? null,
+            });
+          }
           return { eventIds, markets };
         } catch (error) {
           result.failedRequests += 1;

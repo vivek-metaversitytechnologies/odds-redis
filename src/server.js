@@ -14,6 +14,7 @@ const frontendSocket = require("./services/frontendSocketService");
 const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const { closeBallByBallLog } = require("./utils/ballByBallFileLogger");
+const { closeLineMarketLog } = require("./utils/lineMarketFileLogger");
 const { closeMarketLimitsLog } = require("./utils/marketLimitsFileLogger");
 const { closeBetPauseCache } = require("./services/betPauseCacheService");
 const cronConfig = require("./config/cron");
@@ -106,6 +107,7 @@ async function startServer() {
       await closeSourceDb();
       await closeProviderLog();
       await closeBallByBallLog();
+      await closeLineMarketLog();
       await closeMarketLimitsLog();
       await logger.close();
     })();
@@ -125,6 +127,7 @@ if (require.main === module) {
       closeSourceDb(),
       closeProviderLog(),
       closeBallByBallLog(),
+      closeLineMarketLog(),
       closeMarketLimitsLog(),
       logger.close(),
     ]);
