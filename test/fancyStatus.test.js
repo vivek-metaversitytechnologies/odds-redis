@@ -88,7 +88,7 @@ test("vendor ticks do not update t_matchfancy.status", async (t) => {
   assert.equal(queries.length, 0);
 });
 
-test("a ball-by-ball inactive tick can resume, while abandonment is terminal", async (t) => {
+test("a ball-by-ball inactive socket tick blocks later socket and API re-adds", async (t) => {
   testing.reset();
   testing.setRedisClient(fakeRedis());
   testing.primeMarketCache([["4.17-BB", {
@@ -100,14 +100,8 @@ test("a ball-by-ball inactive tick can resume, while abandonment is terminal", a
   const inactive = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: false, r: [] }]);
   assert.equal(inactive.ballByBallTransitions[0].action, "redis.remove");
   const active = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: true, r: [] }]);
-  assert.equal(active.ballByBallTransitions[0].action, "redis.upsert");
-  assert.equal(active.payload.BallByBall.some((entry) => entry.mid === "4.17-BB"), true);
-  const abandoned = await redisStore.writeTicks([
-    { eid: 9001, mid: "4.17-BB", s: true, res: "Abandoned", r: [] },
-  ]);
-  assert.equal(abandoned.ballByBallTransitions[0].reason, "socket-abandoned");
-  const blocked = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: true, r: [] }]);
-  assert.equal(blocked.ballByBallTransitions[0].action, "redis.blocked");
+  assert.equal(active.ballByBallTransitions[0].action, "redis.blocked");
+  assert.equal(active.payload.BallByBall.some((entry) => entry.mid === "4.17-BB"), false);
   const api = await redisStore.reconcileFancyDefinitions([{
     eventId: 9001, marketId: "4.17-BB", marketName: "17.1 Ball Run", marketType: "ball-by-ball",
     isActive: true, gameOver: false,

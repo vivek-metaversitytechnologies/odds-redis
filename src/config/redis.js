@@ -591,7 +591,9 @@ function abandoned(item) {
 }
 
 function terminalBallByBallTick(item) {
-  return booleanOr(item?.go, false) || booleanOr(item?.rt, false) || abandoned(item);
+  // Socket inactivity is authoritative for a ball-by-ball market. Once the
+  // socket closes it, discovery/API responses must not resurrect it.
+  return !booleanOr(item?.s, true) || booleanOr(item?.go, false) || booleanOr(item?.rt, false) || abandoned(item);
 }
 
 function booleanOr(value, fallback = null) {
