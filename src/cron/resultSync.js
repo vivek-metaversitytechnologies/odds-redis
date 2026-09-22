@@ -513,8 +513,8 @@ async function persistFancyResult(connection, fancy, result) {
         true, "API", fancy.marketid],
     );
     await connection.execute(
-      "UPDATE t_matchfancy SET isactive=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
-      [false, false, false, false, fancy.marketid],
+      "UPDATE t_matchfancy SET isactive=?, status=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
+      [false, "SUSPENDED", false, false, false, fancy.marketid],
     );
     return true;
   }

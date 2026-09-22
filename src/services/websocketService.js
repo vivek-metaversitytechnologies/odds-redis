@@ -274,7 +274,6 @@ async function persist(items, receivedAtMs = Date.now()) {
   try {
     const result = await redisStore.writeTicks(items);
     const accepted = result.accepted || [];
-    void redisStore.queueFancyStatusWrites(result.fancyStatusUpdates);
     if (result.changed) state.persistedTickCount += accepted.length;
     else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;
@@ -588,7 +587,6 @@ async function stopSocket() {
   // Completing an active write may promote its single queued replacement.
   while (eventWriteChains.size) await Promise.allSettled([...eventWriteChains.values()]);
   await Promise.allSettled([...marketSettingsWrites]);
-  await redisStore.flushFancyStatusWrites();
 }
 
 function getSocketStatus() {

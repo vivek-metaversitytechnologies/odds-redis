@@ -2544,13 +2544,12 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   const serverSource = fs.readFileSync(path.join(__dirname, "../src/server.js"), "utf8");
   assert.match(serverSource, /setResultHandler\(handleSocketGameOver\)/);
   assert.match(resultSource, /UPDATE t_market SET isactive=\?,status=\?,issubscribed=\?/);
-  assert.match(resultSource, /UPDATE t_matchfancy SET isactive=\?,isshow=\?,is_show=\?,issubscribed=\?/);
+  assert.match(resultSource, /UPDATE t_matchfancy SET isactive=\?, status=\?, isshow=\?, is_show=\?, issubscribed=\?/);
   assert.doesNotMatch(resultSource, /UPDATE t_matchfancy SET status=\?/);
-  assert.doesNotMatch(resultSource, /UPDATE t_matchfancy SET isactive=\?,status=\?/);
   assert.doesNotMatch(eventSource, /UPDATE t_matchfancy[\s\S]*?status = \?, updatedon/);
   assert.doesNotMatch(resultSource, /\[false, "CLOSED", false, false, false,/);
   assert.doesNotMatch(eventSource, /\[false, false, false, false, "CLOSED",/);
-  assert.doesNotMatch(resultSource, /\[false, "SUSPENDED", false, false, false,/);
+  assert.match(resultSource, /\[false, "SUSPENDED", false, false, false,/);
   assert.doesNotMatch(eventSource, /\[false, false, false, false, "SUSPENDED",/);
   assert.match(resultSource, /redis\.removeMarkets/);
   assert.match(resultSource, /redis\.removeEvent/);

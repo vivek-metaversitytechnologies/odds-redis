@@ -7,7 +7,6 @@ const logger = require("../utils/logger");
 const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
 const { providerLimits, persistLimits } = require("../utils/marketLimits");
-const { retryDeadlock } = require("../utils/dbRetry");
 
 let client;
 let connecting;
@@ -20,9 +19,6 @@ const eventPayloadCache = new Map();
 const publicEventMetadata = new Map();
 const tickActivity = new Map();
 const eventLocks = new Map();
-// Last fancy status this process decided to store in t_matchfancy, so unchanged ticks never hit MySQL.
-const fancyStatusState = new Map();
-let fancyStatusChain = Promise.resolve();
 const eventMetadataLocks = new Map();
 const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
 const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 });
@@ -1303,7 +1299,6 @@ async function writeEventTicks(items) {
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
-  const fancyStatusUpdates = [];
   const { payload, changed, serialized } = await (async () => {
     let payload = eventPayloadCache.get(eventId);
     if (!payload) {
@@ -1335,8 +1330,6 @@ async function writeEventTicks(items) {
       if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
       if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
       const newEntries = shouldRemoveFromPayload(group, item, market) ? [] : entries;
-      const fancyStatus = newEntries.length ? nextFancyStatus(marketId, market, newEntries) : null;
-      if (fancyStatus) fancyStatusUpdates.push({ marketId, eventId, status: fancyStatus });
       const marketChanged =
         movedFromOtherGroup ||
         previousEntries.length !== newEntries.length ||
@@ -1373,46 +1366,8 @@ async function writeEventTicks(items) {
     accepted: acceptedRows.map(({ item }) => item),
     rejected,
     changed,
-    fancyStatusUpdates,
     persistedBytes: changed ? Buffer.byteLength(serialized) : 0,
   };
-}
-
-// t_matchfancy.status follows the vendor's suspended flag. Only rows loaded from t_matchfancy
-// are touched, and only when the status actually flips: SUSPENDED when every runner is
-// suspended, back to OPEN when a market this process (or a previous run) left SUSPENDED resumes.
-function nextFancyStatus(marketId, market, entries) {
-  if (market?.fancyid == null) return null;
-  const suspended = entries.every((entry) => (entry.gstatus ?? entry.status) === "SUSPENDED");
-  const current = fancyStatusState.get(marketId) ?? String(market.status ?? "").toUpperCase();
-  const next = suspended ? "SUSPENDED" : current === "SUSPENDED" ? "OPEN" : null;
-  if (!next || next === current) return null;
-  setBounded(fancyStatusState, marketId, next, CACHE_LIMIT);
-  return next;
-}
-
-async function writeFancyStatuses(updates) {
-  for (const { marketId, eventId, status } of updates) {
-    try {
-      await retryDeadlock(() =>
-        getSourcePool().query(
-          "UPDATE t_matchfancy SET status=?, updatedon=NOW() WHERE fancyid=? AND eventid=?",
-          [status, marketId, eventId],
-        ),
-      );
-    } catch (error) {
-      // Forget the decision so the next tick for this market retries the write.
-      if (fancyStatusState.get(marketId) === status) fancyStatusState.delete(marketId);
-      logger.error("[Redis] fancy status write failed", { marketId, eventId, status, error: error.message });
-    }
-  }
-}
-
-// Runs off the tick path so MySQL latency never delays Redis or frontend updates. A single
-// chain keeps a market's SUSPENDED and OPEN writes in the order they were decided.
-function queueFancyStatusWrites(updates) {
-  if (updates?.length) fancyStatusChain = fancyStatusChain.then(() => writeFancyStatuses(updates));
-  return fancyStatusChain;
 }
 
 async function writeTick(item) {
@@ -1677,8 +1632,6 @@ module.exports = {
   hasAuthoritativeOddsName,
   validMarketIdentifier,
   findMarkets,
-  queueFancyStatusWrites,
-  flushFancyStatusWrites: () => fancyStatusChain,
   invalidateMarkets,
   __testing__: {
     reconcileActiveMatchProjection,
@@ -1697,8 +1650,6 @@ module.exports = {
       runnerNameLoads.clear();
       eventPayloadCache.clear();
       eventLocks.clear();
-      fancyStatusState.clear();
-      fancyStatusChain = Promise.resolve();
     },
 
   },
