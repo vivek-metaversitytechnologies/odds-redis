@@ -97,29 +97,12 @@ test("a ball-by-ball inactive socket tick blocks later socket and API re-adds", 
   }]]);
   t.after(() => testing.reset());
 
-  const inactive = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: false, r: [] }]);
-  assert.equal(inactive.ballByBallTransitions[0].action, "redis.remove");
+  await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: false, r: [] }]);
   const active = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: true, r: [] }]);
-  assert.equal(active.ballByBallTransitions[0].action, "redis.blocked");
   assert.equal(active.payload.BallByBall.some((entry) => entry.mid === "4.17-BB"), false);
   const api = await redisStore.reconcileFancyDefinitions([{
     eventId: 9001, marketId: "4.17-BB", marketName: "17.1 Ball Run", marketType: "ball-by-ball",
     isActive: true, gameOver: false,
   }]);
   assert.equal(api.added, 0);
-});
-
-test("line-market socket ticks expose Redis transitions for diagnostic logging", async (t) => {
-  testing.reset();
-  testing.setRedisClient(fakeRedis());
-  testing.primeMarketCache([["1.17", {
-    marketid: "1.17", eventid: 9001, marketname: "17 Over Runs Line", mtype: "line-market", isactive: true,
-  }]]);
-  t.after(() => testing.reset());
-
-  const inactive = await redisStore.writeTicks([{ eid: 9001, mid: "1.17", s: false, r: [] }]);
-  assert.equal(inactive.lineMarketTransitions[0].action, "redis.remove");
-  assert.equal(inactive.lineMarketTransitions[0].reason, "socket-inactive");
-  const active = await redisStore.writeTicks([{ eid: 9001, mid: "1.17", s: true, r: [] }]);
-  assert.equal(active.lineMarketTransitions[0].action, "redis.upsert");
 });

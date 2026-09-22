@@ -1339,8 +1339,6 @@ async function writeEventTicks(items) {
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
-  const ballByBallTransitions = [];
-  const lineMarketTransitions = [];
   const { payload, changed, serialized } = await (async () => {
     let payload = eventPayloadCache.get(eventId);
     if (!payload) {
@@ -1374,48 +1372,6 @@ async function writeEventTicks(items) {
       const removeFromPayload = shouldRemoveFromPayload(group, item, market);
       const blockedBallByBall = group === "BallByBall" && terminalBallByBallIds.has(marketId) && !removeFromPayload;
       const newEntries = removeFromPayload || blockedBallByBall ? [] : entries;
-      if (group === "BallByBall") {
-        const entry = entries[0] || {};
-        ballByBallTransitions.push({
-          eventId: String(item.eid),
-          marketId,
-          ballLine: entry.ballLine ?? null,
-          status: entry.gstatus ?? null,
-          backPrice: entry.b1 ?? null,
-          layPrice: entry.l1 ?? null,
-          action: removeFromPayload ? "redis.remove" : blockedBallByBall ? "redis.blocked" : "redis.upsert",
-          reason: removeFromPayload
-            ? booleanOr(item.go, false)
-              ? "socket-game-over"
-              : abandoned(item)
-                ? "socket-abandoned"
-                : booleanOr(item.rt, false)
-                  ? "socket-recalled"
-                  : "socket-inactive"
-            : blockedBallByBall
-              ? "terminal-market"
-            : null,
-          socketActive: booleanOr(item.s, true),
-          gameOver: booleanOr(item.go, false),
-          providerTimestamp: Number.isFinite(Number(item.t)) ? Number(item.t) : null,
-          rawSocket: item,
-        });
-      }
-      if (group === "LineMarket") {
-        const entry = entries[0] || {};
-        lineMarketTransitions.push({
-          eventId: String(item.eid),
-          marketId,
-          marketName: entry.Name ?? null,
-          status: entry.status ?? null,
-          action: removeFromPayload ? "redis.remove" : "redis.upsert",
-          reason: removeFromPayload ? booleanOr(item.go, false) ? "socket-game-over" : "socket-inactive" : null,
-          socketActive: booleanOr(item.s, true),
-          gameOver: booleanOr(item.go, false),
-          providerTimestamp: Number.isFinite(Number(item.t)) ? Number(item.t) : null,
-          rawSocket: item,
-        });
-      }
       const marketChanged =
         movedFromOtherGroup ||
         previousEntries.length !== newEntries.length ||
@@ -1452,8 +1408,6 @@ async function writeEventTicks(items) {
     accepted: acceptedRows.map(({ item }) => item),
     rejected,
     changed,
-    ballByBallTransitions,
-    lineMarketTransitions,
     persistedBytes: changed ? Buffer.byteLength(serialized) : 0,
   };
 }

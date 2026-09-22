@@ -42,23 +42,6 @@ Per-market provider, queue, Redis, and frontend-emit timings are logged when
 Pretty-printed daily files are written to `logs/provider/provider-http-YYYY-MM-DD.log`.
 Logging uses Winston with daily rotation, size limits, and retention controls.
 
-Ball-by-ball API discovery and Socket.IO tick observations are written together per ball line,
-for example `logs/ball-by-ball/ball-line-17.2-YYYY-MM-DD.log`. Each record has a monotonically
-increasing `sequence`, `source` (`api` or `socket`), and timestamps, so one file contains the
-complete observation order for that ball line. This diagnostic log is always enabled and rotates
-at 25 MB with seven days of retention.
-Each API observation includes `rawApi`; each socket observation includes `rawSocket`.
-
-For example, inspect one ball line in chronological order with:
-
-```bash
-tail -f logs/ball-by-ball/ball-line-17.2-*.log
-```
-
-Line-market API definitions and socket ticks are recorded per market in readable files such as
-`logs/line-market/line-market-2nd-innings-25-overs-line-1.234567-YYYY-MM-DD.log`, with raw
-`rawApi` or `rawSocket` payloads and a chronological `sequence`.
-
 ## Runtime flow
 
 - On startup and according to `MARKET_SYNC_CRON`, query active `t_market` rows.

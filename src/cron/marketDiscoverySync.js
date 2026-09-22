@@ -9,8 +9,6 @@ const {
 } = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
-const { writeBallByBallLog, writeBallByBallObservation } = require("../utils/ballByBallFileLogger");
-const { writeLineMarketObservation } = require("../utils/lineMarketFileLogger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
@@ -1353,7 +1351,6 @@ async function syncActiveBallByBallDiscovery() {
       reason: "already-running",
       runningMs: ballByBallStartedAt ? Date.now() - ballByBallStartedAt : null,
     };
-    writeBallByBallLog("cycle.skipped", skipped);
     return skipped;
   }
   ballByBallRunning = true;
@@ -1361,21 +1358,10 @@ async function syncActiveBallByBallDiscovery() {
   ballByBallStartedAt = startedAt;
   ballByBallCycleSequence += 1;
   const cycleId = `${process.pid}-${ballByBallCycleSequence}`;
-  writeBallByBallLog("cycle.started", { cycleId, pid: process.pid });
   try {
     const events = (await fetchActiveEventsForMarketDiscovery("active")).filter(
       (event) => Number(event.sportId) === cricketSportId(),
     );
-    writeBallByBallLog("events.selected", {
-      cycleId,
-      count: events.length,
-      events: events.map((event) => ({
-        eventId: event.eventId,
-        eventName: event.eventName,
-        openDate: event.openDate,
-        inPlay: event.inPlay,
-      })),
-    });
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const discovered = [];
     let failedRequests = 0;
@@ -1388,7 +1374,6 @@ async function syncActiveBallByBallDiscovery() {
     for (const eventBatch of chunks(events, eventBatchSize)) {
       const eventIds = eventBatch.map((event) => Number(event.eventId));
       const requestStartedAt = Date.now();
-      writeBallByBallLog("vendor.request.started", { cycleId, eventIds });
       try {
         const response = await provider.markets(
           { eids: eventIds, type: ["ball-by-ball"] },
@@ -1400,23 +1385,6 @@ async function syncActiveBallByBallDiscovery() {
         const rawRows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
         const parsedRows = marketRows(response, eventsById);
         discovered.push(...parsedRows);
-        const rawByMarketId = new Map(rawRows.map((market) => [String(market?.id || ""), market]));
-        for (const market of parsedRows.filter((row) => row.marketType === "ball-by-ball")) {
-          writeBallByBallObservation("api", {
-            cycleId,
-            eventId: market.eventId,
-            marketId: market.marketId,
-            ballLine: market.ballLine,
-            marketName: market.marketName,
-            status: market.status,
-            providerTimestamp: market.providerTimestamp,
-            isActive: market.isActive,
-            gameOver: market.gameOver,
-            action: market.isActive && !market.gameOver ? "vendor-active" : "vendor-deactivated",
-            reason: market.gameOver ? "vendor-game-over" : market.isActive ? null : "vendor-inactive",
-            rawApi: rawByMarketId.get(String(market.marketId)) ?? null,
-          });
-        }
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);
         const dataAge = providerDataAge(activeRows);
         const dataAgeWarningMs = integer("BALL_BY_BALL_DATA_AGE_WARNING_MS", 5000, { min: 1000 });
@@ -1452,17 +1420,8 @@ async function syncActiveBallByBallDiscovery() {
           activeMarketsTruncated: activeRows.length > logMarketLimit,
         };
         requestSummaries.push(summary);
-        writeBallByBallLog("vendor.request.completed", summary);
       } catch (error) {
         failedRequests += 1;
-        writeBallByBallLog("vendor.request.failed", {
-          cycleId,
-          eventIds,
-          durationMs: Date.now() - requestStartedAt,
-          error: error.message,
-          name: error.name,
-          statusCode: error.statusCode ?? null,
-        });
         logger.error("[BallByBallDiscovery] vendor request failed", {
           eventIds,
           error: error.message,
@@ -1500,47 +1459,18 @@ async function syncActiveBallByBallDiscovery() {
       explicitlyDeactivatedIds.push(...delta.explicitlyDeactivated);
       activeMarkets += delta.active;
       unchangedMarkets += delta.unchanged;
-      writeBallByBallLog("snapshot.delta", {
-        cycleId,
-        eventId: event.eventId,
-        active: delta.active,
-        changed: delta.changed.length,
-        explicitlyDeactivated: delta.explicitlyDeactivated,
-        unchanged: delta.unchanged,
-      });
     }
 
-    const persistenceStartedAt = Date.now();
     const persisted = changedFancies.length
       ? await upsertFancies(changedFancies)
       : { inserted: 0, updated: 0, fancyIds: [], deactivatedFancyIds: [] };
-    writeBallByBallLog("database.persisted", {
-      cycleId,
-      durationMs: Date.now() - persistenceStartedAt,
-      received: fancies.length,
-      active: activeMarkets,
-      changed: changedFancies.length,
-      unchanged: unchangedMarkets,
-      explicitlyDeactivated: explicitlyDeactivatedIds.length,
-      inserted: persisted.inserted,
-      updated: persisted.updated,
-      marketIds: persisted.fancyIds.slice(0, logMarketLimit),
-      marketIdsTruncated: persisted.fancyIds.length > logMarketLimit,
-    });
     if (persisted.fancyIds.length) redisStore.invalidateMarkets(persisted.fancyIds);
-    const redisStartedAt = Date.now();
     const redisDefinitions = changedFancies.length
       ? await redisStore.reconcileFancyDefinitions(changedFancies)
       : { events: 0, added: 0, removed: 0, changedEventIds: [] };
-    const publishResults = await Promise.allSettled(
+    await Promise.allSettled(
       (redisDefinitions.changedEventIds || []).map((eventId) => publishEventSnapshot(eventId)),
     );
-    writeBallByBallLog("redis.reconciled", {
-      cycleId,
-      durationMs: Date.now() - redisStartedAt,
-      ...redisDefinitions,
-      publishFailures: publishResults.filter((result) => result.status === "rejected").length,
-    });
     const subscribedIds = new Set(websocket.getSubscribedMarketIds().map(String));
     const pendingSubscriptions = changedFancies
       .filter((market) => market.isActive && !market.gameOver)
@@ -1554,31 +1484,13 @@ async function syncActiveBallByBallDiscovery() {
     // Keep immediate subscriptions sequential as well. The normal five-second
     // reconciler remains the retry/safety net for any failed batch.
     for (const batch of chunks(pendingSubscriptions, subscriptionBatchSize)) {
-      const subscriptionStartedAt = Date.now();
-      writeBallByBallLog("subscription.batch.started", { cycleId, marketIds: batch });
       try {
         const acknowledgement = await subscribeMarkets(batch, { scheduleRetry: false });
         newlySubscribed += acknowledgement.subscribed.length;
         locallyAttached += acknowledgement.attached.length;
         providerSkipped += acknowledgement.skipped.length;
-        writeBallByBallLog("subscription.batch.completed", {
-          cycleId,
-          durationMs: Date.now() - subscriptionStartedAt,
-          requested: batch,
-          subscribed: acknowledgement.subscribed,
-          skipped: acknowledgement.skipped,
-          attached: acknowledgement.attached,
-        });
       } catch (error) {
         failedSubscriptionBatches += 1;
-        writeBallByBallLog("subscription.batch.failed", {
-          cycleId,
-          durationMs: Date.now() - subscriptionStartedAt,
-          marketIds: batch,
-          error: error.message,
-          name: error.name,
-          statusCode: error.statusCode ?? null,
-        });
         logger.error("[BallByBallDiscovery] immediate subscription failed", {
           marketIds: batch,
           error: error.message,
@@ -1614,18 +1526,10 @@ async function syncActiveBallByBallDiscovery() {
       })),
       durationMs: Date.now() - startedAt,
     };
-    writeBallByBallLog("cycle.completed", result);
     state.ballByBall = result;
     logger.info("[BallByBallDiscovery] completed", result);
     return result;
   } catch (error) {
-    writeBallByBallLog("cycle.failed", {
-      cycleId,
-      durationMs: Date.now() - startedAt,
-      error: error.message,
-      name: error.name,
-      statusCode: error.statusCode ?? null,
-    });
     throw error;
   } finally {
     ballByBallRunning = false;
@@ -1706,23 +1610,6 @@ async function syncActiveLineMarketDiscovery() {
           const markets = mergeDiscoveredMarkets(parsedMarkets).filter(
             (market) => market.marketType === "line-market",
           );
-          const rawByMarketId = new Map(
-            (Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [])
-              .map((market) => [String(market?.id || ""), market]),
-          );
-          for (const market of parsedMarkets.filter((row) => row.marketType === "line-market")) {
-            writeLineMarketObservation("api", {
-              eventId: market.eventId,
-              marketId: market.marketId,
-              marketName: market.marketName,
-              isActive: market.isActive,
-              gameOver: market.gameOver,
-              status: market.status,
-              providerTimestamp: market.providerTimestamp,
-              action: market.isActive && !market.gameOver ? "vendor-active" : "vendor-deactivated",
-              rawApi: rawByMarketId.get(String(market.marketId)) ?? null,
-            });
-          }
           return { eventIds, markets };
         } catch (error) {
           result.failedRequests += 1;
