@@ -10,6 +10,7 @@ const testing = redisStore.__testing__;
 
 function fakeRedis() {
   const store = new Map();
+  const sets = new Map();
   return {
     isOpen: true,
     async get(key) {
@@ -18,6 +19,18 @@ function fakeRedis() {
     async set(key, value) {
       store.set(key, value);
       return "OK";
+    },
+    async sAdd(key, values) {
+      const members = sets.get(key) || new Set();
+      for (const value of values) members.add(String(value));
+      sets.set(key, members);
+      return values.length;
+    },
+    async sMembers(key) {
+      return [...(sets.get(key) || [])];
+    },
+    async expire() {
+      return 1;
     },
     multi() {
       const ops = [];
@@ -73,4 +86,25 @@ test("vendor ticks do not update t_matchfancy.status", async (t) => {
 
   assert.equal(result.accepted.length, 1);
   assert.equal(queries.length, 0);
+});
+
+test("a ball-by-ball socket inactive tick blocks later socket and API re-adds", async (t) => {
+  testing.reset();
+  testing.setRedisClient(fakeRedis());
+  testing.primeMarketCache([["4.17-BB", {
+    marketid: "4.17-BB", fancyid: "4.17-BB", eventid: 9001, marketname: "17.1 Ball Run",
+    mtype: "ball-by-ball", status: "OPEN", isactive: true,
+  }]]);
+  t.after(() => testing.reset());
+
+  const inactive = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: false, r: [] }]);
+  assert.equal(inactive.ballByBallTransitions[0].action, "redis.remove");
+  const active = await redisStore.writeTicks([{ eid: 9001, mid: "4.17-BB", s: true, r: [] }]);
+  assert.equal(active.ballByBallTransitions[0].action, "redis.blocked");
+  assert.equal(active.payload.BallByBall.some((entry) => entry.mid === "4.17-BB"), false);
+  const api = await redisStore.reconcileFancyDefinitions([{
+    eventId: 9001, marketId: "4.17-BB", marketName: "17.1 Ball Run", marketType: "ball-by-ball",
+    isActive: true, gameOver: false,
+  }]);
+  assert.equal(api.added, 0);
 });

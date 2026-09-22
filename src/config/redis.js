@@ -25,6 +25,7 @@ const EVENT_TTL_SECONDS = integer("REDIS_EVENT_TTL_SECONDS", 86400, { min: 60 })
 const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 172800, { min: 300 });
 const SCORE_TTL_SECONDS = integer("REDIS_SCORE_TTL_SECONDS", 86400, { min: 60 });
 const ACTIVE_MATCH_TTL_SECONDS = integer("REDIS_ACTIVE_MATCH_TTL_SECONDS", 172800, { min: 300 });
+const CLOSED_BALL_BY_BALL_KEY_PREFIX = "Closed-BallByBall-Rs:";
 
 const PAYLOAD_GROUPS = [
   "Odds",
@@ -576,6 +577,15 @@ function ballByBallMetadata(value) {
   return { ballLine: Number(match[1]), name: match[2].trim() || null };
 }
 
+function closedBallByBallKey(eventId) {
+  return `${CLOSED_BALL_BY_BALL_KEY_PREFIX}${eventId}`;
+}
+
+async function closedBallByBallMarketIds(redis, eventId) {
+  if (typeof redis.sMembers !== "function") return new Set();
+  return new Set(await redis.sMembers(closedBallByBallKey(eventId)));
+}
+
 function booleanOr(value, fallback = null) {
   if (value == null) return fallback;
   if (Buffer.isBuffer(value)) return value.length ? value[0] !== 0 : fallback;
@@ -862,11 +872,13 @@ async function reconcileFancyDefinitions(markets) {
             }
           }
         }
+        const closedBallByBallIds = await closedBallByBallMarketIds(redis, eventId);
         let changed = false;
         for (const { market, group } of definitions) {
           const marketId = String(market.marketId);
           const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
-          const active = market.isActive && !market.gameOver;
+          const active = market.isActive && !market.gameOver &&
+            !(group === "BallByBall" && closedBallByBallIds.has(marketId));
           if (active && index < 0) {
             payload[group].push(fancyDefinitionEntry(market));
             added += 1;
@@ -1294,6 +1306,15 @@ async function writeEventTicks(items) {
   rejected.push(...marketRows.filter(({ item }) => !acceptedItems.has(item)).map(({ item }) => item));
   if (!acceptedRows.length) return { payload: false, accepted: [], rejected };
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
+  const newlyClosedBallByBallIds = acceptedRows
+    .filter(({ item, market }) => payloadGroup(item, market) === "BallByBall" && !booleanOr(item.s, true))
+    .map(({ item }) => String(item.mid));
+  if (newlyClosedBallByBallIds.length) {
+    const closedKey = closedBallByBallKey(eventId);
+    await redis.sAdd(closedKey, newlyClosedBallByBallIds);
+    await redis.expire(closedKey, EVENT_TTL_SECONDS);
+  }
+  const closedBallByBallIds = await closedBallByBallMarketIds(redis, eventId);
   await Promise.allSettled(
     acceptedRows
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
@@ -1331,7 +1352,8 @@ async function writeEventTicks(items) {
       if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
       if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
       const removeFromPayload = shouldRemoveFromPayload(group, item, market);
-      const newEntries = removeFromPayload ? [] : entries;
+      const blockedBallByBall = group === "BallByBall" && closedBallByBallIds.has(marketId) && !removeFromPayload;
+      const newEntries = removeFromPayload || blockedBallByBall ? [] : entries;
       if (group === "BallByBall") {
         const entry = entries[0] || {};
         ballByBallTransitions.push({
@@ -1341,11 +1363,13 @@ async function writeEventTicks(items) {
           status: entry.gstatus ?? null,
           backPrice: entry.b1 ?? null,
           layPrice: entry.l1 ?? null,
-          action: removeFromPayload ? "redis.remove" : "redis.upsert",
+          action: removeFromPayload ? "redis.remove" : blockedBallByBall ? "redis.blocked" : "redis.upsert",
           reason: removeFromPayload
             ? booleanOr(item.go, false)
               ? "socket-game-over"
               : "socket-inactive"
+            : blockedBallByBall
+              ? "previous-socket-inactive"
             : null,
           socketActive: booleanOr(item.s, true),
           gameOver: booleanOr(item.go, false),
@@ -1580,6 +1604,7 @@ async function removeEvent(eventId) {
     const keys = [
       `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
       `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
+      closedBallByBallKey(eventKey),
     ];
     const event = publicEventMetadata.get(eventKey);
     const transaction = redis.multi().del(keys);
