@@ -286,8 +286,32 @@ async function retireSocketMarkets(connection, rows, regular, closedRows) {
   }
 }
 
-async function handleSocketGameOver(marketIds) {
-  const ids = [...new Set((marketIds || []).map(String).map((id) => id.trim()).filter(redis.validMarketIdentifier))]
+function socketLineResultRows(items, fancies) {
+  const ticks = new Map((items || [])
+    .filter((item) => item && typeof item === "object" && item.go === true)
+    .map((item) => [String(item.mid || "").trim(), item]));
+  return (fancies || []).flatMap((fancy) => {
+    if (String(fancy.mtype || "").toLowerCase() !== "line-market") return [];
+    const tick = ticks.get(String(fancy.marketid));
+    const value = tick?.res == null ? "" : String(tick.res).trim();
+    if (!value) return [];
+    const isAbandoned = value.toLowerCase() === "abandoned";
+    if (!isAbandoned && fancyResultValue(fancy.marketid, value, fancy.mtype) == null) return [];
+    return [{
+      marketId: String(fancy.marketid),
+      marketType: "line-market",
+      result: value,
+      isTie: false,
+      isAbandoned,
+    }];
+  });
+}
+
+async function handleSocketGameOver(marketItems) {
+  const items = marketItems || [];
+  const ids = [...new Set(items
+    .map((item) => String(item && typeof item === "object" ? item.mid : item).trim())
+    .filter(redis.validMarketIdentifier))]
     .sort((left, right) => left.localeCompare(right));
   if (!ids.length) return { markets: 0, events: 0, removed: 0 };
   const connection = await getSourcePool().getConnection();
@@ -304,7 +328,8 @@ async function handleSocketGameOver(marketIds) {
         `SELECT id,marketid,eventid,marketname FROM t_market WHERE marketid IN (${placeholders})`, batch,
       );
       const [fancyRows] = await connection.query(
-        `SELECT id,fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy
+        `SELECT id,fancyid AS marketid,eventid,name AS marketname,oddstype,mtype,matchname,sportid
+         FROM t_matchfancy
          WHERE fancyid IN (${placeholders})`, batch,
       );
       markets.push(...regularRows);
@@ -346,7 +371,8 @@ async function handleSocketGameOver(marketIds) {
         [eventId, true],
       );
       const [eventFancies] = await connection.query(
-        "SELECT id,fancyid AS marketid,eventid,name AS marketname FROM t_matchfancy WHERE eventid=? AND isactive=? ORDER BY id",
+        `SELECT id,fancyid AS marketid,eventid,name AS marketname,oddstype,mtype,matchname,sportid
+         FROM t_matchfancy WHERE eventid=? AND isactive=? ORDER BY id`,
         [eventId, true],
       );
       markets.push(...eventMarkets);
@@ -369,7 +395,62 @@ async function handleSocketGameOver(marketIds) {
     logger.error("[ResultSync] partial socket cleanup publish failed", { error: error.message });
   }
   if (databaseError) throw databaseError;
-  return result;
+  const directResults = socketLineResultRows(items, closedRows);
+  let directSettlement = { settled: [], rejectedResults: 0, persistenceFailures: 0 };
+  if (directResults.length) {
+    try {
+      directSettlement = await applyResults(directResults, { markets: [], fancies: closedRows });
+      logger.info("[ResultSync] socket line results processed", {
+        received: directResults.length,
+        settled: directSettlement.settled.length,
+        rejected: directSettlement.rejectedResults,
+        persistenceFailures: directSettlement.persistenceFailures,
+      });
+    } catch (error) {
+      // The normal result poller remains the fallback for any direct settlement failure.
+      logger.error("[ResultSync] socket line result settlement failed; API polling retained", {
+        marketIds: directResults.map((row) => row.marketId),
+        error: error.message,
+      });
+    }
+  }
+  const lineMarketIds = [...new Set(closedRows
+    .filter((row) => String(row.mtype || "").toLowerCase() === "line-market")
+    .map((row) => String(row.marketid)))];
+  const directlySettled = new Set(directSettlement.settled);
+  const apiFallbackIds = lineMarketIds.filter((id) => !directlySettled.has(id));
+  let apiSettlement = { settled: [], rejectedResults: 0, persistenceFailures: 0 };
+  if (apiFallbackIds.length) {
+    try {
+      const response = await provider.results(
+        { mids: apiFallbackIds },
+        { priority: 0, source: "socket-line-result" },
+      );
+      const fallbackIds = new Set(apiFallbackIds);
+      const results = responseRows(response).filter((row) => fallbackIds.has(row.marketId));
+      if (results.length) apiSettlement = await applyResults(results, { markets: [], fancies: closedRows });
+      logger.info("[ResultSync] socket line result API fallback processed", {
+        requested: apiFallbackIds.length,
+        received: results.length,
+        settled: apiSettlement.settled.length,
+      });
+    } catch (error) {
+      // The scheduled result poller keeps retrying inactive, unsettled line markets.
+      logger.error("[ResultSync] socket line result API fallback failed; scheduled polling retained", {
+        marketIds: apiFallbackIds,
+        error: error.message,
+      });
+    }
+  }
+  const settled = [...new Set([...directSettlement.settled, ...apiSettlement.settled])];
+  await pendingResults.remove(settled);
+  return {
+    ...result,
+    directResults: directResults.length,
+    directlySettled: directSettlement.settled.length,
+    apiFallbackRequested: apiFallbackIds.length,
+    apiFallbackSettled: apiSettlement.settled.length,
+  };
 }
 
 async function publishSocketRetirement(closedRows, terminalEvents) {
@@ -935,6 +1016,7 @@ module.exports = {
   settleWithConcurrency,
   advanceCandidateCursors,
   isEventTerminalMarketName,
+  socketLineResultRows,
   loadCandidates,
   handleSocketGameOver,
   applyResults,

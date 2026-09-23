@@ -114,6 +114,7 @@ const {
   prioritizeResultCandidates,
   allocateResultCandidates,
   settleWithConcurrency: settleResultsWithConcurrency,
+  socketLineResultRows,
   advanceCandidateCursors,
   __testing__: resultTesting,
 } = require("../src/cron/resultSync");
@@ -337,6 +338,7 @@ test("startup preflight accepts complete infrastructure configuration", () => {
 
 function createFakeRedisClient({ gateFirstGet = false } = {}) {
   const store = new Map();
+  const sets = new Map();
   let firstGetGated = gateFirstGet;
   let releaseGate = () => {};
   const gate = gateFirstGet
@@ -362,6 +364,24 @@ function createFakeRedisClient({ gateFirstGet = false } = {}) {
     },
     async mGet(keys) {
       return keys.map((key) => (store.has(key) ? store.get(key) : null));
+    },
+    async sAdd(key, values) {
+      const members = sets.get(key) || new Set();
+      for (const value of values) members.add(String(value));
+      sets.set(key, members);
+      return values.length;
+    },
+    async sRem(key, values) {
+      const members = sets.get(key) || new Set();
+      let removed = 0;
+      for (const value of values) removed += members.delete(String(value)) ? 1 : 0;
+      return removed;
+    },
+    async sMembers(key) {
+      return [...(sets.get(key) || [])];
+    },
+    async expire() {
+      return 1;
     },
     multi() {
       const ops = [];
@@ -1981,6 +2001,45 @@ test("line discovery applies suspension to cached prices and socket ticks can re
   } finally { redisTesting.reset(); }
 });
 
+test("line markets cannot be restored by discovery after go true", async () => {
+  const { client, store } = createFakeRedisClient();
+  redisTesting.reset();
+  redisTesting.setRedisClient(client);
+  const market = { marketId: "1.9905", eventId: 9905, marketName: "Runs Line", marketType: "line-market", isActive: true };
+  redisTesting.primeMarketCache([[
+    market.marketId,
+    { marketid: market.marketId, eventid: 9905, marketname: market.marketName, mtype: "line-market", isactive: true },
+  ]]);
+  try {
+    await writeTicks([{ eid: 9905, mid: market.marketId, s: true, go: false, r: [] }]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9905")).LineMarket.length, 1);
+    await writeTicks([{ eid: 9905, mid: market.marketId, s: true, go: true, res: "128", r: [] }]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9905")).LineMarket.length, 0);
+    await reconcileRegularDefinitions([market]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9905")).LineMarket.length, 0);
+    await writeTicks([{ eid: 9905, mid: market.marketId, s: true, go: false, r: [] }]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9905")).LineMarket.length, 0);
+  } finally { redisTesting.reset(); }
+});
+
+test("s false keeps a line market hidden from discovery until a later s true tick", async () => {
+  const { client, store } = createFakeRedisClient();
+  redisTesting.reset();
+  redisTesting.setRedisClient(client);
+  const market = { marketId: "1.9906", eventId: 9906, marketName: "Runs Line", marketType: "line-market", isActive: true };
+  redisTesting.primeMarketCache([[
+    market.marketId,
+    { marketid: market.marketId, eventid: 9906, marketname: market.marketName, mtype: "line-market", isactive: true },
+  ]]);
+  try {
+    await writeTicks([{ eid: 9906, mid: market.marketId, s: false, go: false, r: [] }]);
+    await reconcileRegularDefinitions([market]);
+    assert.equal(store.has("Data-Rs:9906"), false);
+    await writeTicks([{ eid: 9906, mid: market.marketId, s: true, go: false, r: [] }]);
+    assert.equal(JSON.parse(store.get("Data-Rs:9906")).LineMarket.length, 1);
+  } finally { redisTesting.reset(); }
+});
+
 test("odds runners use cached provider selection names", () => {
   const names = new Map([
     ["11", "India"],
@@ -2375,6 +2434,35 @@ test("fancy settlement values follow the Java-compatible contract", () => {
   assert.equal(fancyResultValue("4.1-F3", "back"), 1);
   assert.equal(fancyResultValue("1.261062382", "15316", "line-market"), 15316);
   assert.equal(fancyResultValue("4.1-F2", "Abandoned"), null);
+});
+
+test("socket res values become direct line-market results only when usable", () => {
+  const fancies = [
+    { marketid: "1.100", mtype: "line-market" },
+    { marketid: "1.200", mtype: "line-market" },
+    { marketid: "4.1-F2", mtype: "session" },
+  ];
+  assert.deepEqual(socketLineResultRows([
+    { mid: "1.100", go: true, res: "128" },
+    { mid: "1.200", go: true, res: "" },
+    { mid: "4.1-F2", go: true, res: "87" },
+  ], fancies), [{
+    marketId: "1.100",
+    marketType: "line-market",
+    result: "128",
+    isTie: false,
+    isAbandoned: false,
+  }]);
+  assert.deepEqual(socketLineResultRows(
+    [{ mid: "1.100", go: true, res: "Abandoned" }],
+    fancies,
+  )[0], {
+    marketId: "1.100",
+    marketType: "line-market",
+    result: "Abandoned",
+    isTie: false,
+    isAbandoned: true,
+  });
 });
 
 test("provider acknowledgement attaches explicitly skipped existing registrations", () => {

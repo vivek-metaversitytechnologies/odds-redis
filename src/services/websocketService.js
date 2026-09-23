@@ -269,7 +269,7 @@ function logSocketTiming(details) {
 }
 
 async function persist(items, receivedAtMs = Date.now()) {
-  const resultedMarketIds = new Set();
+  const resultTicks = new Map();
   const writeStartedAt = Date.now();
   try {
     const result = await redisStore.writeTicks(items);
@@ -295,7 +295,7 @@ async function persist(items, receivedAtMs = Date.now()) {
           redisWriteMs: lastWriteCompletedAt - writeStartedAt,
           batchMarkets: accepted.length,
         });
-        if (isResultTick(item)) resultedMarketIds.add(String(item.mid));
+        if (isResultTick(item)) resultTicks.set(String(item.mid), item);
       }
       if (result.changed) {
         const eventId = String(accepted[0].eid);
@@ -320,12 +320,14 @@ async function persist(items, receivedAtMs = Date.now()) {
     state.failedTickCount += items.length;
     logger.error("[ProviderWS] Redis batch write failed", { error: error.message, ticks: items.length });
   }
-  if (resultedMarketIds.size) {
+  if (resultTicks.size) {
     try {
-      await resultHandler([...resultedMarketIds]);
+      // Preserve the complete terminal tick so result settlement can use `res`
+      // immediately instead of waiting for the provider results endpoint.
+      await resultHandler([...resultTicks.values()]);
     } catch (error) {
       logger.error("[ProviderWS] game-over cleanup handler failed", {
-        marketIds: [...resultedMarketIds],
+        marketIds: [...resultTicks.keys()],
         error: error.message,
       });
     }

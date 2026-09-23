@@ -26,6 +26,8 @@ const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 1
 const SCORE_TTL_SECONDS = integer("REDIS_SCORE_TTL_SECONDS", 86400, { min: 60 });
 const ACTIVE_MATCH_TTL_SECONDS = integer("REDIS_ACTIVE_MATCH_TTL_SECONDS", 172800, { min: 300 });
 const TERMINAL_BALL_BY_BALL_KEY_PREFIX = "Terminal-BallByBall-Rs:";
+const TERMINAL_LINE_MARKET_KEY_PREFIX = "Terminal-LineMarket-Rs:";
+const UNAVAILABLE_LINE_MARKET_KEY_PREFIX = "Unavailable-LineMarket-Rs:";
 
 const PAYLOAD_GROUPS = [
   "Odds",
@@ -586,6 +588,32 @@ async function terminalBallByBallMarketIds(redis, eventId) {
   return new Set(await redis.sMembers(terminalBallByBallKey(eventId)));
 }
 
+function terminalLineMarketKey(eventId) {
+  return `${TERMINAL_LINE_MARKET_KEY_PREFIX}${eventId}`;
+}
+
+function unavailableLineMarketKey(eventId) {
+  return `${UNAVAILABLE_LINE_MARKET_KEY_PREFIX}${eventId}`;
+}
+
+async function lineMarketVisibility(redis, eventId) {
+  if (typeof redis.sMembers !== "function") return { terminal: new Set(), unavailable: new Set() };
+  const [terminal, unavailable] = await Promise.all([
+    redis.sMembers(terminalLineMarketKey(eventId)),
+    redis.sMembers(unavailableLineMarketKey(eventId)),
+  ]);
+  return { terminal: new Set(terminal), unavailable: new Set(unavailable) };
+}
+
+function explicitActivity(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number" && [0, 1].includes(value)) return value === 1;
+  if (typeof value === "string" && ["0", "1", "false", "true"].includes(value.toLowerCase())) {
+    return booleanOr(value, null);
+  }
+  return null;
+}
+
 function abandoned(item) {
   return String(item?.res ?? "").trim().toLowerCase() === "abandoned";
 }
@@ -1065,13 +1093,19 @@ async function reconcileRegularDefinitions(markets) {
             }
           }
         }
+        const lineVisibility = await lineMarketVisibility(redis, eventId);
         let changed = false;
         for (const market of definitions) {
-          const active = market.isActive && !market.gameOver;
+          const marketId = String(market.marketId);
+          const lineMarket = market.marketType === "line-market";
+          const blockedLineMarket = lineMarket && (
+            lineVisibility.terminal.has(marketId) || lineVisibility.unavailable.has(marketId)
+          );
+          const active = market.isActive && !market.gameOver && !blockedLineMarket;
           if (!active) {
             for (const group of PAYLOAD_GROUPS) {
               const filtered = payload[group].filter(
-                (entry) => entryMarketId(entry) !== String(market.marketId),
+                (entry) => entryMarketId(entry) !== marketId,
               );
               if (filtered.length !== payload[group].length) {
                 removed += 1;
@@ -1083,7 +1117,6 @@ async function reconcileRegularDefinitions(markets) {
           }
           if (payloadHasMarket(payload, market.marketId)) {
             // Replace the placeholder once runner names for this exact BM2 market are available.
-            const marketId = String(market.marketId);
             const currentEntries = payload.Bookmaker.filter((entry) => entryMarketId(entry) === marketId);
             const syntheticBookmaker2 =
               /-BM2$/i.test(marketId) &&
@@ -1334,6 +1367,28 @@ async function writeEventTicks(items) {
     await redis.expire(terminalKey, EVENT_TTL_SECONDS);
   }
   const terminalBallByBallIds = await terminalBallByBallMarketIds(redis, eventId);
+  const lineRows = acceptedRows.filter(({ item, market }) => payloadGroup(item, market) === "LineMarket");
+  const newlyTerminalLineIds = lineRows
+    .filter(({ item }) => booleanOr(item.go, false))
+    .map(({ item }) => String(item.mid));
+  const newlyUnavailableLineIds = lineRows
+    .filter(({ item }) => explicitActivity(item.s) === false)
+    .map(({ item }) => String(item.mid));
+  const newlyAvailableLineIds = lineRows
+    .filter(({ item }) => explicitActivity(item.s) === true && !booleanOr(item.go, false))
+    .map(({ item }) => String(item.mid));
+  if (newlyTerminalLineIds.length) {
+    await redis.sAdd(terminalLineMarketKey(eventId), newlyTerminalLineIds);
+    await redis.expire(terminalLineMarketKey(eventId), EVENT_TTL_SECONDS);
+  }
+  if (newlyUnavailableLineIds.length) {
+    await redis.sAdd(unavailableLineMarketKey(eventId), newlyUnavailableLineIds);
+    await redis.expire(unavailableLineMarketKey(eventId), EVENT_TTL_SECONDS);
+  }
+  if (newlyAvailableLineIds.length && typeof redis.sRem === "function") {
+    await redis.sRem(unavailableLineMarketKey(eventId), newlyAvailableLineIds);
+  }
+  const lineVisibility = await lineMarketVisibility(redis, eventId);
   await Promise.allSettled(
     acceptedRows
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
@@ -1371,7 +1426,10 @@ async function writeEventTicks(items) {
       if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
       const removeFromPayload = shouldRemoveFromPayload(group, item, market);
       const blockedBallByBall = group === "BallByBall" && terminalBallByBallIds.has(marketId) && !removeFromPayload;
-      const newEntries = removeFromPayload || blockedBallByBall ? [] : entries;
+      const blockedLineMarket = group === "LineMarket" && (
+        lineVisibility.terminal.has(marketId) || lineVisibility.unavailable.has(marketId)
+      );
+      const newEntries = removeFromPayload || blockedBallByBall || blockedLineMarket ? [] : entries;
       const marketChanged =
         movedFromOtherGroup ||
         previousEntries.length !== newEntries.length ||
@@ -1599,6 +1657,8 @@ async function removeEvent(eventId) {
       `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
       `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
       terminalBallByBallKey(eventKey),
+      terminalLineMarketKey(eventKey),
+      unavailableLineMarketKey(eventKey),
     ];
     const event = publicEventMetadata.get(eventKey);
     const transaction = redis.multi().del(keys);
