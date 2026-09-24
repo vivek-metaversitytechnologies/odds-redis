@@ -214,8 +214,8 @@ async function loadCandidates() {
     [...sportIds, candidateCursors.market, candidateCursors.market, limit],
   );
   const markets = prioritizeResultCandidates(priorityMarkets, marketCandidates, limit);
-  // Results commonly appear a few minutes after a fancy is made inactive. Those
-  // rows must not wait for the large keyset cursor to wrap back around.
+  // Prioritize recently updated active fancies so their results do not wait for
+  // the large keyset cursor to wrap back around.
   const [priorityFancies] = await getSourcePool().query(
     `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
@@ -228,7 +228,7 @@ async function loadCandidates() {
        AND NOT EXISTS (SELECT 1 FROM t_fancyresult r WHERE r.fancyid=f.fancyid)
        ${fancyExceptionalFilter}
      ORDER BY f.updatedon DESC, f.id DESC LIMIT ?`,
-    ["OPEN", false, ...sportIds, recentFancyLimit],
+    ["OPEN", true, ...sportIds, recentFancyLimit],
   );
   const [fancyCandidates] = await getSourcePool().query(
     `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,

@@ -686,12 +686,13 @@ test("future subscription horizon does not restrict cricket markets", () => {
   );
 });
 
-test("open fancies remain eligible and recently inactive rows receive priority", () => {
+test("open fancies remain eligible and recently active rows receive priority", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
   assert.match(source, /WHERE UPPER\(f\.status\)=\?/);
   assert.match(source, /f\.isactive=\?[\s\S]*?f\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 24 HOUR\)/);
   assert.match(source, /RESULT_RECENT_FANCY_LIMIT \|\| 200/);
   assert.match(source, /ORDER BY f\.updatedon DESC, f\.id DESC LIMIT \?/);
+  assert.match(source, /\["OPEN", true, \.\.\.sportIds, recentFancyLimit\]/);
   assert.match(
     source,
     /\["OPEN", \.\.\.sportIds, candidateCursors\.fancy, candidateCursors\.fancy, limit\]/,
