@@ -9,6 +9,7 @@ const {
 } = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
+const { writeBallByBallDiscoveryLog } = require("../utils/ballByBallFileLogger");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
@@ -1383,6 +1384,7 @@ async function syncActiveBallByBallDiscovery() {
           },
         );
         const rawRows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+        rawRows.forEach(writeBallByBallDiscoveryLog);
         const parsedRows = marketRows(response, eventsById);
         discovered.push(...parsedRows);
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);

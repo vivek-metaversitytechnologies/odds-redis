@@ -6,14 +6,20 @@ the latest frontend-ready payload for each event to Redis.
 
 ## Setup
 
-Incoming WebSocket `market` limits are logged as one JSON record per message in
+Incoming WebSocket `market` limits are logged as one readable line per message in
 `logs/market-limits/market-limits-YYYY-MM-DD.log`, with `timestamp`, `eventId`,
 `marketId`, `minbet` (raw `settings.ms`) and `maxbet` (raw `settings.mas`). Missing
-values are recorded as `null`. These are received values, not confirmation of a
+values are recorded as `not-provided`. These are received values, not confirmation of a
 successful database write. Logging is enabled by default, independently of
 `LOG_LEVEL`, `LOG_TO_FILE`, and `PROVIDER_LOG_TO_FILE`. Configure it with
 `MARKET_LIMITS_LOG_TO_FILE`, `MARKET_LIMITS_LOG_DIR`, `MARKET_LIMITS_LOG_MAX_SIZE`
 (default `25m`), and `MARKET_LIMITS_LOG_MAX_FILES` (default `14d`).
+
+Ball-by-Ball discovery records and live `-BB` socket ticks are logged separately as
+readable lines in `logs/ball-by-ball/ball-by-ball-YYYY-MM-DD.log`. Configure rotation
+with `BALL_BY_BALL_LOG_TO_FILE`, `BALL_BY_BALL_LOG_DIR`,
+`BALL_BY_BALL_LOG_MAX_SIZE` (default `25m`), and `BALL_BY_BALL_LOG_MAX_FILES`
+(default `14d`).
 
 Requires Node.js 20+, read-only access to the source MySQL database, and Redis.
 

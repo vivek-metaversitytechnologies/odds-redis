@@ -4,6 +4,7 @@ const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
 const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
+const { writeBallByBallSocketLog } = require("../utils/ballByBallFileLogger");
 const { deleteMarketBetPause } = require("./betPauseCacheService");
 const { noteRoomUpdate } = require("./marketSettingsService");
 const { integer } = require("../config/env");
@@ -474,6 +475,7 @@ function connectSocket() {
     }
     if (oddsTicks.length) {
       for (const item of oddsTicks) {
+        writeBallByBallSocketLog(item);
         try {
           rawTickPublisher(item, receivedAtMs);
         } catch (error) {
