@@ -5,6 +5,11 @@ require("winston-daily-rotate-file");
 
 let instance;
 
+function readable(value) {
+  if (value === null || value === undefined || value === "") return "not-provided";
+  return String(value).replaceAll(/\s+/g, " ").trim();
+}
+
 function getLogger() {
   if (instance) return instance;
   const transport = new winston.transports.DailyRotateFile({
@@ -19,7 +24,12 @@ function getLogger() {
     level: "info",
     format: winston.format.combine(
       winston.format.timestamp(),
-      winston.format.printf((info) => JSON.stringify({ timestamp: info.timestamp, ...info.details })),
+      winston.format.printf((info) => {
+        const details = info.details || {};
+        return `${info.timestamp} | MARKET LIMIT UPDATE | event=${readable(details.eventId)}` +
+          ` | market=${readable(details.marketId)} | minbet=${readable(details.minbet)}` +
+          ` | maxbet=${readable(details.maxbet)}`;
+      }),
     ),
     transports: [transport],
     exitOnError: false,
