@@ -169,7 +169,8 @@ async function retireCompletedEvents(events) {
           },
         ]) {
           const [rows] = await connection.query(
-            `SELECT id,${column} AS marketid FROM ${table} WHERE eventid=? AND isactive=? ORDER BY id`,
+            `SELECT id,${column} AS marketid FROM ${table} WHERE eventid=? AND isactive=?
+             ${table === "t_matchfancy" ? "AND (isshow=1 OR is_show=1 OR issubscribed=1)" : ""} ORDER BY id`,
             [eventId, true],
           );
           for (let offset = 0; offset < rows.length; offset += 100) {
@@ -180,7 +181,7 @@ async function retireCompletedEvents(events) {
               await connection.beginTransaction();
               try {
                 await connection.query(
-                  `UPDATE ${table} SET isactive=false,${assignments},updatedon=NOW()
+                  `UPDATE ${table} SET ${table === "t_matchfancy" ? "" : "isactive=false,"}${assignments},updatedon=NOW()
                  WHERE id IN (${batch.map(() => "?").join(",")}) AND isactive=? ORDER BY id`,
                   [...batch.map((row) => row.id), true],
                 );

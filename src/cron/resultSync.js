@@ -179,7 +179,7 @@ async function loadCandidates() {
   const fancyExceptionalFilter = exceptionalAvailable
     ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie x WHERE x.marketid=f.fancyid)" : "";
   const limit = Math.max(1, Number(process.env.RESULT_MARKET_LIMIT || 2000));
-  // Keep only part of the fancy polling lane reserved for recently retired
+  // Keep only part of the fancy polling lane reserved for recently updated
   // markets. The remainder must come from the rotating cursor, otherwise a
   // busy feed can permanently starve anything below the newest rows.
   const recentFancyLimit = Math.max(
@@ -275,10 +275,10 @@ async function retireSocketMarkets(connection, rows, regular, closedRows) {
     const sql = regular
       ? `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
          WHERE id IN (${placeholders}) AND (isactive=1 OR status=1 OR issubscribed=1) ORDER BY id`
-      : `UPDATE t_matchfancy SET isactive=?,isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
-         WHERE id IN (${placeholders}) AND (isactive=1 OR isshow=1 OR is_show=1 OR issubscribed=1) ORDER BY id`;
+      : `UPDATE t_matchfancy SET isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+         WHERE id IN (${placeholders}) AND (isshow=1 OR is_show=1 OR issubscribed=1) ORDER BY id`;
     await commitSocketRetirement(connection, sql, [
-      ...(regular ? [false, false, false] : [false, false, false, false]),
+      ...(regular ? [false, false, false] : [false, false, false]),
       ...batch.map((row) => row.id),
     ]);
     // Retain committed progress for Redis/provider cleanup if a later batch fails.
@@ -372,7 +372,8 @@ async function handleSocketGameOver(marketItems) {
       );
       const [eventFancies] = await connection.query(
         `SELECT id,fancyid AS marketid,eventid,name AS marketname,oddstype,mtype,matchname,sportid
-         FROM t_matchfancy WHERE eventid=? AND isactive=? ORDER BY id`,
+         FROM t_matchfancy WHERE eventid=? AND isactive=?
+           AND (isshow=1 OR is_show=1 OR issubscribed=1) ORDER BY id`,
         [eventId, true],
       );
       markets.push(...eventMarkets);
@@ -594,8 +595,8 @@ async function persistFancyResult(connection, fancy, result) {
         true, "API", fancy.marketid],
     );
     await connection.execute(
-      "UPDATE t_matchfancy SET isactive=?, status=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
-      [false, "SUSPENDED", false, false, false, fancy.marketid],
+      "UPDATE t_matchfancy SET status=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
+      ["SUSPENDED", false, false, false, fancy.marketid],
     );
     return true;
   }

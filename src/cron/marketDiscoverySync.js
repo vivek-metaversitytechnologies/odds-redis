@@ -473,7 +473,7 @@ async function upsertFancies(fancies) {
               fancy.maxBet,
               fancy.eventId,
               false,
-              active,
+              true,
               fancy.marketType,
               active,
               active,
@@ -495,12 +495,12 @@ async function upsertFancies(fancies) {
                sportid,provider,isbettable,isplay,maxliabilityperbet) VALUES ?
              ON DUPLICATE KEY UPDATE
                updatedon=IF(
-                 NOT (status <=> VALUES(status)) OR NOT (isactive <=> VALUES(isactive)) OR
-                 NOT (isplay <=> VALUES(isplay)) OR NOT (remarks <=> VALUES(remarks)),
+                 NOT (status <=> VALUES(status)) OR NOT (isplay <=> VALUES(isplay)) OR
+                 NOT (remarks <=> VALUES(remarks)),
                  NOW(),updatedon
                ),
                name=IF(VALUES(mtype)='ball-by-ball' AND VALUES(name) REGEXP '^[0-9]+([.][0-9]+)? ',VALUES(name),name),
-               status=VALUES(status),isactive=VALUES(isactive),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
+               status=VALUES(status),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
             [values],
           );
           await connection.commit();
