@@ -210,6 +210,7 @@ async function loadCandidates({ backlog = true } = {}) {
        AND m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+       AND NOT EXISTS (SELECT 1 FROM t_matchfancy lf WHERE lf.fancyid=m.marketid)
        ${regularExceptionalFilter}
      ORDER BY m.updatedon DESC, m.id DESC LIMIT ?`,
     [false, ...sportIds, recentRegularLimit],
@@ -220,6 +221,7 @@ async function loadCandidates({ backlog = true } = {}) {
      WHERE m.sportid IN (${placeholders})
        AND ${eventWindowSql("e", "active")}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+       AND NOT EXISTS (SELECT 1 FROM t_matchfancy lf WHERE lf.fancyid=m.marketid)
        ${regularExceptionalFilter}
      ORDER BY CASE WHEN ? IS NULL OR m.id < ? THEN 0 ELSE 1 END, m.id DESC
      LIMIT ?`,

@@ -33,3 +33,9 @@ test("backlog runs are every Nth scheduled run and skipped runs leave the cursor
   assert.match(source, /RESULT_BACKLOG_SWEEP_EVERY_RUNS \|\| 5/);
   assert.match(source, /const nextCursors = backlog\s*\? advanceCandidateCursors\(requested, activeRegular, candidates\.fancies\)\s*: \{ \.\.\.candidateCursors \}/);
 });
+
+test("the regular result lanes never pick up line markets left in t_market", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
+  const guard = /AND NOT EXISTS \(SELECT 1 FROM t_matchfancy lf WHERE lf\.fancyid=m\.marketid\)/g;
+  assert.equal(source.match(guard).length, 2);
+});

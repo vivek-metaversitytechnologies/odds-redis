@@ -1,10 +1,22 @@
 const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
+const logger = require("../utils/logger");
 
 const key = "Pending-Regular-Results";
 const reviewKey = `${key}:review`;
-const RETRY_DELAY_MS = 10000; // 10 seconds
-const MAX_ATTEMPTS = 360; // 360 * 10s retry delay = 1 hour
+// The vendor publishes regular-market results within hours of the event start (measured: football
+// max 4.2 h, tennis 7.8 h, cricket 8.1 h; none after 24 h). A queued market is retried every minute
+// for 12 hours; one that still has no result goes to the review list for good instead of being
+// dropped and re-queued by the next recovery pass (which kept ~24k dead markets polled forever).
+const RETRY_DELAY_MS = 60000; // 1 minute
+const MAX_ATTEMPTS = 720; // 720 * 60s retry delay = 12 hours
+// Only markets seen active within this window (t_market.updatedon stops moving once the vendor no
+// longer lists the market), or whose event is still in play (multi-day Tests), are queued. Line
+// markets settle through t_matchfancy and never belong here.
+const ELIGIBLE_HOURS = 48;
+const REVIEW_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+const eligibleSql = `(m.updatedon >= DATE_SUB(NOW(), INTERVAL ${ELIGIBLE_HOURS} HOUR) OR COALESCE(e.in_play,0)=1)
+     AND NOT EXISTS (SELECT 1 FROM t_matchfancy lf WHERE lf.fancyid=m.marketid)`;
 // Older scans interpreted MySQL BIT buffers with Number(), skipping inactive rows.
 // Invalidate those checkpoints once so a corrected full pass starts immediately.
 const RECOVERY_VERSION = 2;
@@ -47,18 +59,50 @@ async function moveExpired(ids) {
   const c = await client();
   return c.eval(`
     local moved = {}
-    for i=2,#ARGV do
+    for i=3,#ARGV do
       local id = ARGV[i]
       local attempts = tonumber(redis.call('HGET',KEYS[2],id) or '0')
       if attempts >= tonumber(ARGV[1]) then
+        local first = redis.call('HGET',KEYS[3],id) or ''
         redis.call('ZREM',KEYS[1],id)
         redis.call('HDEL',KEYS[2],id)
         redis.call('HDEL',KEYS[3],id)
+        redis.call('HSET',KEYS[4],id,'{"marketId":"'..id..'","reason":"no-vendor-result","attempts":'..attempts..',"firstQueuedAt":"'..first..'","reviewedAt":'..ARGV[2]..'}')
         table.insert(moved,id)
       end
     end
-    return moved`, { keys: [key, `${key}:attempts`, `${key}:firstQueuedAt`],
-    arguments: [String(MAX_ATTEMPTS), ...ids] });
+    return moved`, { keys: [key, `${key}:attempts`, `${key}:firstQueuedAt`, reviewKey],
+    arguments: [String(MAX_ATTEMPTS), String(Date.now()), ...ids] });
+}
+
+function reviewEntry(id, attempts, firstQueuedAt, now = Date.now()) {
+  return JSON.stringify({ marketId: id, reason: "no-vendor-result", attempts, firstQueuedAt: firstQueuedAt || "", reviewedAt: now });
+}
+
+// Review entries older than the retention are removed; the eligibility window keeps those markets
+// from being queued again.
+async function pruneReview(now = Date.now()) {
+  const c = await client();
+  let cursor = "0";
+  let pruned = 0;
+  do {
+    const page = await c.hScan(reviewKey, cursor, { COUNT: 500 });
+    cursor = String(page.cursor);
+    const stale = page.entries
+      .filter((entry) => {
+        try {
+          return now - Number(JSON.parse(entry.value).reviewedAt || 0) > REVIEW_RETENTION_MS;
+        } catch {
+          return true;
+        }
+      })
+      .map((entry) => entry.field);
+    if (stale.length) {
+      await c.hDel(reviewKey, stale);
+      pruned += stale.length;
+    }
+  } while (cursor !== "0");
+  return pruned;
 }
 
 async function listReview(cursor = "0") {
@@ -110,7 +154,9 @@ async function recover(accelerate = false) {
   const inactive = rows.filter((row) => Number(row.isactive) === 0).map((row) => row.marketid);
   if (inactive.length) {
     const [unsettled] = await pool.query(
-      `SELECT m.marketid FROM t_market m WHERE m.marketid IN (${inactive.map(() => "?").join(",")})
+      `SELECT m.marketid FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
+       WHERE m.marketid IN (${inactive.map(() => "?").join(",")})
+       AND ${eligibleSql}
        AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
        ${tables.length ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie r WHERE r.marketid=m.marketid)" : ""}`, inactive,
     );
@@ -123,6 +169,8 @@ async function recover(accelerate = false) {
     scannedRows: scannedRows + rows.length, completedPasses: completedPasses + (cursor ? 0 : 1) };
   // Commit after enqueue; replaying a page after a crash is safe (NX enqueue).
   await c.set(`${key}:recovery`, JSON.stringify(checkpoint));
+  // Housekeeping only: a failed prune must not fail the recovery pass.
+  if (!cursor) await pruneReview(now).catch((error) => logger.warn("[PendingResults] review prune failed", { error: error.message }));
   recoveryCursor = cursor;
   lastRecoveryAt = now;
   nextRecoveryAt = checkpoint.nextRecoveryAt;
@@ -146,11 +194,14 @@ async function load({ adaptive = false } = {}) {
   );
   const [rows] = await getSourcePool().query(
     `SELECT m.id AS candidateid,m.marketid,m.marketname,m.eventid,m.matchname,m.sportid
-     FROM t_market m WHERE m.marketid IN (${ids.map(() => "?").join(",")})
+     FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
+     WHERE m.marketid IN (${ids.map(() => "?").join(",")})
+     AND ${eligibleSql}
      AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
      ${tables.length ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie r WHERE r.marketid=m.marketid)" : ""}`,
     ids,
   );
+  // Settled, deleted, too old to still get a result, or a line market: no longer queued.
   const found = new Set(rows.map((row) => String(row.marketid)));
   await remove(ids.filter((id) => !found.has(id)));
   const sports = new Set(String(process.env.SPORT_IDS || "1,2,4").split(",").map(Number));
@@ -175,11 +226,18 @@ async function defer(ids) {
   const exhausted = ids.filter((_id, index) => Number(attempts[index]) >= MAX_ATTEMPTS);
   const retry = ids.filter((_id, index) => Number(attempts[index]) < MAX_ATTEMPTS);
   if (exhausted.length) {
-    await c.multi().zRem(key, exhausted).hDel(`${key}:attempts`, exhausted).hDel(`${key}:firstQueuedAt`, exhausted).exec();
+    const firstQueued = await c.hmGet(`${key}:firstQueuedAt`, exhausted);
+    const move = c.multi().zRem(key, exhausted).hDel(`${key}:attempts`, exhausted).hDel(`${key}:firstQueuedAt`, exhausted);
+    exhausted.forEach((id, index) => move.hSet(reviewKey, id, reviewEntry(id, MAX_ATTEMPTS, firstQueued[index], now)));
+    await move.exec();
   }
   if (retry.length) {
     await c.zAdd(key, retry.map((value) => ({ value, score: now + RETRY_DELAY_MS })), { XX: true });
   }
 }
 
-module.exports = { enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus, __testing__: { recover } };
+module.exports = {
+  enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus, pruneReview,
+  ELIGIBLE_HOURS, MAX_ATTEMPTS,
+  __testing__: { recover },
+};

@@ -224,6 +224,21 @@ long-idle markets) run only every `RESULT_BACKLOG_SWEEP_EVERY_RUNS` runs (defaul
 pending and fallback lanes still run every minute. `pipelines.results.lastResult.backlogSweep` shows
 which kind of run it was.
 
+### Pending regular-result queue
+
+Closed regular markets (`t_market`) wait for their result in the Redis queue
+`Pending-Regular-Results`, which the headroom worker polls. The vendor publishes regular results
+within hours of the event start (measured: football max 4.2 h, tennis 7.8 h, cricket 8.1 h), so:
+
+- only markets seen active in the last 48 hours (`t_market.updatedon`), or whose event is still in
+  play (multi-day Tests), are queued — by the hourly recovery scan and when due entries are loaded;
+  older entries are dropped;
+- line markets never enter (their result lives in `t_fancyresult`), and the regular poller lanes
+  skip them too;
+- an entry is retried every minute for 12 hours; without a result it moves to
+  `Pending-Regular-Results:review` (`scripts/list-pending-result-review.js`) and is not queued
+  again. Review entries are pruned after 14 days.
+
 ### Line market suspension
 
 The socket suspends a line market briefly during play (observed 9-17 s) and keeps it `SUSPENDED`

@@ -11,6 +11,7 @@ test("recovery rescans old checkpoints and enqueues SQL-normalized inactive BIT 
     get: async () => JSON.stringify({ cursor: 9999999, nextRecoveryAt: Date.now() + 3600000 }),
     eval: async (_script, options) => enqueued.push(...options.arguments.slice(1)),
     set: async (_key, value) => { checkpoint = JSON.parse(value); },
+    hScan: async () => ({ cursor: "0", entries: [] }),
   }));
   t.mock.method(db, "getSourcePool", () => ({ query: async (sql, params) => {
     if (sql.includes("information_schema")) return [[]];
@@ -20,6 +21,8 @@ test("recovery rescans old checkpoints and enqueues SQL-normalized inactive BIT 
       return [[{ id: 6488811, marketid: "1.262087180", isactive: 0 }, { id: 6488812, marketid: "1.active", isactive: 1 }]];
     }
     assert.deepEqual(params, ["1.262087180"]);
+    // Recovery only queues recently active or in-play markets, never line markets.
+    assert.match(sql, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\) OR COALESCE\(e\.in_play,0\)=1/);
     return [[{ marketid: "1.262087180" }]];
   } }));
   const queue = require("../src/services/pendingResultQueue");
