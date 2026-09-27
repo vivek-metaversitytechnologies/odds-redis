@@ -287,13 +287,17 @@ async function retireSocketMarkets(connection, rows, regular, closedRows) {
   }
 }
 
-// Result rows carried by socket game-over ticks (`go` with `res`) for one fancy market type.
-function socketResultRows(items, fancies, marketType) {
+// Result rows carried by socket game-over ticks (`go` with `res`) for the fancies `include` selects:
+// a market type name, or a predicate over the fancy row.
+function socketResultRows(items, fancies, include) {
+  const selected = typeof include === "function"
+    ? include
+    : (fancy) => String(fancy.mtype || "").toLowerCase() === include;
   const ticks = new Map((items || [])
     .filter((item) => item && typeof item === "object" && item.go === true)
     .map((item) => [String(item.mid || "").trim(), item]));
   return (fancies || []).flatMap((fancy) => {
-    if (String(fancy.mtype || "").toLowerCase() !== marketType) return [];
+    if (!selected(fancy)) return [];
     const tick = ticks.get(String(fancy.marketid));
     const value = tick?.res == null ? "" : String(tick.res).trim();
     if (!value) return [];
@@ -301,7 +305,7 @@ function socketResultRows(items, fancies, marketType) {
     if (!isAbandoned && fancyResultValue(fancy.marketid, value, fancy.mtype) == null) return [];
     return [{
       marketId: String(fancy.marketid),
-      marketType,
+      marketType: String(fancy.mtype || "").toLowerCase(),
       result: value,
       isTie: false,
       isAbandoned,
@@ -314,13 +318,27 @@ function socketLineResultRows(items, fancies) {
   return socketResultRows(items, fancies, "line-market");
 }
 
-// Ball-by-ball results used to wait for the once-a-minute API poll (median 40 s, up to 10 min
-// when the results API lagged), although the socket's game-over tick already carries the same
-// value (48/48 identical in production). `on` settles from the socket, `shadow` only records what
-// it would settle, `off` leaves ball-by-ball to the API poller, which is the fallback in every mode.
-function ballByBallSocketSettlementMode() {
-  const mode = String(process.env.BALL_BY_BALL_SOCKET_SETTLEMENT || "on").toLowerCase();
+// Every fancy family's socket game-over carries its result in `res`, in the format settlement
+// already parses (runs, a digit, back/lay): 55/55 matched the stored API result in production, and
+// ball-by-ball has settled this way since it was proven. Fancies other than line markets (which have
+// their own path with an API fallback) settle from the socket: seconds instead of the once-a-minute
+// poll, and each one leaves the poller's candidate list, so fewer results API calls.
+// `on` settles, `shadow` only records, `off` leaves them to the poller, the fallback in every mode.
+// BALL_BY_BALL_SOCKET_SETTLEMENT is the older name of the same switch.
+function fancySocketSettlementMode() {
+  const mode = String(process.env.FANCY_SOCKET_SETTLEMENT || process.env.BALL_BY_BALL_SOCKET_SETTLEMENT || "on").toLowerCase();
   return ["on", "shadow", "off"].includes(mode) ? mode : "on";
+}
+
+// Regular markets (match odds, bookmaker, goals) carry the winning selection id in `res`. They are
+// only watched: the value is recorded on the game-over census for comparison with the API result.
+function regularSocketSettlementMode() {
+  const mode = String(process.env.REGULAR_SOCKET_SETTLEMENT || "shadow").toLowerCase();
+  return mode === "off" ? "off" : "shadow";
+}
+
+function socketSettledFancy(fancy) {
+  return String(fancy.mtype || "").toLowerCase() !== "line-market";
 }
 
 async function handleSocketGameOver(marketItems) {
@@ -364,8 +382,10 @@ async function handleSocketGameOver(marketItems) {
       const tick = ticksById.get(String(row.marketid));
       if (!tick) continue;
       const isFancy = fancyIds.has(String(row.marketid));
+      const lineMarket = String(row.mtype || "").toLowerCase() === "line-market";
       marketTrace.traceGameOver({
         kind: isFancy ? String(row.oddstype || row.mtype || "FANCY").toUpperCase() : "REGULAR",
+        socketSettlement: !isFancy ? regularSocketSettlementMode() : lineMarket ? "line" : fancySocketSettlementMode(),
         eventId: row.eventid,
         marketId: row.marketid,
         marketType: isFancy ? row.mtype ?? null : null,
@@ -462,7 +482,7 @@ async function handleSocketGameOver(marketItems) {
       });
     }
   }
-  const ballByBall = await settleBallByBallFromSocket(items, lookedUpFancies);
+  const fancySettlement = await settleFanciesFromSocket(items, lookedUpFancies);
   const lineMarketIds = [...new Set(closedRows
     .filter((row) => String(row.mtype || "").toLowerCase() === "line-market")
     .map((row) => String(row.marketid)))];
@@ -491,11 +511,11 @@ async function handleSocketGameOver(marketItems) {
       });
     }
   }
-  const settled = [...new Set([...directSettlement.settled, ...apiSettlement.settled, ...ballByBall.settled])];
+  const settled = [...new Set([...directSettlement.settled, ...apiSettlement.settled, ...fancySettlement.settled])];
   await pendingResults.remove(settled);
   return {
     ...result,
-    ballByBall: { mode: ballByBall.mode, results: ballByBall.results, settled: ballByBall.settled.length },
+    fancies: { mode: fancySettlement.mode, results: fancySettlement.results, settled: fancySettlement.settled.length },
     directResults: directResults.length,
     directlySettled: directSettlement.settled.length,
     apiFallbackRequested: apiFallbackIds.length,
@@ -503,9 +523,9 @@ async function handleSocketGameOver(marketItems) {
   };
 }
 
-async function settleBallByBallFromSocket(items, fancies) {
-  const mode = ballByBallSocketSettlementMode();
-  const rows = mode === "off" ? [] : socketResultRows(items, fancies, "ball-by-ball");
+async function settleFanciesFromSocket(items, fancies) {
+  const mode = fancySocketSettlementMode();
+  const rows = mode === "off" ? [] : socketResultRows(items, fancies, socketSettledFancy);
   if (!rows.length) return { mode, results: 0, settled: [] };
   if (mode === "shadow") {
     const byId = new Map(fancies.map((fancy) => [String(fancy.marketid), fancy]));
@@ -513,14 +533,14 @@ async function settleBallByBallFromSocket(items, fancies) {
       marketTrace.trace(
         "result",
         { eventId: byId.get(row.marketId)?.eventid, marketId: row.marketId, outcome: "socket-shadow", result: row.result },
-        { marketType: "ball-by-ball" },
+        { marketType: row.marketType },
       );
     }
     return { mode, results: rows.length, settled: [] };
   }
   try {
     const settlement = await applyResults(rows, { markets: [], fancies });
-    logger.info("[ResultSync] socket ball-by-ball results processed", {
+    logger.info("[ResultSync] socket fancy results processed", {
       received: rows.length,
       settled: settlement.settled.length,
       rejected: settlement.rejectedResults,
@@ -528,8 +548,8 @@ async function settleBallByBallFromSocket(items, fancies) {
     });
     return { mode, results: rows.length, settled: settlement.settled };
   } catch (error) {
-    // The scheduled result poller keeps retrying unsettled ball-by-ball markets.
-    logger.error("[ResultSync] socket ball-by-ball settlement failed; API polling retained", {
+    // The scheduled result poller keeps retrying unsettled fancies.
+    logger.error("[ResultSync] socket fancy settlement failed; API polling retained", {
       marketIds: rows.map((row) => row.marketId),
       error: error.message,
     });
@@ -1109,7 +1129,8 @@ module.exports = {
   isEventTerminalMarketName,
   socketLineResultRows,
   socketResultRows,
-  ballByBallSocketSettlementMode,
+  fancySocketSettlementMode,
+  regularSocketSettlementMode,
   loadCandidates,
   handleSocketGameOver,
   applyResults,

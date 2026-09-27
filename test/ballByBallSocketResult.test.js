@@ -21,22 +21,26 @@ const BALL = {
   sportid: 4,
 };
 const SESSION = { ...BALL, id: 503, marketid: "4.150272715748-F2", marketname: "10 Over Run ENG", oddstype: "F2", mtype: "session" };
+const F3 = { ...BALL, id: 504, marketid: "4.764368529190-F3", marketname: "1st Wkt Caught Out ZIM-W", oddstype: "F3", mtype: "other-market" };
+const REGULAR = { id: 900, marketid: "1.262893000", eventid: 36111199, marketname: "Match Odds" };
 const LINE = { ...BALL, id: 502, marketid: "1.262893097", marketname: "1st Innings 20 Overs Line", oddstype: "LINE", mtype: "line-market" };
 
 // resultSync takes getSourcePool at load time, so the fake is installed before it is required.
-const state = { inserts: [] };
+const state = { inserts: [], regularWrites: 0 };
 const connection = {
   beginTransaction: async () => {},
   commit: async () => {},
   rollback: async () => {},
   release: () => {},
   query: async (sql, params) => {
-    if (sql.includes("FROM t_matchfancy")) return [[BALL, LINE, SESSION].filter((row) => params.includes(row.marketid)).map((row) => ({ ...row }))];
+    if (sql.includes("FROM t_matchfancy")) return [[BALL, LINE, SESSION, F3].filter((row) => params.includes(row.marketid)).map((row) => ({ ...row }))];
+    if (sql.includes("FROM t_market WHERE marketid IN")) return [[REGULAR].filter((row) => params.includes(row.marketid)).map((row) => ({ ...row }))];
     if (sql.startsWith("SELECT")) return [[]];
     return [{ affectedRows: 1 }];
   },
   execute: async (sql, params) => {
     if (sql.includes("INSERT INTO t_fancyresult")) state.inserts.push({ marketId: params[1], value: params[8] });
+    if (sql.includes("t_matchresult")) state.regularWrites += 1;
     return [{ affectedRows: 1 }];
   },
 };
@@ -45,6 +49,7 @@ const resultSync = require("../src/cron/resultSync");
 
 function stubEffects(t) {
   state.inserts = [];
+  state.regularWrites = 0;
   t.mock.method(pending, "enqueue", async () => {});
   t.mock.method(pending, "remove", async () => {});
   t.mock.method(subscriptions, "unsubscribeResultMarkets", async () => {});
@@ -52,7 +57,11 @@ function stubEffects(t) {
   t.mock.method(frontend, "publishEventSnapshot", async () => {});
   t.mock.method(fancyNames, "resolveFancyName", async (_id, name) => name);
   t.mock.method(fancyNames, "repairFancyNames", async () => {});
-  t.after(() => delete process.env.BALL_BY_BALL_SOCKET_SETTLEMENT);
+  t.after(() => {
+    delete process.env.BALL_BY_BALL_SOCKET_SETTLEMENT;
+    delete process.env.FANCY_SOCKET_SETTLEMENT;
+    delete process.env.REGULAR_SOCKET_SETTLEMENT;
+  });
 }
 
 // The provider results API must not be needed for a ball whose game-over tick carries `res`.
@@ -69,7 +78,7 @@ test("a ball-by-ball game-over tick with a result settles immediately from the s
   const outcome = await resultSync.handleSocketGameOver([gameOver(BALL, "117")]);
 
   assert.deepEqual(state.inserts, [{ marketId: BALL.marketid, value: 117 }]);
-  assert.deepEqual(outcome.ballByBall, { mode: "on", results: 1, settled: 1 });
+  assert.deepEqual(outcome.fancies, { mode: "on", results: 1, settled: 1 });
 });
 
 test("shadow mode records the socket result but leaves settlement to the API poller", async (t) => {
@@ -78,7 +87,7 @@ test("shadow mode records the socket result but leaves settlement to the API pol
   const outcome = await resultSync.handleSocketGameOver([gameOver(BALL, "117")]);
 
   assert.deepEqual(state.inserts, []);
-  assert.deepEqual(outcome.ballByBall, { mode: "shadow", results: 1, settled: 0 });
+  assert.deepEqual(outcome.fancies, { mode: "shadow", results: 1, settled: 0 });
 });
 
 test("off mode and result-less game-over ticks never settle a ball", async (t) => {
@@ -114,4 +123,44 @@ test("every market family's game-over is recorded with the result it carried", a
       ["F2", SESSION.marketid, "50"],
     ],
   );
+});
+
+test("session and back/lay fancies settle from the socket; line markets keep their own path", async (t) => {
+  stubEffects(t);
+  forbidResultsApi(t);
+  const outcome = await resultSync.handleSocketGameOver([gameOver(SESSION, "50"), gameOver(F3, "lay"), gameOver(BALL, "117")]);
+
+  assert.deepEqual(
+    state.inserts.sort((a, b) => a.marketId.localeCompare(b.marketId)),
+    [
+      { marketId: SESSION.marketid, value: 50 },
+      { marketId: BALL.marketid, value: 117 },
+      { marketId: F3.marketid, value: 0 },
+    ],
+  );
+  assert.deepEqual(outcome.fancies, { mode: "on", results: 3, settled: 3 });
+  const fancyRows = resultSync.socketResultRows([gameOver(LINE, "118"), gameOver(SESSION, "50")], [LINE, SESSION], (fancy) => fancy.mtype !== "line-market");
+  assert.deepEqual(fancyRows.map((row) => row.marketId), [SESSION.marketid]);
+});
+
+test("regular markets are only watched: the socket value is recorded, nothing is written", async (t) => {
+  stubEffects(t);
+  const census = [];
+  t.mock.method(marketTrace, "traceGameOver", (fields) => census.push(fields));
+  await resultSync.handleSocketGameOver([gameOver(REGULAR, "19924829"), gameOver(SESSION, "50")]);
+
+  assert.equal(state.regularWrites, 0);
+  const regular = census.find((row) => row.marketId === REGULAR.marketid);
+  assert.deepEqual([regular.kind, regular.res, regular.socketSettlement], ["REGULAR", "19924829", "shadow"]);
+  assert.equal(census.find((row) => row.marketId === SESSION.marketid).socketSettlement, "on");
+});
+
+test("the older ball-by-ball switch still controls fancy socket settlement", async (t) => {
+  stubEffects(t);
+  process.env.BALL_BY_BALL_SOCKET_SETTLEMENT = "off";
+  await resultSync.handleSocketGameOver([gameOver(SESSION, "50")]);
+  assert.deepEqual(state.inserts, []);
+  process.env.FANCY_SOCKET_SETTLEMENT = "on";
+  await resultSync.handleSocketGameOver([gameOver(SESSION, "50")]);
+  assert.deepEqual(state.inserts, [{ marketId: SESSION.marketid, value: 50 }]);
 });

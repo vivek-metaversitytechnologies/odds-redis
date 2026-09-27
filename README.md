@@ -183,13 +183,22 @@ discovery→first-tick and game-over→result latency.
 
 ### Socket result settlement
 
-A socket game-over tick (`go: true`) carries the market's result in `res`. Line markets and, with
-`BALL_BY_BALL_SOCKET_SETTLEMENT=on` (default), ball-by-ball markets are settled from it straight
-away instead of waiting for the once-a-minute results API poll (which took a median 40 s and up to
-10 min for ball-by-ball). `shadow` only traces the socket value (`result` stage, `socket-shadow`);
-`off` restores API-only settlement. The API poller stays the fallback, and results are written with
-`INSERT ... WHERE NOT EXISTS`, so whichever path lands first wins and the other is a no-op. Trace
-`result` records carry `source: socket | api`.
+A socket game-over tick (`go: true`) carries the market's result in `res`, in the format
+settlement already parses (runs, a digit, `back`/`lay`, or the winning selection id). In production
+55/55 game-overs matched the result the API later stored, across every family.
+
+- **Fancies** (session, F3, odd-even, khado, meter, cricket-casino, ball-by-ball) settle from it
+  immediately with `FANCY_SOCKET_SETTLEMENT=on` (default; `BALL_BY_BALL_SOCKET_SETTLEMENT` is the
+  older name). `shadow` only traces the value (`result` stage, `socket-shadow`); `off` leaves them to
+  the API poller. Settling from the socket takes seconds instead of the once-a-minute poll and removes
+  the market from the poller's candidates, so fewer results API calls.
+- **Line markets** settle from the socket with an immediate API fallback (their own path).
+- **Regular markets** (match odds, bookmaker, goals) are only watched (`REGULAR_SOCKET_SETTLEMENT=shadow`):
+  the winning selection id is recorded on the `socket.gameover` census line, nothing is written.
+
+The API poller stays the fallback, and results are written with `INSERT ... WHERE NOT EXISTS`, so
+whichever path lands first wins. Trace `result` records carry `source: socket | api`, and every
+game-over's census line carries `socketSettlement` (`on`, `shadow`, `off` or `line`).
 
 ### Cricket-casino result chase
 
