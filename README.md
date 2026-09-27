@@ -135,7 +135,7 @@ query failure aborts the run before any Redis keys are deleted.
 ### Market trace (ball-by-ball, line and cricket-casino markets)
 
 Every ball-by-ball, line and cricket-casino market's lifecycle is written to `logs/market-trace/market-trace-<date>.jsonl`,
-one JSON object per line with `ts`, `kind` (`BB`/`LINE`/`CC`), `stage`, `eventId`, `marketId` and the
+one JSON object per line with `ts`, `kind` (`BB`/`LINE`/`CC` by default; `MARKET_TRACE_KINDS` can add `F2`, `KD`, `OE`, `F3`, `MT` for a short investigation, since those change state on nearly every ball), `stage`, `eventId`, `marketId` and the
 reason for each decision:
 
 | Stage | Written when |

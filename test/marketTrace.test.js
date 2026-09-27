@@ -168,3 +168,23 @@ test("the game-over census records every market family, not only BB/LINE/CC", (t
     ],
   );
 });
+
+test("session-style fancies are traced only when MARKET_TRACE_KINDS enables them", (t) => {
+  const records = capture(t);
+  t.after(() => delete process.env.MARKET_TRACE_KINDS);
+
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.1-F2" }, { marketType: "session" });
+  assert.equal(records.length, 0);
+
+  process.env.MARKET_TRACE_KINDS = "BB,LINE,CC,F2,KD,OE,F3,MT";
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.1-F2" }, { marketType: "session" });
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.2-KD" });
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.3-OE" });
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.4-F3" });
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.5-MT" });
+  assert.deepEqual(records.map((record) => record.kind), ["F2", "KD", "OE", "F3", "MT"]);
+
+  process.env.MARKET_TRACE_KINDS = "BB";
+  marketTrace.trace("definition", { eventId: 1, marketId: "4.6-CC" });
+  assert.equal(records.length, 5);
+});

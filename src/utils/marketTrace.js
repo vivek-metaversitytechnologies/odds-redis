@@ -59,13 +59,32 @@ function getLogger() {
   return instance;
 }
 
+// Kinds traced by default. Session-style fancies (F2, KD, OE, F3, MT) change state on nearly every
+// ball, so they are opt-in through MARKET_TRACE_KINDS for short investigations.
+const DEFAULT_KINDS = "BB,LINE,CC";
+let kindsSetting = { raw: null, set: new Set() };
+
+function enabledKinds() {
+  const raw = String(process.env.MARKET_TRACE_KINDS || DEFAULT_KINDS);
+  if (kindsSetting.raw !== raw) {
+    kindsSetting = { raw, set: new Set(raw.split(",").map((kind) => kind.trim().toUpperCase()).filter(Boolean)) };
+  }
+  return kindsSetting.set;
+}
+
 function kindFromHint({ marketId, marketType, group } = {}) {
   const type = String(marketType || "").toLowerCase();
-  if (type === "ball-by-ball" || group === "BallByBall" || /-BB$/i.test(String(marketId || ""))) return "BB";
+  const id = String(marketId || "");
+  if (type === "ball-by-ball" || group === "BallByBall" || /-BB$/i.test(id)) return "BB";
   if (type === "line-market" || group === "LineMarket") return "LINE";
   // Cricket casino results trail the over by a long way on the results API; tracing their few
   // markets shows whether the socket game-over already carries the result.
-  if (type === "cricket-casino" || group === "CricketCasino" || /-CC$/i.test(String(marketId || ""))) return "CC";
+  if (type === "cricket-casino" || group === "CricketCasino" || /-CC$/i.test(id)) return "CC";
+  if (type === "session" || group === "Fancy2" || /-F2$/i.test(id)) return "F2";
+  if (type === "khado" || group === "Khado" || /-KD$/i.test(id)) return "KD";
+  if (type === "odd-even" || group === "OddEven" || /-OE$/i.test(id)) return "OE";
+  if (type === "other-market" || group === "Fancy3" || group === "OtherMarket" || /-F3$/i.test(id)) return "F3";
+  if (type === "meter" || group === "Meter" || /-MT$/i.test(id)) return "MT";
   return null;
 }
 
@@ -75,11 +94,10 @@ function kindOf(marketId, hint = {}) {
   const id = String(marketId ?? "");
   if (!id) return null;
   const hinted = kindFromHint({ ...hint, marketId: id });
-  if (hinted) {
-    if (kinds.get(id) !== hinted) setBounded(kinds, id, hinted, KIND_LIMIT);
-    return hinted;
-  }
-  return kinds.get(id) || null;
+  if (hinted && kinds.get(id) !== hinted) setBounded(kinds, id, hinted, KIND_LIMIT);
+  const kind = hinted || kinds.get(id) || null;
+  // Only enabled kinds are traced (and pay for tick-state building in the tick path).
+  return kind && enabledKinds().has(kind) ? kind : null;
 }
 
 function write(stage, fields) {
