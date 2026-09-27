@@ -19,6 +19,7 @@ const { getMarketSyncStatus } = require("./cron/marketSync");
 const { getResultSyncStatus } = require("./cron/resultSync");
 const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
 const { getLimitsPollStatus } = require("./services/limitsPollPipeline");
+const marketTraceController = require("./controllers/marketTraceController");
 const { providerLimiter, getProviderRateLimitStatus } = require("./services/providerApi");
 const { getHealthStatus } = require("./services/healthSupervisor");
 const eventLifecycle = require("./services/eventLifecyclePolicy");
@@ -141,6 +142,7 @@ function createApp() {
   app.use("/api/provider", providerRoutes);
   app.use("/api/source", sourceMarketRoutes);
   app.use("/api/logs", logRoutes);
+  app.get("/api/market-trace", adminAuth.requireMarketTraceAccess, marketTraceController.report);
   app.use("/api/redis", redisRoutes);
   app.use("/api/events", eventRoutes);
   app.use(notFound);

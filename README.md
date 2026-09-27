@@ -162,6 +162,18 @@ node scripts/marketTrace.js event <eventId>
 node scripts/marketTrace.js market <marketId>
 ```
 
+The same reports are served over HTTP for remote analysis. Set `MARKET_TRACE_API_KEY` and send it as
+`X-Market-Trace-Key`; that key opens this route only (the admin session or `X-Internal-API-Key`
+also work). At most two reports are read at once; further requests get 429.
+
+```bash
+curl -H "X-Market-Trace-Key: $KEY" "https://<host>/api/market-trace?view=anomalies&days=1&kind=BB"
+curl -H "X-Market-Trace-Key: $KEY" "https://<host>/api/market-trace?view=event&id=<eventId>"
+curl -H "X-Market-Trace-Key: $KEY" "https://<host>/api/market-trace?view=market&id=<marketId>&limit=500"
+curl -H "X-Market-Trace-Key: $KEY" "https://<host>/api/market-trace?view=recent&stage=visibility&limit=200"
+curl -H "X-Market-Trace-Key: $KEY" "https://<host>/api/market-trace?view=files"
+```
+
 `anomalies` groups markets by issue (shown after terminal, discovery active after the socket closed
 it, ticks before the DB row existed, discovered but never ticked, game over without a result,
 blocked while live, repeatedly omitted, price seed failures, unresolved subscriptions) and reports

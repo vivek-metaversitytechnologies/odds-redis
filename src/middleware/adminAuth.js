@@ -103,6 +103,21 @@ function requireAdminApi(req, res, next) {
   return res.status(401).json({ status: "error", message: "Admin authentication required" });
 }
 
+// A read-only key that opens the market trace reports and nothing else, so trace access can be
+// shared without handing out INTERNAL_API_KEY.
+function hasMarketTraceKey(req) {
+  const required = process.env.MARKET_TRACE_API_KEY;
+  if (!required) return false;
+  const left = Buffer.from(String(required));
+  const right = Buffer.from(String(req.get("x-market-trace-key") || ""));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+function requireMarketTraceAccess(req, res, next) {
+  if (hasMarketTraceKey(req)) return next();
+  return requireAdminApi(req, res, next);
+}
+
 module.exports = {
   COOKIE_NAME,
   createSession,
@@ -113,4 +128,6 @@ module.exports = {
   clearSessionCookie,
   requireAdminPage,
   requireAdminApi,
+  hasMarketTraceKey,
+  requireMarketTraceAccess,
 };
