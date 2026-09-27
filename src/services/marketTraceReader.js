@@ -95,6 +95,8 @@ async function collect(options, filter) {
   let lastTs = null;
   let firstTs = null;
   for await (const record of records(options, filter)) {
+    // Game-over census lines cover every market family; the lifecycle report stays BB/LINE/CC.
+    if (record.stage === "socket.gameover") continue;
     // Concurrent writers can interleave slightly, so track the true bounds.
     if (!firstTs || record.ts < firstTs) firstTs = record.ts;
     if (!lastTs || record.ts > lastTs) lastTs = record.ts;

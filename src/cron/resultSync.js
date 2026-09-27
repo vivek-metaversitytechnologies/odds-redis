@@ -355,6 +355,26 @@ async function handleSocketGameOver(marketItems) {
       fancies.push(...fancyRows);
     }
     lookedUpFancies.push(...fancies);
+    const ticksById = new Map(
+      items.filter((item) => item && typeof item === "object").map((item) => [String(item.mid).trim(), item]),
+    );
+    const fancyIds = new Set(fancies.map((fancy) => String(fancy.marketid)));
+    // Line markets are dual-registered; their t_matchfancy row describes them.
+    for (const row of [...fancies, ...markets.filter((market) => !fancyIds.has(String(market.marketid)))]) {
+      const tick = ticksById.get(String(row.marketid));
+      if (!tick) continue;
+      const isFancy = fancyIds.has(String(row.marketid));
+      marketTrace.traceGameOver({
+        kind: isFancy ? String(row.oddstype || row.mtype || "FANCY").toUpperCase() : "REGULAR",
+        eventId: row.eventid,
+        marketId: row.marketid,
+        marketType: isFancy ? row.mtype ?? null : null,
+        name: row.marketname ?? null,
+        res: tick.res ?? null,
+        s: tick.s ?? null,
+        providerTs: tick.t ?? null,
+      });
+    }
     for (const fancy of fancies) {
       marketTrace.trace(
         "result",

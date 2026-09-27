@@ -6,6 +6,7 @@ const subscriptions = require("../src/services/marketSubscriptionService");
 const redis = require("../src/config/redis");
 const frontend = require("../src/services/frontendSocketService");
 const fancyNames = require("../src/services/fancyNameService");
+const marketTrace = require("../src/utils/marketTrace");
 
 process.env.MARKET_TRACE_ENABLED = "false";
 
@@ -19,6 +20,7 @@ const BALL = {
   matchname: "South Africa v Australia",
   sportid: 4,
 };
+const SESSION = { ...BALL, id: 503, marketid: "4.150272715748-F2", marketname: "10 Over Run ENG", oddstype: "F2", mtype: "session" };
 const LINE = { ...BALL, id: 502, marketid: "1.262893097", marketname: "1st Innings 20 Overs Line", oddstype: "LINE", mtype: "line-market" };
 
 // resultSync takes getSourcePool at load time, so the fake is installed before it is required.
@@ -29,7 +31,7 @@ const connection = {
   rollback: async () => {},
   release: () => {},
   query: async (sql, params) => {
-    if (sql.includes("FROM t_matchfancy")) return [[BALL, LINE].filter((row) => params.includes(row.marketid)).map((row) => ({ ...row }))];
+    if (sql.includes("FROM t_matchfancy")) return [[BALL, LINE, SESSION].filter((row) => params.includes(row.marketid)).map((row) => ({ ...row }))];
     if (sql.startsWith("SELECT")) return [[]];
     return [{ affectedRows: 1 }];
   },
@@ -97,4 +99,19 @@ test("ball-by-ball socket rows are separate from line rows and keep an abandoned
     [[BALL.marketid, true, "socket"]],
   );
   assert.deepEqual(resultSync.socketLineResultRows(items, [BALL, LINE]).map((row) => row.marketId), [LINE.marketid]);
+});
+
+test("every market family's game-over is recorded with the result it carried", async (t) => {
+  stubEffects(t);
+  const census = [];
+  t.mock.method(marketTrace, "traceGameOver", (fields) => census.push(fields));
+  await resultSync.handleSocketGameOver([gameOver(SESSION, "50"), gameOver(BALL, "117")]);
+
+  assert.deepEqual(
+    census.map((row) => [row.kind, row.marketId, row.res]).sort(),
+    [
+      ["BB", BALL.marketid, "117"],
+      ["F2", SESSION.marketid, "50"],
+    ],
+  );
 });

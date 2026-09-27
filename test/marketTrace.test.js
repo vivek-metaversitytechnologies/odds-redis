@@ -155,3 +155,16 @@ test("a line market hidden by an unavailable tick records the set and the reason
   assert.equal(hidden.kind, "LINE");
   assert.equal(hidden.reason, "s-false");
 });
+
+test("the game-over census records every market family, not only BB/LINE/CC", (t) => {
+  const records = capture(t);
+  marketTrace.traceGameOver({ kind: "F2", eventId: 7, marketId: "4.1-F2", res: "87" });
+  marketTrace.traceGameOver({ kind: "REGULAR", eventId: 7, marketId: "1.555", res: null });
+  assert.deepEqual(
+    records.map((record) => [record.stage, record.kind, record.marketId, record.res]),
+    [
+      ["socket.gameover", "F2", "4.1-F2", "87"],
+      ["socket.gameover", "REGULAR", "1.555", null],
+    ],
+  );
+});

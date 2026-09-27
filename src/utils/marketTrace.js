@@ -26,6 +26,7 @@ require("winston-daily-rotate-file");
 //   price.seed            HTTP runner price seed for a line market failed or returned nothing
 //   subscription          subscribed | already-registered | unresolved | unsubscribed
 //   result                result persisted or rejected
+//   socket.gameover       any market type's socket game-over with its `res` (not limited to BB/LINE/CC)
 
 const KIND_LIMIT = 200000;
 const STATE_LIMIT = 400000;
@@ -110,6 +111,13 @@ function trace(stage, fields, hint = {}) {
   if (resolved) write(stage, resolved);
 }
 
+// Every market type's socket game-over, bypassing the BB/LINE/CC filter: one line per market when
+// it ends, so the volume stays small. Shows which families carry their result in `res`.
+function traceGameOver(fields) {
+  if (!enabled() || !fields?.marketId) return;
+  write("socket.gameover", fields);
+}
+
 // Writes only when `state` differs from the last state written for this market and slot.
 function traceChange(slot, stage, fields, state, hint = {}) {
   const resolved = resolve(fields, hint);
@@ -186,6 +194,7 @@ async function closeMarketTrace() {
 module.exports = {
   kindOf,
   trace,
+  traceGameOver,
   traceChange,
   traceThrottled,
   tickState,

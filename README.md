@@ -154,6 +154,7 @@ reason for each decision:
 | `price.seed` | a line market's HTTP price seed fails or returns nothing (throttled) |
 | `subscription` | subscribe/unsubscribe outcome |
 | `result` | a result is persisted or rejected, or the socket reports game over |
+| `socket.gameover` | **any** market type's socket game-over, with `kind` (F2, F3, OE, KD, MT, CC, BB, LINE, REGULAR) and the `res` it carried |
 
 Repeated identical states are not rewritten, so the file stays small even at tick rates. Analyse it with:
 
