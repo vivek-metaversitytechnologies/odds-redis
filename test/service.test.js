@@ -2454,6 +2454,7 @@ test("socket res values become direct line-market results only when usable", () 
     result: "128",
     isTie: false,
     isAbandoned: false,
+    source: "socket",
   }]);
   assert.deepEqual(socketLineResultRows(
     [{ mid: "1.100", go: true, res: "Abandoned" }],
@@ -2464,6 +2465,7 @@ test("socket res values become direct line-market results only when usable", () 
     result: "Abandoned",
     isTie: false,
     isAbandoned: true,
+    source: "socket",
   });
 });
 

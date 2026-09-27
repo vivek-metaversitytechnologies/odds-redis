@@ -180,6 +180,16 @@ it, ticks before the DB row existed, discovered but never ticked, game over with
 blocked while live, repeatedly omitted, price seed failures, unresolved subscriptions) and reports
 discovery→first-tick and game-over→result latency.
 
+### Socket result settlement
+
+A socket game-over tick (`go: true`) carries the market's result in `res`. Line markets and, with
+`BALL_BY_BALL_SOCKET_SETTLEMENT=on` (default), ball-by-ball markets are settled from it straight
+away instead of waiting for the once-a-minute results API poll (which took a median 40 s and up to
+10 min for ball-by-ball). `shadow` only traces the socket value (`result` stage, `socket-shadow`);
+`off` restores API-only settlement. The API poller stays the fallback, and results are written with
+`INSERT ... WHERE NOT EXISTS`, so whichever path lands first wins and the other is a no-op. Trace
+`result` records carry `source: socket | api`.
+
 ### Line market suspension
 
 The socket suspends a line market briefly during play (observed 9-17 s) and keeps it `SUSPENDED`

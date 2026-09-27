@@ -287,12 +287,13 @@ async function retireSocketMarkets(connection, rows, regular, closedRows) {
   }
 }
 
-function socketLineResultRows(items, fancies) {
+// Result rows carried by socket game-over ticks (`go` with `res`) for one fancy market type.
+function socketResultRows(items, fancies, marketType) {
   const ticks = new Map((items || [])
     .filter((item) => item && typeof item === "object" && item.go === true)
     .map((item) => [String(item.mid || "").trim(), item]));
   return (fancies || []).flatMap((fancy) => {
-    if (String(fancy.mtype || "").toLowerCase() !== "line-market") return [];
+    if (String(fancy.mtype || "").toLowerCase() !== marketType) return [];
     const tick = ticks.get(String(fancy.marketid));
     const value = tick?.res == null ? "" : String(tick.res).trim();
     if (!value) return [];
@@ -300,12 +301,26 @@ function socketLineResultRows(items, fancies) {
     if (!isAbandoned && fancyResultValue(fancy.marketid, value, fancy.mtype) == null) return [];
     return [{
       marketId: String(fancy.marketid),
-      marketType: "line-market",
+      marketType,
       result: value,
       isTie: false,
       isAbandoned,
+      source: "socket",
     }];
   });
+}
+
+function socketLineResultRows(items, fancies) {
+  return socketResultRows(items, fancies, "line-market");
+}
+
+// Ball-by-ball results used to wait for the once-a-minute API poll (median 40 s, up to 10 min
+// when the results API lagged), although the socket's game-over tick already carries the same
+// value (48/48 identical in production). `on` settles from the socket, `shadow` only records what
+// it would settle, `off` leaves ball-by-ball to the API poller, which is the fallback in every mode.
+function ballByBallSocketSettlementMode() {
+  const mode = String(process.env.BALL_BY_BALL_SOCKET_SETTLEMENT || "on").toLowerCase();
+  return ["on", "shadow", "off"].includes(mode) ? mode : "on";
 }
 
 async function handleSocketGameOver(marketItems) {
@@ -318,6 +333,9 @@ async function handleSocketGameOver(marketItems) {
   const connection = await getSourcePool().getConnection();
   const closedRows = [];
   const terminalEvents = [];
+  // Every fancy row looked up for these game-over ids, retired now or earlier. A ball is usually
+  // retired by its closing (s=false) tick before the game-over tick brings its result.
+  const lookedUpFancies = [];
   let databaseError;
   try {
     const markets = [];
@@ -336,6 +354,7 @@ async function handleSocketGameOver(marketItems) {
       markets.push(...regularRows);
       fancies.push(...fancyRows);
     }
+    lookedUpFancies.push(...fancies);
     for (const fancy of fancies) {
       marketTrace.trace(
         "result",
@@ -423,6 +442,7 @@ async function handleSocketGameOver(marketItems) {
       });
     }
   }
+  const ballByBall = await settleBallByBallFromSocket(items, lookedUpFancies);
   const lineMarketIds = [...new Set(closedRows
     .filter((row) => String(row.mtype || "").toLowerCase() === "line-market")
     .map((row) => String(row.marketid)))];
@@ -451,15 +471,50 @@ async function handleSocketGameOver(marketItems) {
       });
     }
   }
-  const settled = [...new Set([...directSettlement.settled, ...apiSettlement.settled])];
+  const settled = [...new Set([...directSettlement.settled, ...apiSettlement.settled, ...ballByBall.settled])];
   await pendingResults.remove(settled);
   return {
     ...result,
+    ballByBall: { mode: ballByBall.mode, results: ballByBall.results, settled: ballByBall.settled.length },
     directResults: directResults.length,
     directlySettled: directSettlement.settled.length,
     apiFallbackRequested: apiFallbackIds.length,
     apiFallbackSettled: apiSettlement.settled.length,
   };
+}
+
+async function settleBallByBallFromSocket(items, fancies) {
+  const mode = ballByBallSocketSettlementMode();
+  const rows = mode === "off" ? [] : socketResultRows(items, fancies, "ball-by-ball");
+  if (!rows.length) return { mode, results: 0, settled: [] };
+  if (mode === "shadow") {
+    const byId = new Map(fancies.map((fancy) => [String(fancy.marketid), fancy]));
+    for (const row of rows) {
+      marketTrace.trace(
+        "result",
+        { eventId: byId.get(row.marketId)?.eventid, marketId: row.marketId, outcome: "socket-shadow", result: row.result },
+        { marketType: "ball-by-ball" },
+      );
+    }
+    return { mode, results: rows.length, settled: [] };
+  }
+  try {
+    const settlement = await applyResults(rows, { markets: [], fancies });
+    logger.info("[ResultSync] socket ball-by-ball results processed", {
+      received: rows.length,
+      settled: settlement.settled.length,
+      rejected: settlement.rejectedResults,
+      persistenceFailures: settlement.persistenceFailures,
+    });
+    return { mode, results: rows.length, settled: settlement.settled };
+  } catch (error) {
+    // The scheduled result poller keeps retrying unsettled ball-by-ball markets.
+    logger.error("[ResultSync] socket ball-by-ball settlement failed; API polling retained", {
+      marketIds: rows.map((row) => row.marketId),
+      error: error.message,
+    });
+    return { mode, results: rows.length, settled: [] };
+  }
 }
 
 async function publishSocketRetirement(closedRows, terminalEvents) {
@@ -614,7 +669,12 @@ async function persistFancyResult(connection, fancy, result) {
     return true;
   }
   const value = fancyResultValue(fancy.marketid, result.result, fancy.mtype);
-  const resultTrace = { eventId: fancy.eventid, marketId: fancy.marketid, result: result.result ?? null };
+  const resultTrace = {
+    eventId: fancy.eventid,
+    marketId: fancy.marketid,
+    result: result.result ?? null,
+    source: result.source ?? "api",
+  };
   if (value == null) {
     logger.warn("[ResultSync] invalid fancy result", { marketId: fancy.marketid, result: result.result });
     marketTrace.trace("result", { ...resultTrace, outcome: "rejected", reason: "unsupported-value" }, { marketType: fancy.mtype });
@@ -1034,6 +1094,8 @@ module.exports = {
   advanceCandidateCursors,
   isEventTerminalMarketName,
   socketLineResultRows,
+  socketResultRows,
+  ballByBallSocketSettlementMode,
   loadCandidates,
   handleSocketGameOver,
   applyResults,
