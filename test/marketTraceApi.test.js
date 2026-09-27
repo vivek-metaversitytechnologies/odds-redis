@@ -35,11 +35,13 @@ test("anomalies, event, market, recent and files views return the analysed trace
     "ticks-before-db-row",
   ]);
   assert.equal(anomalies.body.data.latencySeconds.gameOverToResult.p50, 6);
+  // 4.01-BB only ever appears blocked right at the start of the window: finished before tracing.
+  assert.equal(anomalies.body.data.preTraceMarkets, 1);
 
   const event = await request(app).get("/api/market-trace?view=event&id=9001").set(...TRACE_KEY).expect(200);
   assert.deepEqual(
     event.body.data.markets.map((market) => market.marketId).sort(),
-    ["4.17-BB", "4.18-BB"],
+    ["4.01-BB", "4.17-BB", "4.18-BB"],
   );
 
   const market = await request(app).get("/api/market-trace?view=market&id=4.17-BB&limit=3").set(...TRACE_KEY).expect(200);

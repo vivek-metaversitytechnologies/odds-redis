@@ -45,6 +45,11 @@ const activeLineMarkets = new Map();
 const LINE_PRICE_SEEN_TTL_MS = 15000;
 let linePriceRefreshRunning = false;
 const missingLineMarketPasses = new Map();
+// t_matchfancy.isactive is deliberately never written by discovery (b37c410), so a closed
+// market still reads as active on every later upsert. Remember what this process already
+// deactivated so the deactivation (Redis removal, vendor unsubscribe) runs once per market,
+// not on every discovery cycle. A market that reopens is forgotten and can close again.
+const deactivatedFancies = new Map();
 const discoveryFingerprints = new Map();
 const lastFullDiscoveryAt = new Map();
 const lastPrimaryDiscoveryAt = new Map();
@@ -538,24 +543,37 @@ async function upsertFancies(fancies) {
         }
       }
     }
+    const deactivatedFancyIds = [];
     for (const fancy of writable) {
+      const marketId = String(fancy.marketId);
       const previous = existing.get(fancy.marketId);
-      marketTrace.trace(
+      const closed = !fancy.isActive || fancy.gameOver;
+      if (!closed) deactivatedFancies.delete(marketId);
+      const deactivated =
+        closed &&
+        !deactivatedFancies.has(marketId) &&
+        (previous?.isActive || (!previous && fancy.marketType === "line-market"));
+      if (deactivated) {
+        deactivatedFancyIds.push(fancy.marketId);
+        setBounded(deactivatedFancies, marketId, true, DISCOVERY_CACHE_LIMIT);
+      }
+      // Discovery re-upserts every fancy each cycle; trace only a change of what was written.
+      const written = { isActive: fancy.isActive, gameOver: fancy.gameOver, status: fancy.status ?? null };
+      marketTrace.traceChange(
+        "db-upsert",
         "db.upsert",
         {
           eventId: fancy.eventId,
           marketId: fancy.marketId,
           action: previous ? "updated" : "inserted",
-          isActive: fancy.isActive,
-          gameOver: fancy.gameOver,
-          status: fancy.status ?? null,
+          ...written,
           wasActive: previous ? previous.isActive : null,
-          deactivated: (!fancy.isActive || fancy.gameOver) && Boolean(previous?.isActive),
+          deactivated,
         },
+        written,
         { marketType: fancy.marketType },
       );
-      if (fancy.marketType === "line-market" && (!fancy.isActive || fancy.gameOver) &&
-          (existing.get(fancy.marketId)?.isActive || !existing.has(fancy.marketId))) {
+      if (deactivated && fancy.marketType === "line-market") {
         logger.info("[LineMarket] deactivated from vendor flags", {
           eventId: fancy.eventId, marketId: fancy.marketId, name: fancy.marketName,
           reason: fancy.gameOver ? "vendor-game-over" : "vendor-inactive",
@@ -563,19 +581,7 @@ async function upsertFancies(fancies) {
         });
       }
     }
-    return {
-      inserted,
-      updated,
-      fancyIds: ids,
-      deactivatedFancyIds: writable
-        .filter(
-          (fancy) =>
-            (!fancy.isActive || fancy.gameOver) &&
-              (existing.get(fancy.marketId)?.isActive ||
-              (!existing.has(fancy.marketId) && fancy.marketType === "line-market")),
-        )
-        .map((fancy) => fancy.marketId),
-    };
+    return { inserted, updated, fancyIds: ids, deactivatedFancyIds };
   } finally {
     connection.release();
   }
@@ -934,7 +940,7 @@ async function reconcileInactiveLineMarkets(markets, { unsubscribe = true } = {}
   );
   const deactivatedMarketIds = persisted.deactivatedFancyIds;
   if (unsubscribe && deactivatedMarketIds.length) {
-    await unsubscribeEventMarkets(deactivatedMarketIds);
+    await unsubscribeEventMarkets(deactivatedMarketIds, { source: "line-market-deactivation" });
   }
   return {
     checked: inactive.length,

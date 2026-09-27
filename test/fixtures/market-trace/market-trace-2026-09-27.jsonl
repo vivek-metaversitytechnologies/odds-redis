@@ -6,5 +6,6 @@
 {"ts":"2026-09-27T10:00:40.000Z","kind":"BB","stage":"visibility","eventId":"9001","marketId":"4.17-BB","visibility":"hidden","reason":"go"}
 {"ts":"2026-09-27T10:00:45.000Z","kind":"BB","stage":"discovery.row","eventId":"9001","marketId":"4.17-BB","isActive":true,"gameOver":false,"recalled":false,"status":"OPEN"}
 {"ts":"2026-09-27T10:00:46.000Z","kind":"BB","stage":"result","eventId":"9001","marketId":"4.17-BB","outcome":"persisted","value":4}
-{"ts":"2026-09-27T10:00:02.000Z","kind":"BB","stage":"tick.rejected","eventId":"9001","marketId":"4.18-BB","reason":"no-db-row","suppressedSinceLast":4}
+{"ts":"2026-09-27T10:20:02.000Z","kind":"BB","stage":"tick.rejected","eventId":"9001","marketId":"4.18-BB","reason":"no-db-row","suppressedSinceLast":4}
 {"ts":"2026-09-27T10:40:00.000Z","kind":"LINE","stage":"tick.blocked","eventId":"9002","marketId":"1.777","reason":"line-terminal-set"}
+{"ts":"2026-09-27T10:00:05.000Z","kind":"BB","stage":"definition","eventId":"9001","marketId":"4.01-BB","action":"blocked","reason":"bb-terminal-set"}

@@ -68,7 +68,10 @@ async function printAnomalies() {
     noResultMs: Number(option("no-result-ms", "1800000")),
     perIssue: 10,
   });
-  console.log(`Markets traced: ${report.marketsTraced} (last record ${report.lastTs ?? "none"})\n`);
+  console.log(
+    `Markets traced: ${report.marketsTraced} (${report.firstTs ?? "none"} .. ${report.lastTs ?? "none"}),` +
+      ` ${report.preTraceMarkets} finished before the window and skipped\n`,
+  );
   const issues = Object.entries(report.issues);
   if (!issues.length) console.log("No anomalies found.");
   for (const [issue, { count, markets }] of issues) {

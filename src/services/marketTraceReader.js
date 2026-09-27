@@ -6,6 +6,9 @@ const readline = require("node:readline");
 // scripts/marketTrace.js and GET /api/market-trace; every function returns plain data.
 
 const MAX_DAYS = 7;
+// A market first seen this soon after the trace window starts, and never live inside it, most
+// likely finished before tracing began; its lifecycle checks would only report missing history.
+const PRE_TRACE_GRACE_MS = 10 * 60 * 1000;
 
 function traceDir(dir) {
   return path.resolve(dir || process.env.MARKET_TRACE_LOG_DIR || "logs/market-trace");
@@ -45,6 +48,8 @@ function emptyMarket(record) {
     eventId: record.eventId,
     marketId: record.marketId,
     name: null,
+    firstSeenAt: Date.parse(record.ts),
+    everLive: false,
     firstDiscoveredAt: null,
     discoveredActive: false,
     firstTickAt: null,
@@ -79,11 +84,20 @@ function counted(record) {
   return 1 + (record.suppressedSinceLast || 0);
 }
 
+function liveTick(record) {
+  const go = record.go === true || record.go === 1 || record.go === "true";
+  const closed = [false, 0, "0", "false"].includes(record.s);
+  return !go && !closed;
+}
+
 async function collect(options, filter) {
   const markets = new Map();
   let lastTs = null;
+  let firstTs = null;
   for await (const record of records(options, filter)) {
-    lastTs = record.ts;
+    // Concurrent writers can interleave slightly, so track the true bounds.
+    if (!firstTs || record.ts < firstTs) firstTs = record.ts;
+    if (!lastTs || record.ts > lastTs) lastTs = record.ts;
     const market = markets.get(record.marketId) || emptyMarket(record);
     markets.set(record.marketId, market);
     if (record.eventId && !market.eventId) market.eventId = record.eventId;
@@ -101,6 +115,7 @@ async function collect(options, filter) {
         if (record.name) market.name ??= record.name;
         market.firstTickAt ??= at;
         market.lastTickAt = at;
+        if (liveTick(record)) market.everLive = true;
         market.ticks += 1;
         if (record.go === true || record.go === 1 || record.go === "true") market.goAt ??= at;
         break;
@@ -109,6 +124,7 @@ async function collect(options, filter) {
         market.visibilityReason = record.reason;
         market.visibilityAt = at;
         if (record.visibility === "shown") {
+          market.everLive = true;
           market.shownCount += 1;
           if (market.terminalAt && at > market.terminalAt) market.shownAfterTerminal += 1;
         } else market.hiddenCount += 1;
@@ -152,11 +168,16 @@ async function collect(options, filter) {
       default:
     }
   }
-  return { markets, lastTs };
+  const traceStart = firstTs ? Date.parse(firstTs) : null;
+  for (const market of markets.values()) {
+    market.preTrace = !market.everLive && traceStart != null && market.firstSeenAt - traceStart < PRE_TRACE_GRACE_MS;
+  }
+  return { markets, lastTs, firstTs };
 }
 
 function issues(market, { lastTs, noTickMs = 120000, noResultMs = 1800000 } = {}) {
   const found = [];
+  if (market.preTrace) return found;
   const end = lastTs ? Date.parse(lastTs) : Date.now();
   if (market.shownAfterTerminal) found.push("shown-after-terminal");
   if (market.discoveryActiveAfterTerminal) found.push("discovery-active-after-terminal");
@@ -200,6 +221,7 @@ function marketSummary(market, context) {
     ...(Object.keys(market.rejected).length ? { rejected: market.rejected } : {}),
     ...(Object.keys(market.blocked).length ? { blocked: market.blocked } : {}),
     ...(market.omitted ? { omitted: market.omitted } : {}),
+    ...(market.preTrace ? { preTrace: true } : {}),
     issues: issues(market, context),
   };
 }
@@ -223,7 +245,7 @@ async function eventSummary(eventId, options = {}) {
 }
 
 async function anomalies({ kind, eventId, noTickMs = 120000, noResultMs = 1800000, perIssue = 25, ...options } = {}) {
-  const { markets, lastTs } = await collect(
+  const { markets, lastTs, firstTs } = await collect(
     options,
     (row) => (!kind || row.kind === kind) && (!eventId || row.eventId === String(eventId)),
   );
@@ -242,6 +264,9 @@ async function anomalies({ kind, eventId, noTickMs = 120000, noResultMs = 180000
   for (const market of list) if (market.visibility === "hidden") bump(hiddenByReason, market.visibilityReason);
   return {
     marketsTraced: markets.size,
+    // Finished before the window began; excluded from issue checks.
+    preTraceMarkets: list.filter((market) => market.preTrace).length,
+    firstTs,
     lastTs,
     issues: Object.fromEntries(
       [...byIssue]
