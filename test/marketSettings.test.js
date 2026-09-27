@@ -56,6 +56,43 @@ test("failed fetches are retried on a later subscription", async (t) => {
   assert.deepEqual(applied, ["1.9"]);
 });
 
+test("omitted settings and apply failures remain queued for retry", async (t) => {
+  t.mock.method(provider, "marketSettings", async () => [
+    { eid: 5, mid: "1.apply-fails", settings: { ms: 1, mas: 2 } },
+  ]);
+  const result = await marketSettings.loadInitialSettings(
+    ["1.apply-fails", "1.omitted"],
+    async () => { throw new Error("database unavailable"); },
+  );
+  assert.deepEqual(result, { requested: 2, applied: 0, failed: 2 });
+  assert.deepEqual(
+    [...marketSettings.__testing__.pendingRetries].sort(),
+    ["1.apply-fails", "1.omitted"],
+  );
+});
+
+test("forced reconnect refresh fetches settings again", async (t) => {
+  const fetch = t.mock.method(provider, "marketSettings", async (mids) =>
+    mids.map((mid) => ({ eid: 5, mid, settings: { ms: 1, mas: 2 } })),
+  );
+  const apply = async () => {};
+  await marketSettings.loadInitialSettings(["1.refresh"], apply);
+  await marketSettings.refreshSettings(["1.refresh"], apply);
+  assert.equal(fetch.mock.callCount(), 2);
+});
+
+test("a room update arriving during reconnect refresh wins over the HTTP snapshot", async (t) => {
+  let release;
+  t.mock.method(provider, "marketSettings", async () => new Promise((resolve) => { release = resolve; }));
+  const applied = [];
+  const refresh = marketSettings.refreshSettings(["1.race"], async (item) => applied.push(item));
+  await new Promise((resolve) => setImmediate(resolve));
+  marketSettings.noteRoomUpdate("1.race");
+  release([{ eid: 5, mid: "1.race", settings: { ms: 1, mas: 2 } }]);
+  await refresh;
+  assert.deepEqual(applied, []);
+});
+
 test("a market room update is not overwritten by the older initial snapshot", async (t) => {
   t.mock.method(provider, "marketSettings", async (mids) =>
     mids.map((mid) => ({ eid: 1, mid, settings: { ms: 1, mas: 2 } })),

@@ -8,6 +8,7 @@ const { startEventSync, syncEvents } = require("./cron/eventSync");
 const { startMarketDiscoverySync } = require("./cron/marketDiscoverySync");
 const { startResultSync, syncResults, handleSocketGameOver } = require("./cron/resultSync");
 const { startRedisEventCleanup } = require("./cron/redisEventCleanup");
+const { startLimitsPollPipelines, stopLimitsPollPipelines } = require("./services/limitsPollPipeline");
 const websocket = require("./services/websocketService");
 const subscriptions = require("./services/marketSubscriptionService");
 const frontendSocket = require("./services/frontendSocketService");
@@ -42,6 +43,7 @@ async function startServer() {
   const marketDiscoveryCronTask = startMarketDiscoverySync();
   const resultCronTask = startResultSync();
   const redisEventCleanupCronTask = startRedisEventCleanup();
+  startLimitsPollPipelines();
   startHealthSupervisor();
   if (cronConfig.competition.runOnStart) {
     syncCompetitions()
@@ -88,10 +90,13 @@ async function startServer() {
       marketDiscoveryCronTask.stop();
       resultCronTask.stop();
       redisEventCleanupCronTask.stop();
+      const limitsPollStopped = stopLimitsPollPipelines();
       stopHealthSupervisor();
       // Requests owned by the outgoing process must not keep PM2 waiting through
       // provider timeouts and retries. The replacement process establishes fresh work.
       await closeProviderRequests();
+      // In-flight settings polls end once their provider requests are aborted above.
+      await limitsPollStopped;
       await providerMetrics.stop();
       await subscriptions.stopSkippedRetries();
       websocket.setResultHandler(null);
@@ -105,6 +110,7 @@ async function startServer() {
       await closeBetPauseCache();
       await closeSourceDb();
       await closeProviderLog();
+      await require("./services/marketSettingsService").stopRetries();
       await closeMarketLimitsLog();
       await closeBallByBallLog();
       await logger.close();

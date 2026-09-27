@@ -168,9 +168,11 @@ async function retireCompletedEvents(events) {
             assignments: "isshow=false,is_show=false,issubscribed=false",
           },
         ]) {
+          const visibleFancyFilter = table === "t_matchfancy"
+            ? " AND (isshow=1 OR is_show=1 OR issubscribed=1)"
+            : "";
           const [rows] = await connection.query(
-            `SELECT id,${column} AS marketid FROM ${table} WHERE eventid=? AND isactive=?
-             ${table === "t_matchfancy" ? "AND (isshow=1 OR is_show=1 OR issubscribed=1)" : ""} ORDER BY id`,
+            `SELECT id,${column} AS marketid FROM ${table} WHERE eventid=? AND isactive=?${visibleFancyFilter} ORDER BY id`,
             [eventId, true],
           );
           for (let offset = 0; offset < rows.length; offset += 100) {

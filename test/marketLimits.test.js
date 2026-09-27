@@ -48,6 +48,11 @@ test("market settings persist both DB tables and preserve live prices across lat
       staged = [];
     },
     query: async (sql, params) => {
+      if (sql.includes("SELECT marketid FROM t_market")) {
+        const [marketId, eventId] = params;
+        const row = rows.get(marketId);
+        return [row && String(row.eventid) === String(eventId) ? [{ marketid: marketId }] : []];
+      }
       assert.match(sql, /target.eventid=limits_update.eventid/);
       if (failFancy && sql.includes("t_matchfancy")) throw new Error("DB failure");
       const [id, eventId, min, max] = params;
@@ -112,7 +117,11 @@ test("market settings persist both DB tables and preserve live prices across lat
   assert.deepEqual(update.payload.LineMarket[0], { ...before, minBet: 50, maxBet: 200000 });
   assert.equal(rows.get("1.9904").minbet, 50);
   assert.equal(rows.get("1.9904").maxbet, 200000);
-  assert.equal(await redis.writeMarketSettings(settings), null);
+  assert.deepEqual(await redis.writeMarketSettings(settings), {
+    eventId: "9904",
+    payload: null,
+    published: false,
+  });
   await redis.writeTicks([{ ...tick, r: [{ rid: 1, s: "ACTIVE", b1: 82 }] }]);
   const after = JSON.parse(store.get("Data-Rs:9904")).LineMarket[0];
   assert.equal(after.minBet, 50);
@@ -138,4 +147,20 @@ test("market settings persist both DB tables and preserve live prices across lat
   assert.equal(rollbacks, 1);
   assert.equal(rows.get("1.9904").minbet, 75);
   assert.equal(store.get("Data-Rs:9904"), stored);
+});
+
+test("market settings reject an unknown market/event pair", async (t) => {
+  const connection = {
+    beginTransaction: async () => {},
+    query: async () => [[]],
+    commit: async () => assert.fail("unknown settings target must not commit"),
+    rollback: async () => {},
+    release: () => {},
+  };
+  t.mock.method(sourceDb, "getSourcePool", () => ({ getConnection: async () => connection }));
+  const redis = require("../src/config/redis");
+  await assert.rejects(
+    redis.writeMarketSettings({ eid: 77, mid: "1.missing", settings: { ms: 10, mas: 100 } }),
+    /target not found/,
+  );
 });

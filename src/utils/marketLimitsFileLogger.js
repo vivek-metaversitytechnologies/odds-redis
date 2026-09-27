@@ -26,9 +26,11 @@ function getLogger() {
       winston.format.timestamp(),
       winston.format.printf((info) => {
         const details = info.details || {};
-        return `${info.timestamp} | MARKET LIMIT UPDATE | event=${readable(details.eventId)}` +
+        return `${info.timestamp} | MARKET LIMIT ${readable(details.outcome).toUpperCase()}` +
+          ` | event=${readable(details.eventId)}` +
           ` | market=${readable(details.marketId)} | minbet=${readable(details.minbet)}` +
-          ` | maxbet=${readable(details.maxbet)}`;
+          ` | maxbet=${readable(details.maxbet)}` +
+          (details.error ? ` | error=${readable(details.error)}` : "");
       }),
     ),
     transports: [transport],
@@ -38,7 +40,7 @@ function getLogger() {
   return instance;
 }
 
-function writeMarketLimitsLog(item) {
+function writeMarketLimitsLog(item, outcome = "RECEIVED", error = null) {
   if (String(process.env.MARKET_LIMITS_LOG_TO_FILE || "true").toLowerCase() !== "true") return;
   // Record received values before validation or persistence, including partial updates.
   try {
@@ -48,11 +50,17 @@ function writeMarketLimitsLog(item) {
         marketId: item?.mid ?? null,
         minbet: item?.settings?.ms ?? null,
         maxbet: item?.settings?.mas ?? null,
+        outcome,
+        error,
       },
     });
   } catch (error) {
     logger.error("[MarketLimitsLog] write failed", { error: error.message });
   }
+}
+
+function writeMarketLimitsOutcome(outcome, item, error) {
+  writeMarketLimitsLog(item, outcome, error?.message || error || null);
 }
 
 async function closeMarketLimitsLog() {
@@ -76,4 +84,4 @@ async function closeMarketLimitsLog() {
   await Promise.all(flushed);
 }
 
-module.exports = { writeMarketLimitsLog, closeMarketLimitsLog };
+module.exports = { writeMarketLimitsLog, writeMarketLimitsOutcome, closeMarketLimitsLog };

@@ -5,7 +5,6 @@ const queue = require("../src/services/pendingResultQueue");
 const redis = require("../src/config/redis");
 
 const KEY = "Pending-Regular-Results";
-const ATTEMPTS_KEY = `${KEY}:attempts`;
 const FIRST_QUEUED_KEY = `${KEY}:firstQueuedAt`;
 const REVIEW_KEY = `${KEY}:review`;
 

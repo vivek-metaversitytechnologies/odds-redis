@@ -13,7 +13,10 @@ values are recorded as `not-provided`. These are received values, not confirmati
 successful database write. Logging is enabled by default, independently of
 `LOG_LEVEL`, `LOG_TO_FILE`, and `PROVIDER_LOG_TO_FILE`. Configure it with
 `MARKET_LIMITS_LOG_TO_FILE`, `MARKET_LIMITS_LOG_DIR`, `MARKET_LIMITS_LOG_MAX_SIZE`
-(default `25m`), and `MARKET_LIMITS_LOG_MAX_FILES` (default `14d`).
+(default `25m`), and `MARKET_LIMITS_LOG_MAX_FILES` (default `14d`). Entries identify
+whether an update was `RECEIVED`, `SAVED`, `RETRYING`, or `RECOVERED`. Failed or
+omitted settings are fetched again every `MARKET_SETTINGS_RETRY_MS` (default five
+seconds), and all subscribed market settings are refreshed after a socket reconnect.
 
 Ball-by-Ball discovery records and live `-BB` socket ticks are logged separately as
 readable lines in `logs/ball-by-ball/ball-by-ball-YYYY-MM-DD.log`. Configure rotation
@@ -128,6 +131,26 @@ and bytes. The same figures appear on the admin overview.
 `REDIS_EVENT_CLEANUP_CRON` (every 10 minutes by default) scans event snapshot and score keys and
 removes events that are no longer active in `t_event`. The cleanup is fail-safe: a source database
 query failure aborts the run before any Redis keys are deleted.
+
+### Stake-limit polling
+
+The provider's `market` room is not a reliable source of stake limits on its own: it has pushed
+placeholder limits (`minbet`/`maxbet` of 1) and later corrected them only in its settings API. Two
+in-process pipelines therefore poll `POST /v1/markets/settings` for everything the frontend lists:
+
+| Pipeline | Payload groups | Interval | Budget |
+|---|---|---|---|
+| `market` | `Odds`, `Bookmaker` | `LIMITS_MARKET_POLL_INTERVAL_MS` (30000) | `LIMITS_MARKET_POLL_MAX_REQUESTS_PER_MINUTE` (60) |
+| `fancy` | every other group | `LIMITS_FANCY_POLL_INTERVAL_MS` (5000) | `LIMITS_FANCY_POLL_MAX_REQUESTS_PER_MINUTE` (240) |
+
+Targets are the events in the active-match list (`SPORT_IDS`) and the markets their frontend
+payloads show. Only limits that differ from the payload are written (DB, Redis, frontend tick). If
+the listed markets need more requests than a run's budget allows, a rotating cursor covers them
+across runs; `lastRun.fullCycleMs` in `/health` (`pipelines.limitsPoll`) reports how long one full
+pass takes. Runs are skipped while total provider traffic is above
+`LIMITS_POLL_PROVIDER_HEADROOM_PERCENT` of the application cap, and markets the provider omits from
+its response are not requested again for `LIMITS_POLL_UNSUPPORTED_TTL_MS`. Tune `*_BATCH_SIZE` with
+`node scripts/benchmarkMarketSettings.js` on the server.
 Event snapshots and scorecards also use sliding 24-hour TTLs by default; configure them with
 `REDIS_EVENT_TTL_SECONDS` and `REDIS_SCORE_TTL_SECONDS`.
 Empty runner responses are cached for `RUNNER_MISS_CACHE_MS` (default: 300000).

@@ -182,6 +182,12 @@ function requestWindow(windowMs, now = Date.now()) {
   };
 }
 
+// Cheap budget probe for background pollers that should yield to ingestion traffic.
+function providerBudget(now = Date.now()) {
+  pruneRequestAttempts(now);
+  return { usedLastMinute: requestAttempts.length, perMinute: maxRequestsPerMinute };
+}
+
 function isVendorRateLimitResponse(status, body) {
   const message = typeof body === "string" ? body : JSON.stringify(body || "");
   return (
@@ -397,6 +403,7 @@ function postIds(path, ids, { source } = {}) {
 module.exports = {
   providerLimiter,
   getProviderRateLimitStatus,
+  providerBudget,
   isVendorRateLimitResponse,
   request,
   closeProviderRequests,

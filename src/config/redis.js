@@ -1296,6 +1296,17 @@ async function writeMarketSettings(item) {
     const connection = await getSourcePool().getConnection();
     try {
       await connection.beginTransaction();
+      const [targets] = await connection.query(
+        `SELECT marketid FROM t_market WHERE marketid=? AND eventid=?
+         UNION ALL
+         SELECT fancyid AS marketid FROM t_matchfancy WHERE fancyid=? AND eventid=?`,
+        [marketId, eventId, marketId, eventId],
+      );
+      if (!targets.length) {
+        const error = new Error(`Market settings target not found for market ${marketId}, event ${eventId}`);
+        error.code = "MARKET_SETTINGS_TARGET_MISSING";
+        throw error;
+      }
       const rows = [{ marketId, eventId, ...limits }];
       await persistLimits(connection, rows);
       await persistLimits(connection, rows, true);
@@ -1308,10 +1319,10 @@ async function writeMarketSettings(item) {
     }
     invalidateMarkets([marketId]);
     const redis = await getRedisClient();
-    if (!redis?.isOpen) return null;
+    if (!redis?.isOpen) throw new Error("Redis unavailable while publishing market settings");
     const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
     const current = eventPayloadCache.get(eventId) || JSON.parse((await redis.get(key)) || "null");
-    if (!current) return null;
+    if (!current) throw new Error(`Redis event snapshot missing for market settings event ${eventId}`);
     const payload = normalizeEventPayload(structuredClone(current));
     let changed = false;
     for (const group of PAYLOAD_GROUPS) {
@@ -1325,10 +1336,10 @@ async function writeMarketSettings(item) {
         }
       }
     }
-    if (!changed) return null;
+    if (!changed) return { eventId, payload: null, published: false };
     await redis.set(key, JSON.stringify(payload), { EX: EVENT_TTL_SECONDS });
     setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
-    return { eventId, payload };
+    return { eventId, payload, published: true };
   });
 }
 
@@ -1607,6 +1618,33 @@ async function getEventSnapshots(eventIds, timings) {
   return snapshots;
 }
 
+// Frontend-visible payloads for many events, preferring this process's write-through cache so
+// frequent pollers do not re-read and re-parse every snapshot from Redis.
+async function getFrontendEventPayloads(eventIds) {
+  const ids = [...new Set((eventIds || []).map(String).filter(Boolean))];
+  const payloads = new Map();
+  const missing = [];
+  for (const eventId of ids) {
+    const cached = eventPayloadCache.get(eventId);
+    if (cached) payloads.set(eventId, frontendEventPayload(cached));
+    else missing.push(eventId);
+  }
+  if (!missing.length) return payloads;
+  const redis = await getRedisReadClient();
+  if (!redis?.isOpen) return payloads;
+  const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+  const values = await redis.mGet(missing.map((eventId) => `${prefix}${eventId}`));
+  missing.forEach((eventId, index) => {
+    if (!values[index]) return;
+    try {
+      payloads.set(eventId, frontendEventPayload(JSON.parse(values[index])));
+    } catch {
+      // A malformed snapshot is skipped; the next write replaces it.
+    }
+  });
+  return payloads;
+}
+
 async function removeMarkets(eventId, marketIds) {
   const normalizedIds = [...new Set((marketIds || []).map((id) => String(id)))];
   const redis = await getRedisClient();
@@ -1706,6 +1744,7 @@ module.exports = {
   removeEvent,
   getEventSnapshot,
   getEventSnapshots,
+  getFrontendEventPayloads,
   inspectTicks,
   getTickActivity,
   clearTickActivity,

@@ -49,7 +49,10 @@ test("discovery and retirement keep lock lifetimes bounded", async (t) => {
     connection.query = async (sql, args) => {
       if (sql.startsWith("SELECT")) {
         assert.equal(inTransaction, false);
-        assert.match(sql, /WHERE eventid=\? AND isactive=\? ORDER BY id/);
+        assert.match(
+          sql,
+          /WHERE eventid=\? AND isactive=\?(?: AND \(isshow=1 OR is_show=1 OR issubscribed=1\))? ORDER BY id/,
+        );
         assert.deepEqual(args, [7, true]);
         return [sql.includes("t_matchfancy") ? [] : [...active].filter(([, value]) => value).map(([id]) => ({ id, marketid: String(id) }))];
       }

@@ -3,10 +3,10 @@ const crypto = require("node:crypto");
 const redisStore = require("../config/redis");
 const logger = require("../utils/logger");
 const { writeProviderLog } = require("../utils/providerFileLogger");
-const { writeMarketLimitsLog } = require("../utils/marketLimitsFileLogger");
+const { writeMarketLimitsLog, writeMarketLimitsOutcome } = require("../utils/marketLimitsFileLogger");
 const { writeBallByBallSocketLog } = require("../utils/ballByBallFileLogger");
 const { deleteMarketBetPause } = require("./betPauseCacheService");
-const { noteRoomUpdate } = require("./marketSettingsService");
+const marketSettings = require("./marketSettingsService");
 const { integer } = require("../config/env");
 const { setBounded } = require("../utils/boundedMap");
 
@@ -410,9 +410,17 @@ function applyMarketSettings(item) {
   return redisStore
     .writeMarketSettings(item)
     .then((update) => {
-      if (update) tickPublisher(update.eventId, update.payload);
+      if (update?.payload) tickPublisher(update.eventId, update.payload);
+      return update;
     })
-    .catch((error) => logger.error("[ProviderWS] market settings write failed", { error: error.message }));
+    .catch((error) => {
+      logger.error("[ProviderWS] market settings write failed", {
+        eventId: item?.eid ?? null,
+        marketId: item?.mid ?? null,
+        error: error.message,
+      });
+      throw error;
+    });
 }
 
 function trackedApplyMarketSettings(item) {
@@ -446,6 +454,7 @@ function connectSocket() {
     },
   });
   socket.on("connect", () => {
+    const reconnected = state.lastConnectedAt !== null;
     state.connected = true;
     state.socketId = socket.id;
     state.lastConnectedAt = new Date().toISOString();
@@ -455,6 +464,13 @@ function connectSocket() {
       const now = Date.now();
       for (const id of subscribedMarketIds) marketSubscribedAt.set(id, now);
       socket.emit("subscribe", [...subscribedMarketIds]);
+      if (reconnected) {
+        void marketSettings.refreshSettings([...subscribedMarketIds], trackedApplyMarketSettings)
+          .catch((error) => logger.error("[MarketSettings] reconnect refresh failed", {
+            markets: subscribedMarketIds.size,
+            error: error.message,
+          }));
+      }
     }
   });
   socket.on("tick", (data) => {
@@ -511,8 +527,14 @@ function connectSocket() {
           error: error.message,
         }),
       );
-      noteRoomUpdate(item?.mid);
-      const write = Promise.allSettled([cacheDelete, applyMarketSettings(item)]);
+      marketSettings.noteRoomUpdate(item?.mid);
+      const settingsWrite = applyMarketSettings(item)
+        .then((update) => writeMarketLimitsOutcome(update ? "SAVED" : "IGNORED", item))
+        .catch((error) => {
+          writeMarketLimitsOutcome("RETRYING", item, error);
+          marketSettings.queueRefresh([item?.mid], trackedApplyMarketSettings);
+        });
+      const write = Promise.allSettled([cacheDelete, settingsWrite]);
       marketSettingsWrites.add(write);
       void write.finally(() => marketSettingsWrites.delete(write));
     }
