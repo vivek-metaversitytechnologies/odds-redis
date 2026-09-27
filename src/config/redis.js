@@ -7,6 +7,7 @@ const logger = require("../utils/logger");
 const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
 const { providerLimits, persistLimits } = require("../utils/marketLimits");
+const marketTrace = require("../utils/marketTrace");
 
 let client;
 let connecting;
@@ -913,6 +914,11 @@ async function reconcileFancyDefinitions(markets) {
         const terminalMarketIds = definitions
           .filter(({ market, group }) => group === "BallByBall" && (market.gameOver || market.recalled))
           .map(({ market }) => String(market.marketId));
+        for (const marketId of terminalMarketIds) {
+          marketTrace.traceChange("bb-terminal", "bb.terminal", { eventId, marketId, source: "discovery" }, "terminal", {
+            group: "BallByBall",
+          });
+        }
         if (terminalMarketIds.length) {
           const terminalKey = terminalBallByBallKey(eventId);
           await redis.sAdd(terminalKey, terminalMarketIds);
@@ -923,12 +929,14 @@ async function reconcileFancyDefinitions(markets) {
         for (const { market, group } of definitions) {
           const marketId = String(market.marketId);
           const index = payload[group].findIndex((entry) => entryMarketId(entry) === marketId);
-          const active = market.isActive && !market.gameOver && !market.recalled &&
-            !(group === "BallByBall" && terminalBallByBallIds.has(marketId));
+          const terminalBlocked = group === "BallByBall" && terminalBallByBallIds.has(marketId);
+          const active = market.isActive && !market.gameOver && !market.recalled && !terminalBlocked;
+          const definitionTrace = { eventId, marketId, group, name: market.marketName ?? null };
           if (active && index < 0) {
             payload[group].push(fancyDefinitionEntry(market));
             added += 1;
             changed = true;
+            marketTrace.trace("definition", { ...definitionTrace, action: "added" }, { group });
           } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
             const definition = fancyDefinitionEntry(market);
             if (JSON.stringify(payload[group][index]) !== JSON.stringify(definition)) {
@@ -946,6 +954,18 @@ async function reconcileFancyDefinitions(markets) {
             payload[group].splice(index, 1);
             removed += 1;
             changed = true;
+            marketTrace.trace(
+              "definition",
+              {
+                ...definitionTrace,
+                action: "removed",
+                reason: market.gameOver ? "game-over" : market.recalled ? "recalled" : !market.isActive ? "inactive" : "bb-terminal-set",
+              },
+              { group },
+            );
+          } else if (!active && index < 0 && terminalBlocked && market.isActive && !market.gameOver && !market.recalled) {
+            // Discovery still reports the market live, but the socket already closed it.
+            marketTrace.traceThrottled("definition", { ...definitionTrace, action: "blocked" }, "bb-terminal-set", { group });
           }
           if (active && index >= 0 && supportsFancyNameRepair(marketId) &&
               isFallbackFancyName(payload[group][index].nation) && !isFallbackFancyName(market.marketName)) {
@@ -1102,7 +1122,10 @@ async function reconcileRegularDefinitions(markets) {
             lineVisibility.terminal.has(marketId) || lineVisibility.unavailable.has(marketId)
           );
           const active = market.isActive && !market.gameOver && !blockedLineMarket;
+          const hint = { marketType: market.marketType };
+          const lineReason = lineVisibility.terminal.has(marketId) ? "line-terminal-set" : "line-unavailable-set";
           if (!active) {
+            let wasPresent = false;
             for (const group of PAYLOAD_GROUPS) {
               const filtered = payload[group].filter(
                 (entry) => entryMarketId(entry) !== marketId,
@@ -1110,8 +1133,15 @@ async function reconcileRegularDefinitions(markets) {
               if (filtered.length !== payload[group].length) {
                 removed += 1;
                 changed = true;
+                wasPresent = true;
                 payload[group] = filtered;
               }
+            }
+            const reason = market.gameOver ? "game-over" : !market.isActive ? "inactive" : lineReason;
+            if (wasPresent) {
+              marketTrace.trace("definition", { eventId, marketId, action: "removed", reason, status: market.status ?? null }, hint);
+            } else if (market.isActive && !market.gameOver && blockedLineMarket) {
+              marketTrace.traceThrottled("definition", { eventId, marketId, action: "blocked", status: market.status ?? null }, reason, hint);
             }
             continue;
           }
@@ -1160,6 +1190,11 @@ async function reconcileRegularDefinitions(markets) {
           payload[group].push(...entries);
           added += 1;
           changed = true;
+          marketTrace.trace(
+            "definition",
+            { eventId, marketId, group, action: "added", runners: (market.runners || []).length, status: market.status ?? null },
+            hint,
+          );
         }
         if (!changed) return;
         moveTiedMatchLast(payload);
@@ -1198,6 +1233,23 @@ function shouldRemoveFromPayload(group, item, market) {
   if (group === "Odds") return false;
   if (group === "BallByBall") return terminalBallByBallTick(item) || !booleanOr(item.s, true);
   return booleanOr(item.go, false) || !booleanOr(item.s, true);
+}
+
+// Why a tick left a market out of the payload; mirrors shouldRemoveFromPayload and the terminal
+// / unavailable set checks in writeEventTicks. Used only for the market trace.
+function hiddenReason(group, item, market, { blockedBallByBall, blockedLineMarket, lineTerminal }) {
+  if (isFullySuspendedToss(group, item, market)) return "suspended-toss";
+  if (booleanOr(item.go, false)) return "go";
+  if (group === "BallByBall" && booleanOr(item.rt, false)) return "rt";
+  if (group === "BallByBall" && abandoned(item)) return "abandoned";
+  if (!booleanOr(item.s, true)) return "s-false";
+  if (blockedBallByBall) return "bb-terminal-set";
+  if (blockedLineMarket) return lineTerminal ? "line-terminal-set" : "line-unavailable-set";
+  return "unknown";
+}
+
+function traceHint(group, market) {
+  return { group, marketType: market?.mtype ?? market?.markettype ?? market?.marketType };
 }
 
 async function loadRunnerNames(marketId) {
@@ -1365,11 +1417,30 @@ async function writeEventTicks(items) {
   });
   const acceptedItems = new Set(acceptedRows.map(({ item }) => item));
   rejected.push(...marketRows.filter(({ item }) => !acceptedItems.has(item)).map(({ item }) => item));
+  for (const { item, market } of marketRows) {
+    if (acceptedItems.has(item)) continue;
+    marketTrace.traceThrottled(
+      "tick.rejected",
+      { eventId, marketId: item.mid, s: item.s ?? null, go: item.go ?? null, res: item.res ?? null },
+      market ? "inactive-in-db" : "no-db-row",
+      traceHint(market ? payloadGroup(item, market) : null, market),
+    );
+  }
   if (!acceptedRows.length) return { payload: false, accepted: [], rejected };
   const key = `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventId}`;
   const newlyTerminalBallByBallIds = acceptedRows
     .filter(({ item, market }) => payloadGroup(item, market) === "BallByBall" && terminalBallByBallTick(item))
     .map(({ item }) => String(item.mid));
+  for (const marketId of newlyTerminalBallByBallIds) {
+    const item = acceptedRows.find((row) => String(row.item.mid) === marketId).item;
+    marketTrace.traceChange(
+      "bb-terminal",
+      "bb.terminal",
+      { eventId, marketId, source: "tick", s: item.s ?? null, go: item.go ?? null, rt: item.rt ?? null, res: item.res ?? null },
+      "terminal",
+      { group: "BallByBall" },
+    );
+  }
   if (newlyTerminalBallByBallIds.length) {
     const terminalKey = terminalBallByBallKey(eventId);
     await redis.sAdd(terminalKey, newlyTerminalBallByBallIds);
@@ -1386,6 +1457,18 @@ async function writeEventTicks(items) {
   const newlyAvailableLineIds = lineRows
     .filter(({ item }) => explicitActivity(item.s) === true && !booleanOr(item.go, false))
     .map(({ item }) => String(item.mid));
+  for (const { item } of lineRows) {
+    const activity = explicitActivity(item.s);
+    const membership = booleanOr(item.go, false) ? "terminal" : activity === null ? null : activity ? "available" : "unavailable";
+    if (!membership) continue;
+    marketTrace.traceChange(
+      "line-set",
+      "line.set",
+      { eventId, marketId: item.mid, set: membership, s: item.s ?? null, go: item.go ?? null, res: item.res ?? null },
+      membership,
+      { group: "LineMarket" },
+    );
+  }
   if (newlyTerminalLineIds.length) {
     await redis.sAdd(terminalLineMarketKey(eventId), newlyTerminalLineIds);
     await redis.expire(terminalLineMarketKey(eventId), EVENT_TTL_SECONDS);
@@ -1439,6 +1522,44 @@ async function writeEventTicks(items) {
         lineVisibility.terminal.has(marketId) || lineVisibility.unavailable.has(marketId)
       );
       const newEntries = removeFromPayload || blockedBallByBall || blockedLineMarket ? [] : entries;
+      const hint = traceHint(group, market);
+      if (marketTrace.kindOf(marketId, hint)) {
+        const state = marketTrace.tickState(item);
+        marketTrace.traceChange(
+          "tick",
+          "tick.state",
+          { eventId, marketId, group, name: item.na ?? null, providerTs: item.t ?? null, ...state, prices: marketTrace.tickPrices(item) },
+          state,
+          hint,
+        );
+        const wasVisible = previousEntries.length > 0 || movedFromOtherGroup;
+        const reason = newEntries.length
+          ? "tick"
+          : hiddenReason(group, item, market, {
+              blockedBallByBall,
+              blockedLineMarket,
+              lineTerminal: lineVisibility.terminal.has(marketId),
+            });
+        if (wasVisible !== newEntries.length > 0) {
+          marketTrace.trace(
+            "visibility",
+            {
+              eventId,
+              marketId,
+              group,
+              visibility: newEntries.length ? "shown" : "hidden",
+              reason,
+              frontendStatus: newEntries[0]?.gstatus ?? newEntries[0]?.status ?? null,
+              s: item.s ?? null,
+              go: item.go ?? null,
+            },
+            hint,
+          );
+        } else if (!newEntries.length && !removeFromPayload && (blockedBallByBall || blockedLineMarket)) {
+          // The tick itself looks live but a terminal/unavailable marker keeps it hidden.
+          marketTrace.traceThrottled("tick.blocked", { eventId, marketId, group, s: item.s ?? null, go: item.go ?? null }, reason, hint);
+        }
+      }
       const marketChanged =
         movedFromOtherGroup ||
         previousEntries.length !== newEntries.length ||
