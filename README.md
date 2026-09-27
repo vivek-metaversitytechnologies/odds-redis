@@ -132,10 +132,10 @@ and bytes. The same figures appear on the admin overview.
 removes events that are no longer active in `t_event`. The cleanup is fail-safe: a source database
 query failure aborts the run before any Redis keys are deleted.
 
-### Market trace (ball-by-ball and line markets)
+### Market trace (ball-by-ball, line and cricket-casino markets)
 
-Every ball-by-ball and line market's lifecycle is written to `logs/market-trace/market-trace-<date>.jsonl`,
-one JSON object per line with `ts`, `kind` (`BB`/`LINE`), `stage`, `eventId`, `marketId` and the
+Every ball-by-ball, line and cricket-casino market's lifecycle is written to `logs/market-trace/market-trace-<date>.jsonl`,
+one JSON object per line with `ts`, `kind` (`BB`/`LINE`/`CC`), `stage`, `eventId`, `marketId` and the
 reason for each decision:
 
 | Stage | Written when |
@@ -158,7 +158,7 @@ reason for each decision:
 Repeated identical states are not rewritten, so the file stays small even at tick rates. Analyse it with:
 
 ```bash
-node scripts/marketTrace.js anomalies [--days=1] [--kind=BB|LINE] [--event=<id>]
+node scripts/marketTrace.js anomalies [--days=1] [--kind=BB|LINE|CC] [--event=<id>]
 node scripts/marketTrace.js event <eventId>
 node scripts/marketTrace.js market <marketId>
 ```

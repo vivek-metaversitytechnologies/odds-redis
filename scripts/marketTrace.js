@@ -2,7 +2,7 @@
 //
 //   node scripts/marketTrace.js market <marketId> [--days=2]   full timeline of one market
 //   node scripts/marketTrace.js event <eventId> [--days=2]     one row per market of an event
-//   node scripts/marketTrace.js anomalies [--days=1] [--kind=BB|LINE] [--event=<id>]
+//   node scripts/marketTrace.js anomalies [--days=1] [--kind=BB|LINE|CC] [--event=<id>]
 //                                         [--no-tick-ms=120000] [--no-result-ms=1800000]
 //
 // --dir overrides MARKET_TRACE_LOG_DIR (default logs/market-trace). --days reads the newest N files.

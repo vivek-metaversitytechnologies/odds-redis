@@ -49,7 +49,7 @@ function fakeRedis() {
   };
 }
 
-test("only ball-by-ball and line markets are traced, and a line id is remembered once identified", (t) => {
+test("only ball-by-ball, line and cricket-casino markets are traced, and a line id is remembered once identified", (t) => {
   const records = capture(t);
 
   marketTrace.trace("definition", { eventId: 1, marketId: "4.1-F2" }, { marketType: "session" });
@@ -57,6 +57,7 @@ test("only ball-by-ball and line markets are traced, and a line id is remembered
   marketTrace.trace("definition", { eventId: 1, marketId: "1.500" }, { marketType: "line-market" });
   marketTrace.trace("subscription", { eventId: null, marketId: "1.500", outcome: "subscribed" });
   marketTrace.trace("subscription", { eventId: null, marketId: "1.999", outcome: "subscribed" });
+  marketTrace.trace("result", { eventId: 1, marketId: "11.900925862394-CC", outcome: "persisted" });
 
   assert.deepEqual(
     records.map((record) => [record.kind, record.marketId, record.stage]),
@@ -64,6 +65,7 @@ test("only ball-by-ball and line markets are traced, and a line id is remembered
       ["BB", "4.1-BB", "definition"],
       ["LINE", "1.500", "definition"],
       ["LINE", "1.500", "subscription"],
+      ["CC", "11.900925862394-CC", "result"],
     ],
   );
 });

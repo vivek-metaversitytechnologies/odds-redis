@@ -18,7 +18,7 @@ function identifier(value) {
 async function report(req, res, next) {
   const view = String(req.query.view || "anomalies");
   const days = bounded(req.query.days, 1, 1, reader.MAX_DAYS);
-  const kind = ["BB", "LINE"].includes(req.query.kind) ? req.query.kind : undefined;
+  const kind = ["BB", "LINE", "CC"].includes(req.query.kind) ? req.query.kind : undefined;
   const id = identifier(req.query.id);
   if (["event", "market"].includes(view) && !id) {
     return res.status(400).json({ status: "error", message: `view=${view} requires id` });

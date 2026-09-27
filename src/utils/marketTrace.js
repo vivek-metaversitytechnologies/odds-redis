@@ -5,7 +5,7 @@ const { integer } = require("../config/env");
 const { setBounded } = require("./boundedMap");
 require("winston-daily-rotate-file");
 
-// Lifecycle trace for ball-by-ball and line markets, written as JSON Lines (one event per line)
+// Lifecycle trace for ball-by-ball, line and cricket-casino markets, written as JSON Lines (one event per line)
 // for analysis with jq or scripts/marketTrace.js. Each line has ts, kind (BB|LINE), stage,
 // eventId, marketId and stage-specific fields. Only transitions are written: repeated identical
 // states are deduplicated and repeated rejections are throttled, so high-frequency ticks stay cheap.
@@ -62,6 +62,9 @@ function kindFromHint({ marketId, marketType, group } = {}) {
   const type = String(marketType || "").toLowerCase();
   if (type === "ball-by-ball" || group === "BallByBall" || /-BB$/i.test(String(marketId || ""))) return "BB";
   if (type === "line-market" || group === "LineMarket") return "LINE";
+  // Cricket casino results trail the over by a long way on the results API; tracing their few
+  // markets shows whether the socket game-over already carries the result.
+  if (type === "cricket-casino" || group === "CricketCasino" || /-CC$/i.test(String(marketId || ""))) return "CC";
   return null;
 }
 
