@@ -1119,6 +1119,7 @@ module.exports = {
   persistMarketResult,
   persistFancyResult,
   persistExceptional,
+  hasExceptionalTable,
   __testing__: {
     candidateCursors,
     resetCandidateCursors() {

@@ -17,6 +17,7 @@ const { getEventSyncStatus } = require("./cron/eventSync");
 const { getMarketDiscoveryStatus } = require("./cron/marketDiscoverySync");
 const { getMarketSyncStatus } = require("./cron/marketSync");
 const { getResultSyncStatus } = require("./cron/resultSync");
+const { getCasinoResultChaseStatus } = require("./cron/casinoResultChaser");
 const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
 const { getLimitsPollStatus } = require("./services/limitsPollPipeline");
 const marketTraceController = require("./controllers/marketTraceController");
@@ -96,6 +97,7 @@ function createApp() {
           discovery: getMarketDiscoveryStatus(),
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
+          casinoResultChase: getCasinoResultChaseStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
           limitsPoll: getLimitsPollStatus(),
           eventLifecycle: eventLifecycle.getStatus(),
@@ -116,6 +118,7 @@ function createApp() {
           discovery: getMarketDiscoveryStatus(),
           subscriptions: getMarketSyncStatus(),
           results: getResultSyncStatus(),
+          casinoResultChase: getCasinoResultChaseStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
           limitsPoll: getLimitsPollStatus(),
           eventLifecycle: eventLifecycle.getStatus(),

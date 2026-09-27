@@ -191,6 +191,15 @@ away instead of waiting for the once-a-minute results API poll (which took a med
 `INSERT ... WHERE NOT EXISTS`, so whichever path lands first wins and the other is a no-op. Trace
 `result` records carry `source: socket | api`.
 
+### Cricket-casino result chase
+
+The vendor computes a cricket-casino result only when that market is requested in a small results
+request; the poller's large batches return existing results but never create one (measured: a
+450-id request missed it twice, a single-id request created it immediately). The casino chaser
+(`CASINO_RESULT_CHASE_INTERVAL_MS`, default 20 s) asks for every unsettled casino market of in-play
+cricket events in batches of `CHASE_BATCH_SIZE` (code constant) and settles what comes back through
+the normal result path. Status: `/health` → `pipelines.casinoResultChase`.
+
 ### Line market suspension
 
 The socket suspends a line market briefly during play (observed 9-17 s) and keeps it `SUSPENDED`
