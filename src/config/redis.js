@@ -27,6 +27,7 @@ const EVENT_METADATA_TTL_SECONDS = integer("REDIS_EVENT_METADATA_TTL_SECONDS", 1
 const SCORE_TTL_SECONDS = integer("REDIS_SCORE_TTL_SECONDS", 86400, { min: 60 });
 const ACTIVE_MATCH_TTL_SECONDS = integer("REDIS_ACTIVE_MATCH_TTL_SECONDS", 172800, { min: 300 });
 const TERMINAL_BALL_BY_BALL_KEY_PREFIX = "Terminal-BallByBall-Rs:";
+const TERMINAL_BALL_BY_BALL_AT_KEY_PREFIX = "Terminal-BallByBall-At-Rs:";
 const TERMINAL_LINE_MARKET_KEY_PREFIX = "Terminal-LineMarket-Rs:";
 const UNAVAILABLE_LINE_MARKET_KEY_PREFIX = "Unavailable-LineMarket-Rs:";
 
@@ -589,6 +590,71 @@ async function terminalBallByBallMarketIds(redis, eventId) {
   return new Set(await redis.sMembers(terminalBallByBallKey(eventId)));
 }
 
+// When each terminal ball-by-ball market was closed (epoch ms, provider time where known), and
+// `r:<marketId>` when a live socket tick last reopened it. The vendor reuses market ids: it has
+// closed every upcoming ball in bulk and later opened the same ids for real, so a closure only
+// blocks evidence older than itself.
+function terminalBallByBallAtKey(eventId) {
+  return `${TERMINAL_BALL_BY_BALL_AT_KEY_PREFIX}${eventId}`;
+}
+
+function providerTimeMs(value) {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  if (Number.isFinite(number)) return number < 1e12 ? number * 1000 : number;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function recordBallByBallClosures(redis, eventId, closedAtById) {
+  const entries = Object.entries(closedAtById);
+  if (!entries.length || typeof redis.hSet !== "function") return;
+  const key = terminalBallByBallAtKey(eventId);
+  await redis.hSet(key, Object.fromEntries(entries.map(([id, at]) => [id, String(at)])));
+  await redis.expire(key, EVENT_TTL_SECONDS);
+}
+
+// A live tick (explicitly open, not game-over/recalled/abandoned) that is newer than the recorded
+// closure reopens the market. Members without a recorded closure (written before closures were
+// timestamped) are stamped now, so only ticks from here on can reopen them.
+async function reopenBallByBallMarkets(redis, eventId, rows, terminalIds) {
+  if (!terminalIds.size || typeof redis.hGetAll !== "function") return [];
+  const live = rows.filter(
+    ({ item, market }) =>
+      payloadGroup(item, market) === "BallByBall" &&
+      terminalIds.has(String(item.mid)) &&
+      explicitActivity(item.s) === true &&
+      !terminalBallByBallTick(item),
+  );
+  if (!live.length) return [];
+  const key = terminalBallByBallAtKey(eventId);
+  const recorded = await redis.hGetAll(key);
+  const unstamped = {};
+  const reopened = [];
+  for (const { item } of live) {
+    const marketId = String(item.mid);
+    const closedAt = Number(recorded[marketId]);
+    const tickAt = providerTimeMs(item.t);
+    if (!Number.isFinite(closedAt)) unstamped[marketId] = Date.now();
+    else if (tickAt != null && tickAt > closedAt) reopened.push({ marketId, closedAt, tickAt });
+  }
+  await recordBallByBallClosures(redis, eventId, unstamped);
+  if (!reopened.length) return [];
+  const ids = reopened.map(({ marketId }) => marketId);
+  await redis.sRem(terminalBallByBallKey(eventId), ids);
+  await redis.hDel(key, ids);
+  await redis.hSet(key, Object.fromEntries(reopened.map(({ marketId, tickAt }) => [`r:${marketId}`, String(tickAt)])));
+  for (const { marketId, closedAt, tickAt } of reopened) {
+    terminalIds.delete(marketId);
+    marketTrace.trace(
+      "bb.reopened",
+      { eventId, marketId, closedAt: new Date(closedAt).toISOString(), tickAt: new Date(tickAt).toISOString() },
+      { group: "BallByBall" },
+    );
+  }
+  return ids;
+}
+
 function terminalLineMarketKey(eventId) {
   return `${TERMINAL_LINE_MARKET_KEY_PREFIX}${eventId}`;
 }
@@ -911,9 +977,22 @@ async function reconcileFancyDefinitions(markets) {
             }
           }
         }
-        const terminalMarketIds = definitions
-          .filter(({ market, group }) => group === "BallByBall" && (market.gameOver || market.recalled))
-          .map(({ market }) => String(market.marketId));
+        const discoveryTerminal = definitions.filter(
+          ({ market, group }) => group === "BallByBall" && (market.gameOver || market.recalled),
+        );
+        // A discovery row older than a socket reopen is stale evidence and must not re-close it.
+        const reopenedAt =
+          discoveryTerminal.length && typeof redis.hGetAll === "function"
+            ? await redis.hGetAll(terminalBallByBallAtKey(eventId))
+            : {};
+        const closures = {};
+        for (const { market } of discoveryTerminal) {
+          const marketId = String(market.marketId);
+          const at = providerTimeMs(market.providerTimestamp) ?? Date.now();
+          if (Number(reopenedAt[`r:${marketId}`]) >= at) continue;
+          closures[marketId] = at;
+        }
+        const terminalMarketIds = Object.keys(closures);
         for (const marketId of terminalMarketIds) {
           marketTrace.traceChange("bb-terminal", "bb.terminal", { eventId, marketId, source: "discovery" }, "terminal", {
             group: "BallByBall",
@@ -923,6 +1002,7 @@ async function reconcileFancyDefinitions(markets) {
           const terminalKey = terminalBallByBallKey(eventId);
           await redis.sAdd(terminalKey, terminalMarketIds);
           await redis.expire(terminalKey, EVENT_TTL_SECONDS);
+          await recordBallByBallClosures(redis, eventId, closures);
         }
         const terminalBallByBallIds = await terminalBallByBallMarketIds(redis, eventId);
         let changed = false;
@@ -1445,8 +1525,15 @@ async function writeEventTicks(items) {
     const terminalKey = terminalBallByBallKey(eventId);
     await redis.sAdd(terminalKey, newlyTerminalBallByBallIds);
     await redis.expire(terminalKey, EVENT_TTL_SECONDS);
+    const closures = {};
+    for (const { item } of acceptedRows) {
+      const marketId = String(item.mid);
+      if (newlyTerminalBallByBallIds.includes(marketId)) closures[marketId] = providerTimeMs(item.t) ?? Date.now();
+    }
+    await recordBallByBallClosures(redis, eventId, closures);
   }
   const terminalBallByBallIds = await terminalBallByBallMarketIds(redis, eventId);
+  await reopenBallByBallMarkets(redis, eventId, acceptedRows, terminalBallByBallIds);
   const lineRows = acceptedRows.filter(({ item, market }) => payloadGroup(item, market) === "LineMarket");
   const newlyTerminalLineIds = lineRows
     .filter(({ item }) => booleanOr(item.go, false))
@@ -1814,6 +1901,7 @@ async function removeEvent(eventId) {
       `${process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:"}${eventKey}`,
       `${process.env.REDIS_SCORE_KEY_PREFIX || "Score-Rs:"}${eventKey}`,
       terminalBallByBallKey(eventKey),
+      terminalBallByBallAtKey(eventKey),
       terminalLineMarketKey(eventKey),
       unavailableLineMarketKey(eventKey),
     ];

@@ -6,6 +6,7 @@ const db = require("../src/config/sourceDb");
 let connection;
 db.getSourcePool = () => ({ getConnection: async () => connection });
 const { upsertFancies } = require("../src/cron/marketDiscoverySync");
+const subscriptions = require("../src/services/marketSubscriptionService");
 
 // Production shape: discovery never writes t_matchfancy.isactive, so a closed market keeps
 // reading back as active on every later upsert.
@@ -49,4 +50,22 @@ test("a market that reopens can be deactivated again", async () => {
   assert.deepEqual((await upsertFancies([market("1.902", "line-market", false)])).deactivatedFancyIds, ["1.902"]);
   assert.deepEqual((await upsertFancies([market("1.902", "line-market", true)])).deactivatedFancyIds, []);
   assert.deepEqual((await upsertFancies([market("1.902", "line-market", false)])).deactivatedFancyIds, ["1.902"]);
+});
+
+test("a closed market is kept out of subscription until it reopens", async () => {
+  stickyActiveDatabase(["1.903"]);
+
+  await upsertFancies([market("1.903", "line-market", false)]);
+  assert.equal(subscriptions.isMarketSuppressed("1.903"), true);
+  assert.deepEqual(await subscriptions.subscribeMarkets(["1.903"]), { subscribed: [], skipped: [] });
+
+  await upsertFancies([market("1.903", "line-market", true)]);
+  assert.equal(subscriptions.isMarketSuppressed("1.903"), false);
+});
+
+test("event eligibility restore also clears a closed marker", async () => {
+  stickyActiveDatabase(["1.904"]);
+  await upsertFancies([market("1.904", "line-market", false)]);
+  subscriptions.restoreMarketEligibility(["1.904"]);
+  assert.equal(subscriptions.isMarketSuppressed("1.904"), false);
 });

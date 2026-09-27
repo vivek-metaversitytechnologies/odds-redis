@@ -133,6 +133,12 @@ async function collect(options, filter) {
         market.terminalAt ??= at;
         market.terminalSource ??= record.source;
         break;
+      case "bb.reopened":
+        // A newer live socket tick legitimately reopened a reused market id.
+        market.terminalAt = null;
+        market.terminalSource = null;
+        market.reopened = (market.reopened || 0) + 1;
+        break;
       case "line.set":
         if (record.set === "terminal") {
           market.terminalAt ??= at;

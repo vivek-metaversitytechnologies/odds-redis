@@ -22,6 +22,7 @@ require("winston-daily-rotate-file");
 //   visibility            shown | hidden transition in the event payload, with reason
 //   line.set              line market added to / removed from the terminal or unavailable set
 //   bb.terminal           ball-by-ball market added to the terminal set
+//   bb.reopened           terminal ball-by-ball market reopened by a newer live socket tick
 //   price.seed            HTTP runner price seed for a line market failed or returned nothing
 //   subscription          subscribed | already-registered | unresolved | unsubscribed
 //   result                result persisted or rejected

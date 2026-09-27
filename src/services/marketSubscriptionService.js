@@ -5,9 +5,33 @@ const logger = require("../utils/logger");
 const marketTrace = require("../utils/marketTrace");
 const redisStore = require("../config/redis");
 const { integer } = require("../config/env");
+const { setBounded } = require("../utils/boundedMap");
 
 const skippedMarketIds = new Set();
 const completedMarketIds = new Set();
+// Markets discovery has seen close. t_matchfancy.isactive is never cleared by discovery, so
+// until a result lands the active-market query keeps returning them; without this they would
+// be re-subscribed and unsubscribed again on every reconcile.
+const closedMarketIds = new Map();
+const CLOSED_TRACK_LIMIT = integer("MARKET_CLOSED_TRACK_LIMIT", 50000, { min: 1000 });
+
+function suppressed(id) {
+  const marketId = String(id);
+  return completedMarketIds.has(marketId) || closedMarketIds.has(marketId);
+}
+
+function markMarketsClosed(ids) {
+  for (const id of ids || []) {
+    const marketId = String(id);
+    if (!redisStore.validMarketIdentifier(marketId)) continue;
+    setBounded(closedMarketIds, marketId, true, CLOSED_TRACK_LIMIT);
+    skippedMarketIds.delete(marketId);
+  }
+}
+
+function markMarketsReopened(ids) {
+  for (const id of ids || []) closedMarketIds.delete(String(id));
+}
 const pendingResultUnsubscriptions = new Set();
 let retryTimer = null;
 let retryPromise = null;
@@ -44,7 +68,7 @@ function providerBatchSize() {
 function queueSkippedMarkets(ids, { schedule = true } = {}) {
   for (const id of ids || []) {
     const marketId = String(id);
-    if (redisStore.validMarketIdentifier(marketId) && !completedMarketIds.has(marketId)) {
+    if (redisStore.validMarketIdentifier(marketId) && !suppressed(marketId)) {
       skippedMarketIds.add(marketId);
     }
   }
@@ -81,7 +105,7 @@ async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
         .map((id) => id.trim())
         .filter(redisStore.validMarketIdentifier),
     ),
-  ].filter((id) => !completedMarketIds.has(id));
+  ].filter((id) => !suppressed(id));
   if (!marketIds.length) return { subscribed: [], skipped: [] };
   const response = await provider.subscribe(marketIds, { source: "market-subscription" });
   const acknowledgement = normalizeProviderAcknowledgement(response, marketIds);
@@ -98,7 +122,7 @@ async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
       : unresolvedSet.has(marketId)
         ? "unresolved"
         : "already-registered";
-    marketTrace.trace("subscription", { eventId: null, marketId, outcome });
+    marketTrace.traceChange("subscription", "subscription", { eventId: null, marketId, outcome }, outcome);
   }
   return acknowledgement;
 }
@@ -158,7 +182,12 @@ async function unsubscribeResultMarkets(ids) {
     completedMarketIds.add(id);
     skippedMarketIds.delete(id);
     pendingResultUnsubscriptions.add(id);
-    marketTrace.trace("subscription", { eventId: null, marketId: id, outcome: "unsubscribed", source: "result" });
+    marketTrace.traceChange(
+      "subscription",
+      "subscription",
+      { eventId: null, marketId: id, outcome: "unsubscribed", source: "result" },
+      "unsubscribed",
+    );
   });
   return flushResultUnsubscriptions();
 }
@@ -167,6 +196,7 @@ function restoreMarketEligibility(ids) {
   for (const id of ids || []) {
     const marketId = String(id);
     completedMarketIds.delete(marketId);
+    closedMarketIds.delete(marketId);
     pendingResultUnsubscriptions.delete(marketId);
   }
 }
@@ -206,13 +236,10 @@ async function unsubscribeEventMarkets(ids, { trackedOnly = false, source = "man
     marketIds: unsubscribed,
   });
   const unsubscribedSet = new Set(unsubscribed);
+  // Only a change of outcome is traced; repeated untracked skips are routine.
   for (const marketId of marketIds) {
-    marketTrace.trace("subscription", {
-      eventId: null,
-      marketId,
-      outcome: unsubscribedSet.has(marketId) ? "unsubscribed" : "unsubscribe-skipped-untracked",
-      source,
-    });
+    const outcome = unsubscribedSet.has(marketId) ? "unsubscribed" : "unsubscribe-skipped-untracked";
+    marketTrace.traceChange("subscription", "subscription", { eventId: null, marketId, outcome, source }, outcome);
   }
   return {
     requested: marketIds,
@@ -255,7 +282,7 @@ async function refreshMarkets(ids) {
         .map((id) => id.trim())
         .filter(redisStore.validMarketIdentifier),
     ),
-  ].filter((id) => !completedMarketIds.has(id));
+  ].filter((id) => !suppressed(id));
   if (!marketIds.length) return { requested: 0, subscribed: [], skipped: [] };
   await provider.unsubscribe(marketIds, { source: "market-refresh" });
   websocket.unsubscribeMarkets(marketIds);
@@ -317,7 +344,7 @@ async function retrySkippedMarkets() {
     index < queued.length && !retriesStopped && attemptedBatches < maxBatches;
     index += batchSize
   ) {
-    const batch = queued.slice(index, index + batchSize).filter((id) => !completedMarketIds.has(id));
+    const batch = queued.slice(index, index + batchSize).filter((id) => !suppressed(id));
     if (!batch.length) continue;
     attemptedBatches += 1;
     try {
@@ -332,7 +359,7 @@ async function retrySkippedMarkets() {
       loadInitialSettings(acknowledgement.subscribed);
       acknowledgement.subscribed.forEach((id) => skippedMarketIds.delete(id));
       acknowledgement.skipped.forEach((id) => {
-        if (!completedMarketIds.has(id)) skippedMarketIds.add(id);
+        if (!suppressed(id)) skippedMarketIds.add(id);
       });
       accepted += acknowledgement.subscribed.length;
       skipped += acknowledgement.skipped.length;
@@ -369,6 +396,7 @@ function getSkippedRetryStatus() {
     queued: skippedMarketIds.size,
     marketIds: [...skippedMarketIds],
     completedMarketIds: [...completedMarketIds],
+    closedMarkets: closedMarketIds.size,
     pendingResultUnsubscriptions: [...pendingResultUnsubscriptions],
   };
 }
@@ -416,5 +444,7 @@ module.exports = {
   unsubscribeEventMarkets,
   reconcileProviderSubscriptions,
   refreshMarkets,
-  isMarketSuppressed: (id) => completedMarketIds.has(String(id)),
+  markMarketsClosed,
+  markMarketsReopened,
+  isMarketSuppressed: suppressed,
 };

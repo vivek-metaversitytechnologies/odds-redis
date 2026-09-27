@@ -6,6 +6,8 @@ const {
   unsubscribeEventMarkets,
   subscribeMarkets,
   isMarketSuppressed,
+  markMarketsClosed,
+  markMarketsReopened,
 } = require("../services/marketSubscriptionService");
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
@@ -548,7 +550,7 @@ async function upsertFancies(fancies) {
       const marketId = String(fancy.marketId);
       const previous = existing.get(fancy.marketId);
       const closed = !fancy.isActive || fancy.gameOver;
-      if (!closed) deactivatedFancies.delete(marketId);
+      if (!closed && deactivatedFancies.delete(marketId)) markMarketsReopened([marketId]);
       const deactivated =
         closed &&
         !deactivatedFancies.has(marketId) &&
@@ -581,6 +583,7 @@ async function upsertFancies(fancies) {
         });
       }
     }
+    markMarketsClosed(deactivatedFancyIds);
     return { inserted, updated, fancyIds: ids, deactivatedFancyIds };
   } finally {
     connection.release();

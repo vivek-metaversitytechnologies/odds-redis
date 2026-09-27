@@ -150,6 +150,7 @@ reason for each decision:
 | `tick.blocked` | a live-looking tick stays hidden by a terminal/unavailable set (throttled) |
 | `visibility` | the market is `shown` or `hidden` in the event payload, with the reason (`go`, `s-false`, `rt`, `abandoned`, `bb-terminal-set`, `line-terminal-set`, `line-unavailable-set`) |
 | `line.set` / `bb.terminal` | terminal or unavailable markers change |
+| `bb.reopened` | a terminal ball-by-ball market is reopened by a live socket tick newer than its closure (the vendor reuses market ids) |
 | `price.seed` | a line market's HTTP price seed fails or returns nothing (throttled) |
 | `subscription` | subscribe/unsubscribe outcome |
 | `result` | a result is persisted or rejected, or the socket reports game over |
