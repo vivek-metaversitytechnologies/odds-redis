@@ -1667,12 +1667,18 @@ async function refreshLineMarketPrices(now = Date.now()) {
   if (linePriceRefreshRunning) return { skipped: true, reason: "already-running" };
   linePriceRefreshRunning = true;
   try {
-    const markets = [];
+    const seen = [];
     for (const [marketId, entry] of activeLineMarkets) {
       if (now - entry.seenAt > LINE_PRICE_SEEN_TTL_MS) activeLineMarkets.delete(marketId);
-      else markets.push(entry.market);
+      else seen.push(entry.market);
     }
-    if (!markets.length) return { requested: 0, seeded: 0, failed: 0, eventIds: [] };
+    // Discovery can keep reporting a finished line active for minutes; the socket's terminal
+    // and unavailable markers are authoritative, so those lines are not polled for prices.
+    const blocked = seen.length
+      ? await redisStore.blockedLineMarketIds(seen.map((market) => market.eventId))
+      : new Set();
+    const markets = seen.filter((market) => !blocked.has(String(market.marketId)));
+    if (!markets.length) return { requested: 0, seeded: 0, failed: 0, eventIds: [], blocked: blocked.size };
     const prices = await seedInitialMarketPrices(markets);
     await Promise.allSettled((prices.eventIds || []).map((eventId) => publishEventSnapshot(eventId)));
     return prices;

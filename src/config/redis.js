@@ -728,6 +728,20 @@ function preserveLineStatus(entries, previousEntries) {
   }
 }
 
+// Line markets the socket has finished (terminal) or that are hidden (unavailable), per event.
+async function blockedLineMarketIds(eventIds) {
+  const redis = await getRedisClient();
+  const blocked = new Set();
+  if (!redis?.isOpen) return blocked;
+  await Promise.all(
+    [...new Set((eventIds || []).map(String))].map(async (eventId) => {
+      const { terminal, unavailable } = await lineMarketVisibility(redis, eventId);
+      for (const marketId of [...terminal, ...unavailable]) blocked.add(marketId);
+    }),
+  );
+  return blocked;
+}
+
 async function lineMarketVisibility(redis, eventId) {
   if (typeof redis.sMembers !== "function") return { terminal: new Set(), unavailable: new Set() };
   const [terminal, unavailable] = await Promise.all([
@@ -2030,6 +2044,7 @@ module.exports = {
   getEventSnapshot,
   getEventSnapshots,
   getFrontendEventPayloads,
+  blockedLineMarketIds,
   inspectTicks,
   getTickActivity,
   clearTickActivity,

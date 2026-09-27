@@ -63,9 +63,9 @@ test("a closed market is kept out of subscription until it reopens", async () =>
   assert.equal(subscriptions.isMarketSuppressed("1.903"), false);
 });
 
-test("event eligibility restore also clears a closed marker", async () => {
+test("event sync's eligibility restore does not reopen a closed market", async () => {
   stickyActiveDatabase(["1.904"]);
   await upsertFancies([market("1.904", "line-market", false)]);
   subscriptions.restoreMarketEligibility(["1.904"]);
-  assert.equal(subscriptions.isMarketSuppressed("1.904"), false);
+  assert.equal(subscriptions.isMarketSuppressed("1.904"), true);
 });

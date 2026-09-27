@@ -196,8 +196,10 @@ function restoreMarketEligibility(ids) {
   for (const id of ids || []) {
     const marketId = String(id);
     completedMarketIds.delete(marketId);
-    closedMarketIds.delete(marketId);
     pendingResultUnsubscriptions.delete(marketId);
+    // Closed markers are per-market discovery evidence and are cleared only when discovery sees
+    // that market open again. Event sync restores every market of every active event each run
+    // (every minute in production); clearing them here re-subscribed closed lines every minute.
   }
 }
 

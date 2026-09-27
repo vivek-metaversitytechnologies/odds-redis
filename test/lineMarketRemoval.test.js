@@ -41,6 +41,8 @@ redis.getDiscoveryEvents = async (sport) =>
     : [];
 redis.invalidateMarkets = () => {};
 redis.writeTick = async () => true;
+state.blocked = new Set();
+redis.blockedLineMarketIds = async () => state.blocked;
 redis.reconcileRegularDefinitions = async (rows) => {
   state.log.push(`reconcile:${rows.map((row) => `${row.marketId}${row.isActive ? "+" : "-"}`).join(",")}`);
   return {
@@ -159,4 +161,24 @@ test("removals in a later batch do not wait for slow work on an earlier batch", 
   release();
   assert.equal((await cycle).failedRequests, 0);
   state.subscribe = async () => {};
+});
+
+test("lines the socket finished or hid are not price-refreshed", async () => {
+  state.rows = { 900: [line("1.900", 900), line("1.901", 900)], 901: [] };
+  await sync();
+  await sleep(600);
+  const priced = [];
+  state.runners = async (marketId) => {
+    priced.push(marketId);
+    return { data: [{ runnerId: 1, name: "Runs" }] };
+  };
+  state.blocked = new Set(["1.900"]);
+  try {
+    await refreshLineMarketPrices();
+  } finally {
+    state.blocked = new Set();
+  }
+  // Other active lines from earlier tests in this file may also be refreshed.
+  assert.equal(priced.includes("1.900"), false);
+  assert.equal(priced.includes("1.901"), true);
 });
