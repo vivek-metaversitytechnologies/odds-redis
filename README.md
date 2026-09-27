@@ -144,7 +144,11 @@ in-process pipelines therefore poll `POST /v1/markets/settings` for everything t
 | `fancy` | every other group | `LIMITS_FANCY_POLL_INTERVAL_MS` (5000) | `LIMITS_FANCY_POLL_MAX_REQUESTS_PER_MINUTE` (240) |
 
 Targets are the events in the active-match list (`SPORT_IDS`) and the markets their frontend
-payloads show. Only limits that differ from the payload are written (DB, Redis, frontend tick). If
+payloads show. Only a max stake that differs from the payload is written (DB, Redis, frontend tick).
+
+`minbet` is a fixed business rule: discovery creates every market and fancy with `minbet=100`, and
+nothing changes it afterwards. The provider's `ms` (from the settings API, the pollers or the
+`market` room) is logged but never applied; only `mas` updates `maxbet`. If
 the listed markets need more requests than a run's budget allows, a rotating cursor covers them
 across runs; `lastRun.fullCycleMs` in `/health` (`pipelines.limitsPoll`) reports how long one full
 pass takes. Runs are skipped while total provider traffic is above

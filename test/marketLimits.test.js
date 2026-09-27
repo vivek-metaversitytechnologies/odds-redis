@@ -3,11 +3,12 @@ const assert = require("node:assert/strict");
 const sourceDb = require("../src/config/sourceDb");
 const { providerLimits } = require("../src/utils/marketLimits");
 
-test("provider stake limits accept numeric strings and zero, and ignore missing or invalid values", () => {
-  assert.deepEqual(providerLimits({ ms: "50", mas: 200000 }), { providerMinBet: 50, providerMaxBet: 200000 });
-  assert.deepEqual(providerLimits({ ms: 0 }), { providerMinBet: 0 });
+test("only the provider's max stake is taken; its min stake is always ignored", () => {
+  assert.deepEqual(providerLimits({ ms: "50", mas: 200000 }), { providerMaxBet: 200000 });
+  assert.deepEqual(providerLimits({ mas: "0" }), { providerMaxBet: 0 });
+  assert.deepEqual(providerLimits({ ms: 50 }), {});
   for (const value of [null, undefined, "", " ", false, [], {}, -1, "invalid", Infinity]) {
-    assert.deepEqual(providerLimits({ ms: value, mas: value }), {});
+    assert.deepEqual(providerLimits({ ms: 50, mas: value }), {});
   }
 });
 
@@ -55,12 +56,12 @@ test("market settings persist both DB tables and preserve live prices across lat
       }
       assert.match(sql, /target.eventid=limits_update.eventid/);
       if (failFancy && sql.includes("t_matchfancy")) throw new Error("DB failure");
-      const [id, eventId, min, max] = params;
+      assert.doesNotMatch(sql, /minbet/);
+      const [id, eventId, max] = params;
       const row = rows.get(id);
       if (row && String(row.eventid) === eventId && Boolean(row.fancyid) === sql.includes("t_matchfancy")) {
         staged.push(() => {
-          if (min !== null) row.minbet = min;
-          if (max !== null) row.maxbet = max;
+          row.maxbet = max;
         });
       }
       return [{ affectedRows: row ? 1 : 0 }];
@@ -114,8 +115,8 @@ test("market settings persist both DB tables and preserve live prices across lat
   const settings = { eid: 9904, mid: "1.9904", settings: { ms: "50", mas: "200000" } };
   const update = await redis.writeMarketSettings(settings);
   assert.equal(update.eventId, "9904");
-  assert.deepEqual(update.payload.LineMarket[0], { ...before, minBet: 50, maxBet: 200000 });
-  assert.equal(rows.get("1.9904").minbet, 50);
+  assert.deepEqual(update.payload.LineMarket[0], { ...before, maxBet: 200000 });
+  assert.equal(rows.get("1.9904").minbet, 100);
   assert.equal(rows.get("1.9904").maxbet, 200000);
   assert.deepEqual(await redis.writeMarketSettings(settings), {
     eventId: "9904",
@@ -124,7 +125,7 @@ test("market settings persist both DB tables and preserve live prices across lat
   });
   await redis.writeTicks([{ ...tick, r: [{ rid: 1, s: "ACTIVE", b1: 82 }] }]);
   const after = JSON.parse(store.get("Data-Rs:9904")).LineMarket[0];
-  assert.equal(after.minBet, 50);
+  assert.equal(after.minBet, 100);
   assert.equal(after.maxBet, 200000);
   assert.equal(after.runners[0].ex.availableToBack[0].price, 82);
   // Queue an odds tick while the settings write is still waiting to run.
@@ -133,19 +134,23 @@ test("market settings persist both DB tables and preserve live prices across lat
     redis.writeTicks([tick]),
   ]);
   const concurrent = JSON.parse(store.get("Data-Rs:9904")).LineMarket[0];
-  assert.equal(concurrent.minBet, 75);
+  assert.equal(concurrent.minBet, 100);
   assert.equal(concurrent.maxBet, 250000);
-  await redis.writeMarketSettings({ eid: 9904, mid: "4.9904-F2", settings: { ms: 0 } });
-  assert.equal(rows.get("4.9904-F2").minbet, 0);
-  assert.equal(rows.get("4.9904-F2").maxbet, 1000);
+  // A min-only update carries nothing to apply and must not touch the database.
+  const beforeMinOnly = commits;
+  assert.equal(await redis.writeMarketSettings({ eid: 9904, mid: "4.9904-F2", settings: { ms: 0 } }), null);
+  assert.equal(commits, beforeMinOnly);
+  await redis.writeMarketSettings({ eid: 9904, mid: "4.9904-F2", settings: { ms: 0, mas: 0 } });
+  assert.equal(rows.get("4.9904-F2").minbet, 100);
+  assert.equal(rows.get("4.9904-F2").maxbet, 0);
   const count = commits;
   await redis.writeMarketSettings({ ...settings, settings: { ms: null, mas: "bad" } });
   assert.equal(commits, count);
   failFancy = true;
   const stored = store.get("Data-Rs:9904");
-  await assert.rejects(redis.writeMarketSettings({ ...settings, settings: { ms: 500 } }), /DB failure/);
+  await assert.rejects(redis.writeMarketSettings({ ...settings, settings: { mas: 500 } }), /DB failure/);
   assert.equal(rollbacks, 1);
-  assert.equal(rows.get("1.9904").minbet, 75);
+  assert.equal(rows.get("1.9904").maxbet, 250000);
   assert.equal(store.get("Data-Rs:9904"), stored);
 });
 

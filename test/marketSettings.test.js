@@ -152,5 +152,5 @@ test("the real provider response shape (flat items under data) is applied with i
   assert.equal(applied.length, 1);
   assert.equal(String(applied[0].eid), "36082557");
   assert.equal(applied[0].mid, "4.206215583029-F2");
-  assert.deepEqual(providerLimits(applied[0].settings), { providerMinBet: 50, providerMaxBet: 25000 });
+  assert.deepEqual(providerLimits(applied[0].settings), { providerMaxBet: 25000 });
 });

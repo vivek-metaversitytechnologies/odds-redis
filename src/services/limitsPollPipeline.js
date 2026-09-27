@@ -20,7 +20,8 @@ const { setBounded } = require("../utils/boundedMap");
 //   requests than one run may spend, a rotating cursor covers them over several runs.
 // - Runs yield entirely when overall provider traffic is near the application cap, and use a
 //   low queue priority so subscriptions, discovery and results dispatch first.
-// - Only limits that differ from what the frontend already has are written.
+// - Only a max stake that differs from what the frontend already has is written; minbet is fixed
+//   at 100 by discovery and never taken from the provider.
 // - Markets the provider omits from its response are not asked for again for a while.
 
 const MARKET_GROUPS = Object.freeze(["Odds", "Bookmaker"]);
@@ -78,16 +79,12 @@ async function collectTargets(groups) {
         // Odds rows repeat per runner; the first row carries the market's limits.
         const mid = String(entry?.marketId ?? entry?.mid ?? "").trim();
         if (!redisStore.validMarketIdentifier(mid) || targets.has(mid)) continue;
-        targets.set(mid, { mid, eid: eventId, minBet: entry.minBet ?? null, maxBet: entry.maxBet ?? null });
+        targets.set(mid, { mid, eid: eventId, maxBet: entry.maxBet ?? null });
       }
     }
   }
   // Stable order keeps the rotating cursor fair between runs.
   return { events: eventIds.length, targets: [...targets.values()].sort((a, b) => a.mid.localeCompare(b.mid)) };
-}
-
-function sameLimit(current, next) {
-  return next == null || (current != null && Number(current) === next);
 }
 
 function percentile(sorted, fraction) {
@@ -197,9 +194,8 @@ function createPipeline({ name, groups, defaults }) {
       if (!Object.keys(limits).length) continue;
       answered.add(mid);
       unsupported.delete(mid);
-      if (sameLimit(target.minBet, limits.providerMinBet) && sameLimit(target.maxBet, limits.providerMaxBet)) {
-        continue;
-      }
+      // minbet is fixed at creation, so only a different max stake is worth a write.
+      if (target.maxBet != null && Number(target.maxBet) === limits.providerMaxBet) continue;
       // A room message received after this request went out is newer than this response.
       if (marketSettings.roomUpdatedSince(mid, requestedAt)) {
         run.skippedForRoomUpdate += 1;

@@ -4,34 +4,24 @@ function limitNumber(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
+// Only the provider's max stake (`mas`) is applied. minbet is a fixed business rule: it is set to
+// 100 when discovery creates the market and is never changed by the settings API or the room.
 function providerLimits(settings) {
-  const min = limitNumber(settings?.ms);
   const max = limitNumber(settings?.mas);
-  return {
-    ...(min === null ? {} : { providerMinBet: min }),
-    ...(max === null ? {} : { providerMaxBet: max }),
-  };
+  return max === null ? {} : { providerMaxBet: max };
 }
 
 async function persistLimits(connection, rows, fancy = false) {
-  const supplied = rows.filter((row) => row.providerMinBet != null || row.providerMaxBet != null);
+  const supplied = rows.filter((row) => row.providerMaxBet != null);
   if (!supplied.length) return;
   const table = fancy ? "t_matchfancy" : "t_market";
   const id = fancy ? "fancyid" : "marketid";
-  const selects = supplied
-    .map(() => "SELECT ? AS marketid, ? AS eventid, ? AS minbet, ? AS maxbet")
-    .join(" UNION ALL ");
+  const selects = supplied.map(() => "SELECT ? AS marketid, ? AS eventid, ? AS maxbet").join(" UNION ALL ");
   await connection.query(
     `UPDATE ${table} AS target JOIN (${selects}) AS limits_update
        ON target.${id}=limits_update.marketid AND target.eventid=limits_update.eventid
-     SET target.minbet=COALESCE(limits_update.minbet,target.minbet),
-         target.maxbet=COALESCE(limits_update.maxbet,target.maxbet)`,
-    supplied.flatMap((row) => [
-      row.marketId,
-      row.eventId,
-      row.providerMinBet ?? null,
-      row.providerMaxBet ?? null,
-    ]),
+     SET target.maxbet=limits_update.maxbet`,
+    supplied.flatMap((row) => [row.marketId, row.eventId, row.providerMaxBet]),
   );
 }
 

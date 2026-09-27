@@ -151,6 +151,18 @@ test("a room update that lands during the request wins over the HTTP response", 
   assert.equal(applied.length, 0);
 });
 
+test("a different provider min stake alone never causes a write", async (t) => {
+  const { applied } = setup(t, {
+    payloads: { 7: { Odds: [entry("1.1", 100, 25000)] } },
+    settings: { "1.1": { ms: 50, mas: 25000 } },
+  });
+
+  const run = await pipeline(["Odds"]).runOnce();
+
+  assert.equal(run.changed, 0);
+  assert.equal(applied.length, 0);
+});
+
 test("a failed request is counted and does not stop the other batches", async (t) => {
   const { applied } = setup(t, {
     payloads: { 7: { Odds: [entry("1.1", 100, 1), entry("1.2", 100, 1)] } },

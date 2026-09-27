@@ -1328,11 +1328,9 @@ async function writeMarketSettings(item) {
     for (const group of PAYLOAD_GROUPS) {
       for (const entry of payload[group]) {
         if (entryMarketId(entry) !== marketId) continue;
-        for (const [field, value] of [["minBet", limits.providerMinBet], ["maxBet", limits.providerMaxBet]]) {
-          if (value != null && entry[field] !== value) {
-            entry[field] = value;
-            changed = true;
-          }
+        if (entry.maxBet !== limits.providerMaxBet) {
+          entry.maxBet = limits.providerMaxBet;
+          changed = true;
         }
       }
     }
