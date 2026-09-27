@@ -19,8 +19,12 @@ let retryApply;
 let retriesStopped = false;
 const TRACK_LIMIT = integer("MARKET_SETTINGS_TRACK_LIMIT", 100000, { min: 1000 });
 
+// The settings API answers at most 50 markets per request and silently drops the rest
+// (measured with scripts/benchmarkMarketSettings.js), so no caller may send more.
+const SETTINGS_MAX_IDS_PER_REQUEST = 50;
+
 function settingsBatchSize() {
-  return integer("PROVIDER_SETTINGS_BATCH_SIZE", 20, { min: 1, max: 100 });
+  return integer("PROVIDER_SETTINGS_BATCH_SIZE", 20, { min: 1, max: SETTINGS_MAX_IDS_PER_REQUEST });
 }
 
 function noteRoomUpdate(marketId) {
@@ -178,6 +182,7 @@ async function stopRetries() {
 }
 
 module.exports = {
+  SETTINGS_MAX_IDS_PER_REQUEST,
   loadInitialSettings,
   noteRoomUpdate,
   queueRefresh,

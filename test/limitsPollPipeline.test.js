@@ -169,3 +169,15 @@ test("a failed request is counted and does not stop the other batches", async (t
     ["1.2"],
   );
 });
+
+test("batch size never exceeds the settings API's 50-market response cap", async (t) => {
+  const odds = Array.from({ length: 120 }, (_, index) => entry(`1.${1000 + index}`, 50, 25000));
+  const { calls } = setup(t, { payloads: { 7: { Odds: odds } } });
+
+  await pipeline(["Odds"], { LIMITS_TEST_POLL_BATCH_SIZE: "500" }).runOnce();
+
+  assert.deepEqual(
+    calls.map((call) => call.mids.length),
+    [50, 50, 20],
+  );
+});

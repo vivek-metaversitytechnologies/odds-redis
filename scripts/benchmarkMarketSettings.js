@@ -81,6 +81,7 @@ async function main() {
   if (!ids.length) return;
 
   const rows = [];
+  const allSamples = [];
   const coverage = new Map();
   let offset = 0;
   let requests = 0;
@@ -96,24 +97,35 @@ async function main() {
       const answered = new Set(
         result.items.filter((item) => item?.ms !== undefined || item?.mas !== undefined || item?.settings).map((item) => String(item.mid)),
       );
-      for (const mid of mids) {
-        const current = coverage.get(kind(mid)) || { requested: 0, answered: 0 };
-        current.requested += 1;
-        if (answered.has(mid)) current.answered += 1;
-        coverage.set(kind(mid), current);
-      }
-      samples.push({ ...result, sent: mids.length, answered: answered.size });
+      // A response with fewer items than sent may be truncated by a per-request cap; only
+      // complete answers say anything about which ID kinds the API supports.
+      samples.push({ ...result, sent: mids.length, answered: answered.size, mids, answeredIds: answered });
       if (result.status === 429 || result.status === 403) {
         console.error(`Stopping: provider returned ${result.status}: ${result.preview}`);
         rows.push(summary(size, samples));
+        allSamples.push(...samples);
         break sizeLoop;
       }
       await new Promise((resolve) => setTimeout(resolve, gapMs));
     }
     rows.push(summary(size, samples));
+    allSamples.push(...samples);
     if (samples.some((sample) => sample.status >= 400)) {
       console.error(`Stopping at size ${size}: ${samples.find((s) => s.status >= 400).preview}`);
       break;
+    }
+  }
+
+  const cap = Math.max(...allSamples.map((sample) => sample.answered));
+  const truncated = allSamples.some((sample) => sample.sent > cap && sample.answered === cap);
+  if (truncated) console.log(`\nResponses are capped at ${cap} markets per request; larger batches drop the rest.`);
+  for (const sample of allSamples) {
+    if (truncated && sample.sent > cap) continue;
+    for (const mid of sample.mids) {
+      const current = coverage.get(kind(mid)) || { requested: 0, answered: 0 };
+      current.requested += 1;
+      if (sample.answeredIds.has(mid)) current.answered += 1;
+      coverage.set(kind(mid), current);
     }
   }
 

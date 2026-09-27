@@ -130,7 +130,10 @@ function createPipeline({ name, groups, defaults }) {
     return {
       enabled: boolean(`${prefix}_ENABLED`, true),
       intervalMs: integer(`${prefix}_INTERVAL_MS`, defaults.intervalMs, { min: 1000, max: 3600000 }),
-      batchSize: integer(`${prefix}_BATCH_SIZE`, defaults.batchSize, { min: 1, max: 1000 }),
+      batchSize: Math.min(
+        marketSettings.SETTINGS_MAX_IDS_PER_REQUEST,
+        integer(`${prefix}_BATCH_SIZE`, defaults.batchSize, { min: 1, max: 1000 }),
+      ),
       concurrency: integer(`${prefix}_CONCURRENCY`, defaults.concurrency, { min: 1, max: 10 }),
       maxRequestsPerMinute: integer(`${prefix}_MAX_REQUESTS_PER_MINUTE`, defaults.maxRequestsPerMinute, {
         min: 1,
@@ -341,8 +344,9 @@ function createPipeline({ name, groups, defaults }) {
   };
 }
 
-// Defaults: markets are few (hundreds), fancies are many (thousands). Budgets together stay well
-// under half of the 800/min application cap; tune batch sizes from scripts/benchmarkMarketSettings.js.
+// Benchmarked: ~70 ms per request regardless of size up to the 50-id cap, so full batches are
+// always cheapest. Budgets are ceilings; ~530 listed ids need about 12 requests/min for markets
+// and 70/min for fancies. Together they stay well under half of the 800/min application cap.
 const marketPipeline = createPipeline({
   name: "market",
   groups: MARKET_GROUPS,

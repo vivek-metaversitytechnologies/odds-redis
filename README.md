@@ -149,8 +149,9 @@ the listed markets need more requests than a run's budget allows, a rotating cur
 across runs; `lastRun.fullCycleMs` in `/health` (`pipelines.limitsPoll`) reports how long one full
 pass takes. Runs are skipped while total provider traffic is above
 `LIMITS_POLL_PROVIDER_HEADROOM_PERCENT` of the application cap, and markets the provider omits from
-its response are not requested again for `LIMITS_POLL_UNSUPPORTED_TTL_MS`. Tune `*_BATCH_SIZE` with
-`node scripts/benchmarkMarketSettings.js` on the server.
+its response are not requested again for `LIMITS_POLL_UNSUPPORTED_TTL_MS`. The settings API answers
+at most 50 markets per request (larger requests are silently truncated), so batch sizes are capped at
+50; `node scripts/benchmarkMarketSettings.js` re-measures latency, the cap and ID-kind coverage.
 Event snapshots and scorecards also use sliding 24-hour TTLs by default; configure them with
 `REDIS_EVENT_TTL_SECONDS` and `REDIS_SCORE_TTL_SECONDS`.
 Empty runner responses are cached for `RUNNER_MISS_CACHE_MS` (default: 300000).
