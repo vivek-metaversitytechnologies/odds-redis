@@ -882,14 +882,11 @@ async function syncResults() {
     // provider call before the first fancy is reached. Alternate both queues so
     // each market family receives result-polling capacity on every run.
     const all = interleaveResultCandidates(candidates.markets, candidates.fancies);
-    const configuredBatchSize = Number(process.env.RESULT_BATCH_SIZE || 100);
-    const batchSize = Number.isFinite(configuredBatchSize)
-      ? Math.min(1000, Math.max(1, Math.floor(configuredBatchSize))) : 100;
     const maxCalls = Math.max(1, Number(process.env.RESULT_MAX_CALLS_PER_RUN || 100));
-    // Vendor quota counts HTTP requests, not market IDs. Each request carries
-    // up to batchSize IDs (vendor cap: 1000); the shared provider limiter
+    // Vendor quota counts HTTP requests, not market IDs. Batch size is fixed in code by the
+    // vendor's request-size limit (provider.resultIdBatches); the shared provider limiter
     // enforces the global 800-request rolling-minute budget across every endpoint.
-    const candidateCapacity = batchSize * maxCalls;
+    const candidateCapacity = provider.RESULTS_MAX_IDS_PER_REQUEST * maxCalls;
     const configuredRegularReserve = Number(process.env.RESULT_REGULAR_RESERVE || 200);
     const regularReserve = Number.isFinite(configuredRegularReserve)
       ? Math.min(candidateCapacity, Math.max(0, Math.floor(configuredRegularReserve))) : 200;
@@ -899,11 +896,8 @@ async function syncResults() {
       candidateCapacity,
       regularReserve,
     );
-    const batches = [];
-    for (let index = 0; index < eligible.length && batches.length < maxCalls; index += batchSize) {
-      batches.push(eligible.slice(index, index + batchSize).map((market) => market.marketid));
-    }
-    const requested = eligible.slice(0, batches.length * batchSize);
+    const batches = provider.resultIdBatches(eligible.map((market) => market.marketid)).slice(0, maxCalls);
+    const requested = eligible.slice(0, batches.reduce((total, batch) => total + batch.length, 0));
     const fancyObjects = new Set(candidates.fancies);
     const nextCursors = advanceCandidateCursors(
       requested,

@@ -385,6 +385,49 @@ async function closeProviderRequests() {
   await providerLimiter.stop({ dropWaitingJobs: true, dropErrorMessage: "Provider client is shutting down" });
 }
 
+// The results endpoint forwards the requested ids inside a request header upstream, so a large
+// list fails as a whole with HTTP 500 ("Request failed with status code 431"): measured at ~16 KB
+// of ids (900 fancy ids worked, 999 failed). Batches are capped by count and by total id length
+// with a 2x margin.
+const RESULTS_MAX_IDS_PER_REQUEST = 500;
+const RESULTS_MAX_ID_CHARS_PER_REQUEST = 8000;
+
+function resultIdBatches(ids) {
+  const batches = [];
+  let batch = [];
+  let chars = 0;
+  for (const value of ids || []) {
+    const id = String(value);
+    // Account for JSON quoting and separators, not just the id itself.
+    const size = id.length + 3;
+    if (batch.length && (batch.length >= RESULTS_MAX_IDS_PER_REQUEST || chars + size > RESULTS_MAX_ID_CHARS_PER_REQUEST)) {
+      batches.push(batch);
+      batch = [];
+      chars = 0;
+    }
+    batch.push(id);
+    chars += size;
+  }
+  if (batch.length) batches.push(batch);
+  return batches;
+}
+
+// Oversized id lists are split into safe requests and their rows merged, so no caller can send a
+// batch the vendor rejects wholesale.
+async function results(body, { priority = 2, source, retries = 2 } = {}) {
+  const options = { method: "POST", priority, metricSource: source, retries };
+  const mids = Array.isArray(body?.mids) ? body.mids : null;
+  const batches = mids ? resultIdBatches(mids) : [];
+  if (batches.length <= 1) return request("/v1/markets/results", { ...options, body });
+  const data = [];
+  for (const batch of batches) {
+    const response = await request("/v1/markets/results", { ...options, body: { ...body, mids: batch } });
+    const rows = Array.isArray(response) ? response : Array.isArray(response?.data) ? response.data : [];
+    data.push(...rows);
+  }
+  return { data };
+}
+
 function postIds(path, ids, { source } = {}) {
   if (!Array.isArray(ids) || !ids.length) return null;
   // Subscription control is latency-sensitive and must not sit behind the much
@@ -417,7 +460,10 @@ module.exports = {
     request("/v1/markets/settings", { method: "POST", body: { mids }, priority, metricSource: source, retries }),
   runners: (marketId, { priority = 5, source, retries = 2 } = {}) => request(`/v1/markets/${encodeURIComponent(marketId)}/runners`, { priority, metricSource: source, retries }),
   // Results must not sit behind the much larger discovery queue indefinitely.
-  results: (body, { priority = 2, source, retries = 2 } = {}) => request("/v1/markets/results", { method: "POST", body, priority, metricSource: source, retries }),
+  results,
+  resultIdBatches,
+  RESULTS_MAX_IDS_PER_REQUEST,
+  RESULTS_MAX_ID_CHARS_PER_REQUEST,
   subscribe: (ids, options) => postIds(process.env.PROVIDER_SUBSCRIPTION_URL || "/v1/subscribe", ids, options),
   unsubscribe: (ids, options) => postIds(process.env.PROVIDER_UNSUBSCRIPTION_URL || "/v1/unsubscribe", ids, options),
 };

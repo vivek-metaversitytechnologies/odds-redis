@@ -744,7 +744,10 @@ test("result allocation favors fancy backlog and spills unused capacity", () => 
 
 test("result polling bounds API calls rather than market IDs", () => {
   const source = fs.readFileSync(path.join(__dirname, "../src/cron/resultSync.js"), "utf8");
-  assert.match(source, /const candidateCapacity = batchSize \* maxCalls/);
+  assert.match(source, /const candidateCapacity = provider\.RESULTS_MAX_IDS_PER_REQUEST \* maxCalls/);
+  assert.match(source, /provider\.resultIdBatches\(/);
+  // Batch size is a code-level vendor limit, not configuration.
+  assert.doesNotMatch(source, /RESULT_BATCH_SIZE/);
   assert.match(source, /const eligible = allocateResultCandidates\(/);
   assert.doesNotMatch(source, /RESULT_MAX_MARKETS_PER_RUN/);
 });
