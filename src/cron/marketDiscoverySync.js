@@ -10,6 +10,7 @@ const {
 const websocket = require("../services/websocketService");
 const logger = require("../utils/logger");
 const { writeBallByBallDiscoveryLog } = require("../utils/ballByBallFileLogger");
+const marketTrace = require("../utils/marketTrace");
 const cronConfig = require("../config/cron");
 const redisStore = require("../config/redis");
 const { publishEventSnapshot } = require("../services/frontendSocketService");
@@ -235,6 +236,25 @@ function ballByBallSnapshotDelta(markets, previousSnapshot = new Map()) {
   }
 
   return { nextSnapshot, changed, explicitlyDeactivated, active, unchanged };
+}
+
+// Records a discovery row only when its vendor-reported state changed since the last one traced.
+function traceDiscoveryRow(market, source) {
+  const state = {
+    isActive: market.isActive,
+    gameOver: market.gameOver,
+    recalled: market.recalled,
+    status: market.status ?? null,
+    name: market.marketName ?? null,
+    ballLine: market.ballLine ?? null,
+  };
+  marketTrace.traceChange(
+    "discovery",
+    "discovery.row",
+    { eventId: market.eventId, marketId: market.marketId, source, ...state, providerTs: market.providerTimestamp ?? null },
+    state,
+    { marketType: market.marketType },
+  );
 }
 
 function inferredMarketType(marketId, providedType) {
@@ -519,6 +539,21 @@ async function upsertFancies(fancies) {
       }
     }
     for (const fancy of writable) {
+      const previous = existing.get(fancy.marketId);
+      marketTrace.trace(
+        "db.upsert",
+        {
+          eventId: fancy.eventId,
+          marketId: fancy.marketId,
+          action: previous ? "updated" : "inserted",
+          isActive: fancy.isActive,
+          gameOver: fancy.gameOver,
+          status: fancy.status ?? null,
+          wasActive: previous ? previous.isActive : null,
+          deactivated: (!fancy.isActive || fancy.gameOver) && Boolean(previous?.isActive),
+        },
+        { marketType: fancy.marketType },
+      );
       if (fancy.marketType === "line-market" && (!fancy.isActive || fancy.gameOver) &&
           (existing.get(fancy.marketId)?.isActive || !existing.has(fancy.marketId))) {
         logger.info("[LineMarket] deactivated from vendor flags", {
@@ -854,6 +889,20 @@ async function seedInitialMarketPrices(markets, { refreshLines = true } = {}) {
       seed.finally(() => seedsInFlight.delete(String(seedableMarkets[index].marketId))),
     ),
   );
+  results.forEach((result, index) => {
+    const market = seedableMarkets[index];
+    if (result.status === "fulfilled" && result.value) return;
+    marketTrace.traceThrottled(
+      "price.seed",
+      {
+        eventId: market.eventId,
+        marketId: market.marketId,
+        error: result.status === "rejected" ? result.reason?.message ?? String(result.reason) : null,
+      },
+      result.status === "rejected" ? "request-failed" : "empty-or-not-written",
+      { marketType: market.marketType },
+    );
+  });
   const seededEventIds = [...new Set(results.flatMap((result, index) =>
     result.status === "fulfilled" && result.value ? [String(seedableMarkets[index].eventId)] : []
   ))];
@@ -905,6 +954,12 @@ function missingLineMarketIds(storedMarkets, vendorMarkets, missCounts = missing
     if (present.has(marketId)) continue;
     const misses = (missCounts.get(marketId) || 0) + 1;
     missCounts.set(marketId, misses);
+    marketTrace.traceThrottled(
+      "discovery.omitted",
+      { eventId: market.eventId, marketId, missingObservations: misses, retained: true, source: "live-cleanup" },
+      "absent-from-unfiltered-response",
+      { marketType: "line-market" },
+    );
     if (misses === MISSING_LINE_MARKET_PASSES) logger.warn("[LineMarket] absent from unfiltered response; retained", {
       eventId: market.eventId, marketId, missingObservations: misses,
       reason: "omission-is-not-terminal-evidence",
@@ -1366,6 +1421,7 @@ async function syncActiveBallByBallDiscovery() {
     const eventsById = new Map(events.map((event) => [String(event.eventId), event]));
     const discovered = [];
     let failedRequests = 0;
+    const failedEventIds = new Set();
     const requestSummaries = [];
     const logMarketLimit = 100;
     const eventBatchSize = integer("BALL_BY_BALL_EVENT_BATCH_SIZE", 5, { min: 1, max: 20 });
@@ -1386,6 +1442,7 @@ async function syncActiveBallByBallDiscovery() {
         const rawRows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
         rawRows.forEach(writeBallByBallDiscoveryLog);
         const parsedRows = marketRows(response, eventsById);
+        for (const row of parsedRows) traceDiscoveryRow(row, "ball-by-ball-discovery");
         discovered.push(...parsedRows);
         const activeRows = rawRows.filter((market) => market?.isActive !== false && market?.gameOver !== true);
         const dataAge = providerDataAge(activeRows);
@@ -1424,6 +1481,7 @@ async function syncActiveBallByBallDiscovery() {
         requestSummaries.push(summary);
       } catch (error) {
         failedRequests += 1;
+        eventIds.forEach((id) => failedEventIds.add(String(id)));
         logger.error("[BallByBallDiscovery] vendor request failed", {
           eventIds,
           error: error.message,
@@ -1452,11 +1510,42 @@ async function syncActiveBallByBallDiscovery() {
     let unchangedMarkets = 0;
     for (const event of events) {
       const eventId = String(event.eventId);
-      const delta = ballByBallSnapshotDelta(
-        fanciesByEvent.get(eventId) || [],
-        ballByBallActiveSnapshots.get(eventId),
-      );
+      const previousSnapshot = ballByBallActiveSnapshots.get(eventId);
+      const eventMarkets = fanciesByEvent.get(eventId) || [];
+      const delta = ballByBallSnapshotDelta(eventMarkets, previousSnapshot);
       ballByBallActiveSnapshots.set(eventId, delta.nextSnapshot);
+      const deactivated = new Set(delta.explicitlyDeactivated);
+      for (const market of delta.changed) {
+        const marketId = String(market.marketId);
+        marketTrace.trace(
+          "discovery.decision",
+          {
+            eventId,
+            marketId,
+            cycleId,
+            decision: deactivated.has(marketId) ? "deactivate" : previousSnapshot?.has(marketId) ? "changed" : "new",
+            isActive: market.isActive,
+            gameOver: market.gameOver,
+            recalled: market.recalled,
+            status: market.status ?? null,
+          },
+          { marketType: "ball-by-ball" },
+        );
+      }
+      // Vendor snapshots intermittently omit active rows; they are retained, but the gap is
+      // worth seeing next to the socket timeline. A failed request is not an omission.
+      if (previousSnapshot && !failedEventIds.has(eventId)) {
+        const present = new Set(eventMarkets.map((market) => String(market.marketId)));
+        for (const marketId of previousSnapshot.keys()) {
+          if (present.has(marketId)) continue;
+          marketTrace.traceThrottled(
+            "discovery.omitted",
+            { eventId, marketId, cycleId, retained: true, source: "ball-by-ball-discovery" },
+            "absent-from-response",
+            { marketType: "ball-by-ball" },
+          );
+        }
+      }
       changedFancies.push(...delta.changed);
       explicitlyDeactivatedIds.push(...delta.explicitlyDeactivated);
       activeMarkets += delta.active;
@@ -1612,6 +1701,7 @@ async function syncActiveLineMarketDiscovery() {
           const markets = mergeDiscoveredMarkets(parsedMarkets).filter(
             (market) => market.marketType === "line-market",
           );
+          for (const market of markets) traceDiscoveryRow(market, "line-market-discovery");
           return { eventIds, markets };
         } catch (error) {
           result.failedRequests += 1;
@@ -1632,6 +1722,20 @@ async function syncActiveLineMarketDiscovery() {
         else activeLineMarkets.set(String(market.marketId), { market, seenAt });
       }
       const closing = batch.markets.filter((market) => isClosedLineMarket(market) && isChanged(market));
+      for (const market of closing) {
+        marketTrace.trace(
+          "discovery.decision",
+          {
+            eventId: market.eventId,
+            marketId: market.marketId,
+            decision: "retire",
+            isActive: market.isActive,
+            gameOver: market.gameOver,
+            status: market.status ?? null,
+          },
+          { marketType: "line-market" },
+        );
+      }
       if (!closing.length) continue;
       try {
         await reconcileInactiveLineMarkets(closing, { unsubscribe: false });
@@ -1658,6 +1762,21 @@ async function syncActiveLineMarketDiscovery() {
       const { eventIds, markets } = batch;
       try {
         const changed = markets.filter(isChanged);
+        for (const market of changed) {
+          if (isClosedLineMarket(market)) continue;
+          marketTrace.trace(
+            "discovery.decision",
+            {
+              eventId: market.eventId,
+              marketId: market.marketId,
+              decision: lineMarketFingerprints.has(String(market.marketId)) ? "changed" : "new",
+              isActive: market.isActive,
+              gameOver: market.gameOver,
+              status: market.status ?? null,
+            },
+            { marketType: "line-market" },
+          );
+        }
         const persisted = await upsertFancies(changed);
         redisStore.invalidateMarkets(persisted.fancyIds);
         const active = markets.filter((market) => market.isActive && !market.gameOver);

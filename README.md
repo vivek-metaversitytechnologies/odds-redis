@@ -132,6 +132,41 @@ and bytes. The same figures appear on the admin overview.
 removes events that are no longer active in `t_event`. The cleanup is fail-safe: a source database
 query failure aborts the run before any Redis keys are deleted.
 
+### Market trace (ball-by-ball and line markets)
+
+Every ball-by-ball and line market's lifecycle is written to `logs/market-trace/market-trace-<date>.jsonl`,
+one JSON object per line with `ts`, `kind` (`BB`/`LINE`), `stage`, `eventId`, `marketId` and the
+reason for each decision:
+
+| Stage | Written when |
+|---|---|
+| `discovery.row` | a vendor discovery row's state (active, game over, status, name, ball line) changes |
+| `discovery.decision` | discovery treats the market as `new`, `changed`, `deactivate` or `retire` |
+| `discovery.omitted` | a known market is missing from a successful discovery response (it is retained) |
+| `db.upsert` | `t_matchfancy` is inserted/updated, with the flags written |
+| `definition` | a placeholder is `added`/`removed` in the payload, or `blocked` by a terminal set |
+| `tick.state` | a socket or price tick changes status, `go`, `rt`, result or runner states (prices included) |
+| `tick.rejected` | a tick is dropped: `no-db-row` or `inactive-in-db` (throttled) |
+| `tick.blocked` | a live-looking tick stays hidden by a terminal/unavailable set (throttled) |
+| `visibility` | the market is `shown` or `hidden` in the event payload, with the reason (`go`, `s-false`, `rt`, `abandoned`, `bb-terminal-set`, `line-terminal-set`, `line-unavailable-set`) |
+| `line.set` / `bb.terminal` | terminal or unavailable markers change |
+| `price.seed` | a line market's HTTP price seed fails or returns nothing (throttled) |
+| `subscription` | subscribe/unsubscribe outcome |
+| `result` | a result is persisted or rejected, or the socket reports game over |
+
+Repeated identical states are not rewritten, so the file stays small even at tick rates. Analyse it with:
+
+```bash
+node scripts/marketTrace.js anomalies [--days=1] [--kind=BB|LINE] [--event=<id>]
+node scripts/marketTrace.js event <eventId>
+node scripts/marketTrace.js market <marketId>
+```
+
+`anomalies` groups markets by issue (shown after terminal, discovery active after the socket closed
+it, ticks before the DB row existed, discovered but never ticked, game over without a result,
+blocked while live, repeatedly omitted, price seed failures, unresolved subscriptions) and reports
+discovery→first-tick and game-over→result latency.
+
 ### Stake-limit polling
 
 The provider's `market` room is not a reliable source of stake limits on its own: it has pushed

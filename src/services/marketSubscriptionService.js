@@ -2,6 +2,7 @@ const provider = require("./providerApi");
 const websocket = require("./websocketService");
 const marketSettings = require("./marketSettingsService");
 const logger = require("../utils/logger");
+const marketTrace = require("../utils/marketTrace");
 const redisStore = require("../config/redis");
 const { integer } = require("../config/env");
 
@@ -89,6 +90,16 @@ async function subscribeMarkets(ids, { scheduleRetry = true } = {}) {
   acknowledgement.attached.forEach((id) => skippedMarketIds.delete(id));
   const unresolved = acknowledgement.skipped.filter((id) => !acknowledgement.attached.includes(id));
   queueSkippedMarkets(unresolved, { schedule: scheduleRetry });
+  const newlySubscribed = new Set(acknowledgement.subscribed.map(String));
+  const unresolvedSet = new Set(unresolved.map(String));
+  for (const marketId of marketIds) {
+    const outcome = newlySubscribed.has(marketId)
+      ? "subscribed"
+      : unresolvedSet.has(marketId)
+        ? "unresolved"
+        : "already-registered";
+    marketTrace.trace("subscription", { eventId: null, marketId, outcome });
+  }
   return acknowledgement;
 }
 
@@ -147,6 +158,7 @@ async function unsubscribeResultMarkets(ids) {
     completedMarketIds.add(id);
     skippedMarketIds.delete(id);
     pendingResultUnsubscriptions.add(id);
+    marketTrace.trace("subscription", { eventId: null, marketId: id, outcome: "unsubscribed", source: "result" });
   });
   return flushResultUnsubscriptions();
 }
@@ -194,6 +206,14 @@ async function unsubscribeEventMarkets(ids, { trackedOnly = false, source = "man
     marketIds: unsubscribed,
   });
   const unsubscribedSet = new Set(unsubscribed);
+  for (const marketId of marketIds) {
+    marketTrace.trace("subscription", {
+      eventId: null,
+      marketId,
+      outcome: unsubscribedSet.has(marketId) ? "unsubscribed" : "unsubscribe-skipped-untracked",
+      source,
+    });
+  }
   return {
     requested: marketIds,
     unsubscribed,

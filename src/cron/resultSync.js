@@ -5,6 +5,7 @@ const redis = require("../config/redis");
 const subscriptions = require("../services/marketSubscriptionService");
 const frontendSocket = require("../services/frontendSocketService");
 const logger = require("../utils/logger");
+const marketTrace = require("../utils/marketTrace");
 const cronConfig = require("../config/cron");
 const { eventWindowSql } = require("../utils/eventWindow");
 const { retryDeadlock } = require("../utils/dbRetry");
@@ -335,6 +336,13 @@ async function handleSocketGameOver(marketItems) {
       markets.push(...regularRows);
       fancies.push(...fancyRows);
     }
+    for (const fancy of fancies) {
+      marketTrace.trace(
+        "result",
+        { eventId: fancy.eventid, marketId: fancy.marketid, outcome: "socket-game-over", source: "socket" },
+        { marketType: fancy.mtype },
+      );
+    }
     const candidateTerminalEventIds = [...new Set([...markets, ...fancies]
       .filter((market) => isEventTerminalMarketName(market.marketname))
       .map((market) => Number(market.eventid))
@@ -598,11 +606,18 @@ async function persistFancyResult(connection, fancy, result) {
       "UPDATE t_matchfancy SET status=?, isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
       ["SUSPENDED", false, false, false, fancy.marketid],
     );
+    marketTrace.trace(
+      "result",
+      { eventId: fancy.eventid, marketId: fancy.marketid, result: "Abandoned", outcome: "persisted-abandoned" },
+      { marketType: fancy.mtype },
+    );
     return true;
   }
   const value = fancyResultValue(fancy.marketid, result.result, fancy.mtype);
+  const resultTrace = { eventId: fancy.eventid, marketId: fancy.marketid, result: result.result ?? null };
   if (value == null) {
     logger.warn("[ResultSync] invalid fancy result", { marketId: fancy.marketid, result: result.result });
+    marketTrace.trace("result", { ...resultTrace, outcome: "rejected", reason: "unsupported-value" }, { marketType: fancy.mtype });
     return false;
   }
   await connection.execute(
@@ -633,6 +648,7 @@ async function persistFancyResult(connection, fancy, result) {
     "UPDATE t_matchfancy SET isshow=?, is_show=?, issubscribed=?, updatedon=NOW() WHERE fancyid=?",
     [false, false, false, fancy.marketid],
   );
+  marketTrace.trace("result", { ...resultTrace, outcome: "persisted", value }, { marketType: fancy.mtype });
   return true;
 }
 

@@ -16,6 +16,7 @@ const logger = require("./utils/logger");
 const { closeProviderLog } = require("./utils/providerFileLogger");
 const { closeMarketLimitsLog } = require("./utils/marketLimitsFileLogger");
 const { closeBallByBallLog } = require("./utils/ballByBallFileLogger");
+const { closeMarketTrace } = require("./utils/marketTrace");
 const { closeBetPauseCache } = require("./services/betPauseCacheService");
 const cronConfig = require("./config/cron");
 const { closeProviderRequests } = require("./services/providerApi");
@@ -113,6 +114,7 @@ async function startServer() {
       await require("./services/marketSettingsService").stopRetries();
       await closeMarketLimitsLog();
       await closeBallByBallLog();
+      await closeMarketTrace();
       await logger.close();
     })();
     return shutdownPromise;
