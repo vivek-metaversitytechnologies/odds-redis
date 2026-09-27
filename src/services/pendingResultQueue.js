@@ -15,7 +15,10 @@ const MAX_ATTEMPTS = 720; // 720 * 60s retry delay = 12 hours
 // markets settle through t_matchfancy and never belong here.
 const ELIGIBLE_HOURS = 48;
 const REVIEW_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
-const eligibleSql = `(m.updatedon >= DATE_SUB(NOW(), INTERVAL ${ELIGIBLE_HOURS} HOUR) OR COALESCE(e.in_play,0)=1)
+// in_play is only trusted on an active event: ended events can keep a stale in_play=1 for weeks
+// (seen on ~95% of the entries left after the first rollout).
+const eligibleSql = `(m.updatedon >= DATE_SUB(NOW(), INTERVAL ${ELIGIBLE_HOURS} HOUR)
+       OR (COALESCE(e.in_play,0)=1 AND e.isactive=1))
      AND NOT EXISTS (SELECT 1 FROM t_matchfancy lf WHERE lf.fancyid=m.marketid)`;
 // Older scans interpreted MySQL BIT buffers with Number(), skipping inactive rows.
 // Invalidate those checkpoints once so a corrected full pass starts immediately.

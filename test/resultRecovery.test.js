@@ -22,7 +22,7 @@ test("recovery rescans old checkpoints and enqueues SQL-normalized inactive BIT 
     }
     assert.deepEqual(params, ["1.262087180"]);
     // Recovery only queues recently active or in-play markets, never line markets.
-    assert.match(sql, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\) OR COALESCE\(e\.in_play,0\)=1/);
+    assert.match(sql, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL 48 HOUR\)\s+OR \(COALESCE\(e\.in_play,0\)=1 AND e\.isactive=1\)/);
     return [[{ marketid: "1.262087180" }]];
   } }));
   const queue = require("../src/services/pendingResultQueue");

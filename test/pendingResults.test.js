@@ -115,7 +115,7 @@ test("a market in review is never queued again by the recovery scan", async () =
 test("only recently active or in-play regular markets are queued, and never line markets", () => {
   const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "../src/services/pendingResultQueue.js"), "utf8");
   assert.equal(queue.ELIGIBLE_HOURS, 48);
-  assert.match(source, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL \$\{ELIGIBLE_HOURS\} HOUR\) OR COALESCE\(e\.in_play,0\)=1/);
+  assert.match(source, /m\.updatedon >= DATE_SUB\(NOW\(\), INTERVAL \$\{ELIGIBLE_HOURS\} HOUR\)\s+OR \(COALESCE\(e\.in_play,0\)=1 AND e\.isactive=1\)/);
   assert.match(source, /NOT EXISTS \(SELECT 1 FROM t_matchfancy lf WHERE lf\.fancyid=m\.marketid\)/);
   // Both the recovery scan and the due-entry load apply the eligibility rule.
   assert.equal((source.match(/AND \$\{eligibleSql\}/g) || []).length, 2);

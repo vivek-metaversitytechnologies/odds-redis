@@ -231,7 +231,7 @@ Closed regular markets (`t_market`) wait for their result in the Redis queue
 within hours of the event start (measured: football max 4.2 h, tennis 7.8 h, cricket 8.1 h), so:
 
 - only markets seen active in the last 48 hours (`t_market.updatedon`), or whose event is still in
-  play (multi-day Tests), are queued — by the hourly recovery scan and when due entries are loaded;
+  play on an active event (multi-day Tests; a stale `in_play` on an ended event does not count), are queued — by the hourly recovery scan and when due entries are loaded;
   older entries are dropped;
 - line markets never enter (their result lives in `t_fancyresult`), and the regular poller lanes
   skip them too;
