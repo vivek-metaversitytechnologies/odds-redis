@@ -180,6 +180,14 @@ it, ticks before the DB row existed, discovered but never ticked, game over with
 blocked while live, repeatedly omitted, price seed failures, unresolved subscriptions) and reports
 discovery→first-tick and game-over→result latency.
 
+### Line market suspension
+
+The socket suspends a line market briefly during play (observed 9-17 s) and keeps it `SUSPENDED`
+once its over has finished until it is settled. A line market that stays `SUSPENDED` for
+`LINE_MARKET_SUSPENDED_HIDE_MS` (default 30000) joins `Unavailable-LineMarket-Rs:<eventId>` and is
+hidden; an `OPEN` socket tick shows it again. The 2-second HTTP price refresh carries no status,
+so it keeps the socket's last market and runner status instead of falling back to the stored one.
+
 ### Stake-limit polling
 
 The provider's `market` room is not a reliable source of stake limits on its own: it has pushed

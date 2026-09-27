@@ -264,6 +264,15 @@ function traceDiscoveryRow(market, source) {
   );
 }
 
+// In the active lane, ball-by-ball rows in the broad discovery snapshot lag the dedicated
+// ball-by-ball poller (which runs every second for the same active cricket events) by minutes:
+// a ball that is live can still read inactive there. Letting them persist or reconcile removed
+// live balls from the payload every cycle and marked them closed. The poller owns them; the
+// broad pass still uses them as event-liveness evidence.
+function ownedByBallByBallPoller(market, lane) {
+  return lane === "active" && market?.marketType === "ball-by-ball";
+}
+
 function inferredMarketType(marketId, providedType) {
   const explicit = String(providedType || "")
     .trim()
@@ -1068,7 +1077,9 @@ async function syncMarketDiscovery(events, lane = "active") {
     // hydration are independent stages and must not prevent core markets from appearing.
     const primaryUnique = enforceBookmaker2Eligibility(mergeDiscoveredMarkets(primaryRows));
     const primaryStoredRegular = primaryUnique.filter((market) => !storedInFancyTable(market));
-    const primaryStoredFancies = primaryUnique.filter(storedInFancyTable);
+    const primaryStoredFancies = primaryUnique.filter(
+      (market) => storedInFancyTable(market) && !ownedByBallByBallPoller(market, lane),
+    );
     // Both writers can touch t_market (fancy persistence removes migrated rows), so
     // serialize them to avoid cross-transaction lock waits during busy discovery runs.
     const primaryPersisted = await retryDeadlock(() => upsertMarkets(primaryStoredRegular));
@@ -1177,7 +1188,9 @@ async function syncMarketDiscovery(events, lane = "active") {
     for (const eventId of activeDiscoveredEventIds) {
       lifecycle.clearConfirmed(eventId, "active-vendor-market");
     }
-    const fancies = unique.filter((market) => FANCY_MARKET_TYPES.has(market.marketType));
+    const fancies = unique.filter(
+      (market) => FANCY_MARKET_TYPES.has(market.marketType) && !ownedByBallByBallPoller(market, lane),
+    );
     const regularMarkets = unique.filter((market) => !FANCY_MARKET_TYPES.has(market.marketType));
     const changed = unique.filter(
       (market) => discoveryFingerprints.get(market.marketId) !== marketFingerprint(market),
@@ -1188,7 +1201,9 @@ async function syncMarketDiscovery(events, lane = "active") {
       upsertMarkets(changedMarkets.filter((market) => !storedInFancyTable(market))),
     );
     redisStore.invalidateMarkets([...persisted.marketIds, ...persisted.deactivatedMarketIds]);
-    const fancyPersisted = await upsertFancies(changedMarkets.filter(storedInFancyTable));
+    const fancyPersisted = await upsertFancies(
+      changedMarkets.filter((market) => storedInFancyTable(market) && !ownedByBallByBallPoller(market, lane)),
+    );
     redisStore.invalidateMarkets(fancyPersisted.fancyIds);
     // Reconcile every discovered fancy against Redis. Restricting this to changed
     // fingerprints cannot restore a definition after external eviction or expiry.
@@ -1351,7 +1366,11 @@ async function syncLiveMarketCleanup() {
       isMarketSnapshotResponse(responses[index]) ? eids : [],
     );
     const missingLines = await reconcileMissingLineMarkets(validEventIds, vendorMarkets);
-    const inactive = vendorMarkets.filter((market) => !market.isActive || market.gameOver);
+    // Live events are active events, so their ball-by-ball rows belong to the dedicated poller;
+    // the broad snapshot's stale "inactive" rows would otherwise remove and unsubscribe live balls.
+    const inactive = vendorMarkets.filter(
+      (market) => (!market.isActive || market.gameOver) && !ownedByBallByBallPoller(market, "active"),
+    );
     if (!inactive.length) {
       return { events: events.length, inactive: 0, removed: missingLines.removed, missingLines };
     }
@@ -1932,6 +1951,7 @@ module.exports = {
   isBallByBallDiscoveryRequest,
   typedDiscoveryThrottle,
   ballByBallSnapshotDelta,
+  ownedByBallByBallPoller,
   providerDataAge,
   discoveryPriority,
   nextDiscoveryLane,

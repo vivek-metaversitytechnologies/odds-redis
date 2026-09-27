@@ -30,6 +30,7 @@ const TERMINAL_BALL_BY_BALL_KEY_PREFIX = "Terminal-BallByBall-Rs:";
 const TERMINAL_BALL_BY_BALL_AT_KEY_PREFIX = "Terminal-BallByBall-At-Rs:";
 const TERMINAL_LINE_MARKET_KEY_PREFIX = "Terminal-LineMarket-Rs:";
 const UNAVAILABLE_LINE_MARKET_KEY_PREFIX = "Unavailable-LineMarket-Rs:";
+const SUSPENDED_LINE_MARKET_KEY_PREFIX = "Suspended-LineMarket-Rs:";
 
 const PAYLOAD_GROUPS = [
   "Odds",
@@ -661,6 +662,70 @@ function terminalLineMarketKey(eventId) {
 
 function unavailableLineMarketKey(eventId) {
   return `${UNAVAILABLE_LINE_MARKET_KEY_PREFIX}${eventId}`;
+}
+
+// Epoch ms at which the socket first reported each line market SUSPENDED in its current
+// suspension. Short suspensions are routine pauses in play (observed 9-17 s); a line whose over
+// has finished stays SUSPENDED until it is settled, so a suspension outlasting
+// LINE_MARKET_SUSPENDED_HIDE_MS hides the line until the socket reopens it.
+function suspendedLineMarketKey(eventId) {
+  return `${SUSPENDED_LINE_MARKET_KEY_PREFIX}${eventId}`;
+}
+
+function textStatus(value) {
+  return typeof value === "string" && value.trim() ? value.trim().toUpperCase() : null;
+}
+
+async function trackLineSuspensions(redis, eventId, lineRows) {
+  if (typeof redis.hGetAll !== "function" || !lineRows.length) return { hide: [], open: [] };
+  const suspended = [];
+  const open = [];
+  for (const { item } of lineRows) {
+    const text = textStatus(item.s);
+    if (text === "SUSPENDED" && !booleanOr(item.go, false)) suspended.push(String(item.mid));
+    else if (text === "OPEN" || explicitActivity(item.s) === true) open.push(String(item.mid));
+  }
+  if (!suspended.length && !open.length) return { hide: [], open: [] };
+  const key = suspendedLineMarketKey(eventId);
+  if (open.length) await redis.hDel(key, open);
+  if (!suspended.length) return { hide: [], open };
+  const since = await redis.hGetAll(key);
+  const now = Date.now();
+  const hideAfterMs = integer("LINE_MARKET_SUSPENDED_HIDE_MS", 30000, { min: 0 });
+  const started = {};
+  const hide = [];
+  for (const marketId of suspended) {
+    const at = Number(since[marketId]);
+    if (!Number.isFinite(at)) started[marketId] = String(now);
+    else if (now - at >= hideAfterMs) hide.push({ marketId, suspendedForMs: now - at });
+  }
+  if (Object.keys(started).length) {
+    await redis.hSet(key, started);
+    await redis.expire(key, EVENT_TTL_SECONDS);
+  }
+  return { hide, open };
+}
+
+// A price refresh over HTTP carries no market or runner status; it must not replace the status
+// the socket last reported (e.g. turn a SUSPENDED line back to the stored OPEN).
+function hasLineStatus(item) {
+  if ([item.sb, item.s, item.status].some((value) => typeof value === "string" && value.trim() !== "")) return true;
+  return (Array.isArray(item.r) ? item.r : []).some(
+    (runner) => [runner?.sb, runner?.s, runner?.status].some((value) => value != null && value !== ""),
+  );
+}
+
+function preserveLineStatus(entries, previousEntries) {
+  const previous = previousEntries?.[0];
+  if (!previous) return;
+  const runnerStatus = new Map((previous.runners || []).map((runner) => [String(runner.selectionId), runner.status]));
+  for (const entry of entries) {
+    entry.status = previous.status;
+    for (const runner of entry.runners || []) {
+      const prior = runnerStatus.get(String(runner.selectionId));
+      if (prior != null) runner.status = prior;
+    }
+  }
 }
 
 async function lineMarketVisibility(redis, eventId) {
@@ -1541,11 +1606,22 @@ async function writeEventTicks(items) {
   const newlyUnavailableLineIds = lineRows
     .filter(({ item }) => explicitActivity(item.s) === false)
     .map(({ item }) => String(item.mid));
+  const suspensions = await trackLineSuspensions(redis, eventId, lineRows);
+  newlyUnavailableLineIds.push(...suspensions.hide.map(({ marketId }) => marketId));
+  for (const { marketId, suspendedForMs } of suspensions.hide) {
+    marketTrace.traceChange(
+      "line-set",
+      "line.set",
+      { eventId, marketId, set: "unavailable", reason: "suspended-too-long", suspendedForMs },
+      "unavailable",
+      { group: "LineMarket" },
+    );
+  }
   const newlyAvailableLineIds = lineRows
-    .filter(({ item }) => explicitActivity(item.s) === true && !booleanOr(item.go, false))
+    .filter(({ item }) => (explicitActivity(item.s) === true || textStatus(item.s) === "OPEN") && !booleanOr(item.go, false))
     .map(({ item }) => String(item.mid));
   for (const { item } of lineRows) {
-    const activity = explicitActivity(item.s);
+    const activity = textStatus(item.s) === "OPEN" ? true : explicitActivity(item.s);
     const membership = booleanOr(item.go, false) ? "terminal" : activity === null ? null : activity ? "available" : "unavailable";
     if (!membership) continue;
     marketTrace.traceChange(
@@ -1603,6 +1679,7 @@ async function writeEventTicks(items) {
       );
       if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
       if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
+      if (group === "LineMarket" && !hasLineStatus(item)) preserveLineStatus(entries, previousEntries);
       const removeFromPayload = shouldRemoveFromPayload(group, item, market);
       const blockedBallByBall = group === "BallByBall" && terminalBallByBallIds.has(marketId) && !removeFromPayload;
       const blockedLineMarket = group === "LineMarket" && (
@@ -1904,6 +1981,7 @@ async function removeEvent(eventId) {
       terminalBallByBallAtKey(eventKey),
       terminalLineMarketKey(eventKey),
       unavailableLineMarketKey(eventKey),
+      suspendedLineMarketKey(eventKey),
     ];
     const event = publicEventMetadata.get(eventKey);
     const transaction = redis.multi().del(keys);
