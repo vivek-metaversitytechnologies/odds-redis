@@ -7,9 +7,10 @@ const resultSync = require("./resultSync");
 // The vendor computes a cricket-casino result only when it is asked for that market in a small
 // results request; poller-sized batches (hundreds of ids) return results that already exist but
 // never create one. Measured live: a 450-id request missed the result twice, a single-id request
-// created it at once. Without this, casino results waited 45-75 minutes for some other small
-// request. This asks for every unsettled casino market of in-play cricket events in small batches.
-const CHASE_BATCH_SIZE = 5;
+// created it at once, and so did a 25-id request. Without this, casino results waited 45-75 minutes
+// for some other small request. This asks for every unsettled casino market of in-play cricket
+// events in small batches.
+const CHASE_BATCH_SIZE = 50;
 
 let timer;
 let stopped = true;

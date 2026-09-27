@@ -25,7 +25,7 @@ const resultSync = require("../src/cron/resultSync");
 const chaser = require("../src/cron/casinoResultChaser");
 
 test("unsettled casino markets are requested in small batches and settled", async (t) => {
-  state.rows = Array.from({ length: 12 }, (_, index) => casino(index + 1));
+  state.rows = Array.from({ length: 120 }, (_, index) => casino(index + 1));
   t.mock.method(resultSync, "hasExceptionalTable", async () => true);
   const requests = [];
   t.mock.method(provider, "results", async ({ mids }, options) => {
@@ -41,18 +41,18 @@ test("unsettled casino markets are requested in small batches and settled", asyn
 
   const run = await chaser.chaseOnce();
 
-  assert.deepEqual(requests.map((request) => request.mids.length), [5, 5, 2]);
+  assert.deepEqual(requests.map((request) => request.mids.length), [50, 50, 20]);
   assert.ok(requests.every((request) => request.mids.length <= chaser.CHASE_BATCH_SIZE));
   assert.equal(requests[0].options.source, "casino-result-chase");
   assert.deepEqual(applied[0].results.map((row) => row.marketId), [casino(2).marketid]);
-  assert.equal(applied[0].candidates.fancies.length, 12);
-  assert.deepEqual(run, { markets: 12, requests: 3, failedRequests: 0, results: 1, settled: 1, durationMs: run.durationMs });
+  assert.equal(applied[0].candidates.fancies.length, 120);
+  assert.deepEqual(run, { markets: 120, requests: 3, failedRequests: 0, results: 1, settled: 1, durationMs: run.durationMs });
   assert.match(state.queries.at(-1), /f\.mtype='cricket-casino'/);
   assert.match(state.queries.at(-1), /t_matchabondendtie/);
 });
 
 test("a failed request does not stop the other batches, and nothing to settle writes nothing", async (t) => {
-  state.rows = Array.from({ length: 7 }, (_, index) => casino(index + 1));
+  state.rows = Array.from({ length: 70 }, (_, index) => casino(index + 1));
   t.mock.method(resultSync, "hasExceptionalTable", async () => false);
   let calls = 0;
   t.mock.method(provider, "results", async () => {
