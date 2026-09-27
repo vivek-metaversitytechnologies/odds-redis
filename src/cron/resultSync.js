@@ -13,6 +13,17 @@ const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
 
 let running = false;
+// Live fancies now settle from the socket or the closed-fancy chaser within seconds, so the large
+// rotating backlog lanes (thousands of long-idle ids) are swept only every Nth run; the recent and
+// pending lanes still run every time. Cuts results API calls per run from ~30 to a handful.
+let scheduledRunCount = 0;
+
+function backlogSweepDue() {
+  const every = Math.max(1, Math.min(60, Number(process.env.RESULT_BACKLOG_SWEEP_EVERY_RUNS || 5)));
+  const due = scheduledRunCount % every === 0;
+  scheduledRunCount += 1;
+  return due;
+}
 const scheduled = require("../utils/scheduledHandoff").scheduledHandoff({
   isBusy: () => running,
   run: () => syncResults(),
@@ -168,7 +179,7 @@ async function hasExceptionalTable(connection) {
   return exceptionalTableAvailable;
 }
 
-async function loadCandidates() {
+async function loadCandidates({ backlog = true } = {}) {
   const sportIds = String(process.env.SPORT_IDS || "1,2,4")
     .split(",")
     .map((value) => Number(value.trim()))
@@ -203,7 +214,7 @@ async function loadCandidates() {
      ORDER BY m.updatedon DESC, m.id DESC LIMIT ?`,
     [false, ...sportIds, recentRegularLimit],
   );
-  const [marketCandidates] = await getSourcePool().query(
+  const [marketCandidates] = !backlog ? [[]] : await getSourcePool().query(
     `SELECT m.id AS candidateid, m.marketid, m.marketname, m.eventid, m.matchname, m.sportid
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.sportid IN (${placeholders})
@@ -231,7 +242,7 @@ async function loadCandidates() {
      ORDER BY f.updatedon DESC, f.id DESC LIMIT ?`,
     ["OPEN", true, ...sportIds, recentFancyLimit],
   );
-  const [fancyCandidates] = await getSourcePool().query(
+  const [fancyCandidates] = !backlog ? [[]] : await getSourcePool().query(
     `SELECT f.id AS candidateid, f.fancyid AS marketid, f.name AS marketname, f.oddstype, f.mtype,
             f.eventid, COALESCE(f.matchname,e.eventname) AS matchname,
             COALESCE(f.sportid,e.sportid) AS sportid
@@ -911,7 +922,8 @@ async function syncResults() {
   try {
     const startedAt = Date.now();
     const candidatesStartedAt = Date.now();
-    const candidates = await loadCandidates();
+    const backlog = backlogSweepDue();
+    const candidates = await loadCandidates({ backlog });
     const pending = await pendingResults.load();
     const activeRegular = candidates.markets;
     const activeRegularIds = new Set(activeRegular.map((row) => String(row.marketid)));
@@ -939,11 +951,10 @@ async function syncResults() {
     const batches = provider.resultIdBatches(eligible.map((market) => market.marketid)).slice(0, maxCalls);
     const requested = eligible.slice(0, batches.reduce((total, batch) => total + batch.length, 0));
     const fancyObjects = new Set(candidates.fancies);
-    const nextCursors = advanceCandidateCursors(
-      requested,
-      activeRegular,
-      candidates.fancies,
-    );
+    // Without the backlog lanes nothing was requested from the cursors; keep them where they are.
+    const nextCursors = backlog
+      ? advanceCandidateCursors(requested, activeRegular, candidates.fancies)
+      : { ...candidateCursors };
     const requestConcurrency = Math.max(
       1,
       Math.min(20, Number(process.env.RESULT_REQUEST_CONCURRENCY || 4)),
@@ -995,6 +1006,7 @@ async function syncResults() {
       rejectedResults: applied.rejectedResults,
       rejectedResultReasons: applied.rejectedResultReasons,
       rejectedResultDetails: applied.rejectedResultDetails,
+      backlogSweep: backlog,
       cursorsUsed: candidates.cursorsUsed,
       nextCursors,
       candidateLoadMs,

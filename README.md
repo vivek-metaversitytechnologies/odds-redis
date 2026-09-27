@@ -209,6 +209,21 @@ request; the poller's large batches return existing results but never create one
 cricket events in batches of `CHASE_BATCH_SIZE` (code constant) and settles what comes back through
 the normal result path. Status: `/health` → `pipelines.casinoResultChase`.
 
+### Closed-fancy result chase and backlog sweep
+
+Session-style fancies (session, F3, other-market, odd-even, khado, meter) close on the socket with
+`s=false` (the market's own `s`; runner `sb` is not used). The vendor produces their result 1.5-8
+minutes later, and the result poller used to pick it up up to a minute after that (up to 3 minutes
+when its sweep missed the market). Closed markets are remembered in memory and the closed-fancy
+chaser (`CLOSED_FANCY_CHASE_INTERVAL_MS`, default 15 s) asks the results API for just those until
+they settle, reopen, or pass `CLOSED_FANCY_CHASE_MAX_AGE_MS` (default 1 h). Status: `/health` →
+`pipelines.closedFancyChase`.
+
+Because live fancies no longer depend on it, the poller's large rotating backlog lanes (thousands of
+long-idle markets) run only every `RESULT_BACKLOG_SWEEP_EVERY_RUNS` runs (default 5); the recent,
+pending and fallback lanes still run every minute. `pipelines.results.lastResult.backlogSweep` shows
+which kind of run it was.
+
 ### Line market suspension
 
 The socket suspends a line market briefly during play (observed 9-17 s) and keeps it `SUSPENDED`

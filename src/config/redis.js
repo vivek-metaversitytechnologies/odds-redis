@@ -8,6 +8,7 @@ const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
 const { providerLimits, persistLimits } = require("../utils/marketLimits");
 const marketTrace = require("../utils/marketTrace");
+const closedFancies = require("../services/closedFancyTracker");
 
 let client;
 let connecting;
@@ -1682,6 +1683,7 @@ async function writeEventTicks(items) {
     let changed = false;
     for (const { item, market } of acceptedRows) {
       const { group, entries } = transformedTick(item, market);
+      closedFancies.noteTick(item, group);
       const marketId = String(item.mid);
       const previousEntries = payload[group].filter((entry) => entryMarketId(entry) === marketId);
       // Detect whether this market's entries were sitting in a different group before

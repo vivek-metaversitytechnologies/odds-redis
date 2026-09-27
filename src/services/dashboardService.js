@@ -148,6 +148,8 @@ function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()
   return (events || [])
     .filter((event) => {
       if (event?.gameOver) return false;
+      // Multi-day matches (Tests) stay listed while in play, whatever their start date.
+      if (event?.inPlay === true) return true;
       const openTime = Date.parse(event?.openDate);
       return !Number.isFinite(openTime) || openTime >= oldest;
     })
@@ -163,6 +165,7 @@ function activeMatchesFromProjection(entries, maxAgeHours, now = Date.now()) {
   const oldest = now - maxAgeHours * 60 * 60 * 1000;
   return (entries || [])
     .filter((entry) => {
+      if (entry?.inPlay === true) return true;
       const openTime = Date.parse(entry?.openDate);
       return !Number.isFinite(openTime) || openTime >= oldest;
     })
@@ -273,7 +276,7 @@ async function activeMatches(sportId) {
     STRAIGHT_JOIN t_market t ON t.eventid = e.eventid AND t.isactive = TRUE
     LEFT JOIN t_matchresult r ON r.marketid = t.marketid
     WHERE e.sportid = ? AND e.isactive = TRUE
-      AND e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR)
+      AND (e.in_play = TRUE OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
       AND (t.marketname = 'Match Odds' OR t.marketname LIKE '%Bookmaker%'
         OR t.marketname LIKE '%Winner%' OR t.marketname LIKE '%Goal%')
     ORDER BY e.eventid ASC`,

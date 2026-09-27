@@ -90,6 +90,8 @@ function noTickRecoveryCandidates(markets, subscribedIds, now = Date.now()) {
 async function fetchActiveMarkets() {
   const sportIds = csvIntegers("SPORT_IDS", [1, 2, 4]);
   const cricketSportId = integer("CRICKET_SPORT_ID", 4, { min: 1 });
+  // The age limit drops stale events that never started; an in-play event stays current however
+  // long it runs (a Test match is in play for up to five days).
   const maxAgeHours = integer("ACTIVE_MATCH_MAX_AGE_HOURS", 48, { min: 1, max: 720 });
   const futureHours = integer("MARKET_SUBSCRIPTION_FUTURE_HOURS", 24, { min: 1, max: 720 });
   // Cricket markets are eligible regardless of how far in the future the event
@@ -101,7 +103,8 @@ async function fetchActiveMarkets() {
      FROM t_market m INNER JOIN t_event e ON e.eventid=m.eventid
      WHERE m.isactive = ? AND m.sportid IN (${sportIds.map(() => "?").join(",")})
        AND e.isactive = ?
-       AND (e.open_date IS NULL OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
+       AND (e.open_date IS NULL OR COALESCE(e.in_play,0)=1
+         OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
        AND (COALESCE(m.sportid,e.sportid)=${cricketSportId}
          OR COALESCE(e.in_play,0)=1 OR e.open_date IS NULL
          OR e.open_date <= DATE_ADD(NOW(), INTERVAL ${futureHours} HOUR))
@@ -118,7 +121,8 @@ async function fetchActiveMarkets() {
      FROM t_matchfancy f INNER JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND COALESCE(f.sportid,e.sportid) IN (${sportIds.map(() => "?").join(",")})
        AND e.isactive=?
-       AND (e.open_date IS NULL OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
+       AND (e.open_date IS NULL OR COALESCE(e.in_play,0)=1
+         OR e.open_date >= DATE_SUB(NOW(), INTERVAL ${maxAgeHours} HOUR))
        AND (COALESCE(f.sportid,e.sportid)=${cricketSportId}
          OR COALESCE(e.in_play,0)=1 OR e.open_date IS NULL
          OR e.open_date <= DATE_ADD(NOW(), INTERVAL ${futureHours} HOUR))
