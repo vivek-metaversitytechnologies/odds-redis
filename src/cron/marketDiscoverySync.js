@@ -355,6 +355,9 @@ function marketRows(response, eventsById) {
         eventId: Number(item?.eventId),
         sportId: Number(item?.sportId),
         marketName,
+        // The vendor lists some markets with neither name nor type (and no runners);
+        // they only ever carry the `Market <id>` fallback and must not create rows.
+        unnamed: !providedName && marketType === "unknown" && !inferredBookmaker2,
         marketType,
         matchName: event?.eventName || null,
         openDate: event?.openDate || null,
@@ -625,7 +628,7 @@ async function upsertMarkets(markets) {
     const writable = markets.filter(
       (market) =>
         existing.has(market.marketId) ||
-        (!registeredAsFancy.has(market.marketId) && market.isActive && !market.gameOver),
+        (!registeredAsFancy.has(market.marketId) && market.isActive && !market.gameOver && !market.unnamed),
     );
     inserted = writable.filter((market) => !existing.has(market.marketId)).length;
     updated = writable.length - inserted;
@@ -667,7 +670,9 @@ async function upsertMarkets(markets) {
           (marketid,sportid,eventid,marketname,matchname,status,isactive,createdon,updatedon,opendate,
            minbet,maxbet,betdelay,inplay,minbetrate,maxbetrate,is_redis_updated,display_message,
            issuspended,is_rolled_back,maximum_profit,maximumprofit,betlock,seriesid) VALUES ?
-         ON DUPLICATE KEY UPDATE marketname=VALUES(marketname),matchname=VALUES(matchname),
+         ON DUPLICATE KEY UPDATE
+           marketname=IF(VALUES(marketname)=CONCAT('Market ',marketid),marketname,VALUES(marketname)),
+           matchname=VALUES(matchname),
            opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
            seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
            status=VALUES(status),isactive=VALUES(isactive),betdelay=VALUES(betdelay),
@@ -680,7 +685,7 @@ async function upsertMarkets(markets) {
       inserted,
       updated,
       marketIds: markets
-        .filter((market) => market.isActive && !market.gameOver)
+        .filter((market) => market.isActive && !market.gameOver && !(market.unnamed && !existing.has(market.marketId)))
         .map((market) => market.marketId),
       deactivatedMarketIds,
     };
