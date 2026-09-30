@@ -15,6 +15,11 @@ const MAX_ATTEMPTS = 720; // 720 * 60s retry delay = 12 hours
 // markets settle through t_matchfancy and never belong here.
 const ELIGIBLE_HOURS = 48;
 const REVIEW_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
+// The vendor can switch a pre-match market off and on (seen on Bookmaker a day before the start),
+// which queues it long before any result can exist. Polls before the event start still run, so a
+// pre-match abandonment settles at once, but they do not spend the 12-hour budget.
+const eventStartById = new Map();
+const EVENT_START_CACHE_LIMIT = 5000;
 // in_play is only trusted on an active event: ended events can keep a stale in_play=1 for weeks
 // (seen on ~95% of the entries left after the first rollout).
 const eligibleSql = `(m.updatedon >= DATE_SUB(NOW(), INTERVAL ${ELIGIBLE_HOURS} HOUR)
@@ -196,7 +201,7 @@ async function load({ adaptive = false } = {}) {
     "SELECT 1 FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='t_matchabondendtie'",
   );
   const [rows] = await getSourcePool().query(
-    `SELECT m.id AS candidateid,m.marketid,m.marketname,m.eventid,m.matchname,m.sportid
+    `SELECT m.id AS candidateid,m.marketid,m.marketname,m.eventid,m.matchname,m.sportid,e.open_date AS opendate
      FROM t_market m LEFT JOIN t_event e ON e.eventid=m.eventid
      WHERE m.marketid IN (${ids.map(() => "?").join(",")})
      AND ${eligibleSql}
@@ -206,11 +211,25 @@ async function load({ adaptive = false } = {}) {
   );
   // Settled, deleted, too old to still get a result, or a line market: no longer queued.
   const found = new Set(rows.map((row) => String(row.marketid)));
+  for (const row of rows) {
+    const start = eventStartMs(row.opendate);
+    eventStartById.delete(String(row.marketid));
+    if (Number.isFinite(start)) eventStartById.set(String(row.marketid), start);
+  }
+  while (eventStartById.size > EVENT_START_CACHE_LIMIT) eventStartById.delete(eventStartById.keys().next().value);
   await remove(ids.filter((id) => !found.has(id)));
   const sports = new Set(String(process.env.SPORT_IDS || "1,2,4").split(",").map(Number));
   const excluded = rows.filter((row) => !sports.has(Number(row.sportid)));
   await defer(excluded.map((row) => String(row.marketid)));
   return { rows: rows.filter((row) => sports.has(Number(row.sportid))), recovered, depth: await c.zCard(key), reviewCount };
+}
+
+// t_event.open_date is an IST DATETIME, read back as a string (dateStrings: true).
+function eventStartMs(value) {
+  if (!value) return NaN;
+  if (value instanceof Date) return value.getTime();
+  const match = String(value).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  return match ? Date.parse(`${match[1]}T${match[2]}+05:30`) : NaN;
 }
 
 function retryDelay() {
@@ -222,7 +241,7 @@ async function defer(ids) {
   const c = await client();
   const now = Date.now();
   const tx = c.multi();
-  for (const id of ids) tx.hIncrBy(`${key}:attempts`, id, 1);
+  for (const id of ids) tx.hIncrBy(`${key}:attempts`, id, now < (eventStartById.get(String(id)) ?? 0) ? 0 : 1);
   // Existing queue entries acquire an age on their first retry after upgrade.
   for (const id of ids) tx.hSetNX(`${key}:firstQueuedAt`, id, String(now));
   const attempts = await tx.exec();
@@ -242,5 +261,5 @@ async function defer(ids) {
 module.exports = {
   enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus, pruneReview,
   ELIGIBLE_HOURS, MAX_ATTEMPTS,
-  __testing__: { recover },
+  __testing__: { recover, eventStartMs, eventStartById },
 };

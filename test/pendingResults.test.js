@@ -62,8 +62,8 @@ function makeFakeRedis() {
           return tx;
         },
         zAdd(k, entries, options) { ops.push(() => fake.zAdd(k, entries, options)); return tx; },
-        hIncrBy(_key, id) {
-          ops.push(() => { attempts.set(id, (attempts.get(id) || 0) + 1); return attempts.get(id); });
+        hIncrBy(_key, id, by) {
+          ops.push(() => { attempts.set(id, (attempts.get(id) || 0) + by); return attempts.get(id); });
           return tx;
         },
         zRem(_key, ids) { ops.push(() => ids.forEach((id) => scores.delete(id))); return tx; },
@@ -110,6 +110,42 @@ test("a market in review is never queued again by the recovery scan", async () =
     await queue.enqueue(["1.262087180"]);
     assert.equal(scores.has("1.262087180"), false);
   } finally { redis.__testing__.reset(); }
+});
+
+test("polls before the event start do not spend the 12-hour budget", async () => {
+  const { eventStartById } = queue.__testing__;
+  const { fake, scores, attempts, review } = makeFakeRedis();
+  redis.__testing__.setRedisClient(fake);
+  try {
+    // Bookmaker switched off by the vendor a day before the start (event 36111738).
+    await queue.enqueue(["4.697831668661-BM"]);
+    eventStartById.set("4.697831668661-BM", Date.now() + 24 * 60 * 60 * 1000);
+    for (let attempt = 1; attempt <= queue.MAX_ATTEMPTS + 10; attempt += 1) await queue.defer(["4.697831668661-BM"]);
+    assert.equal(attempts.get("4.697831668661-BM"), 0);
+    assert.ok(scores.has("4.697831668661-BM"), "still polled every minute before the start");
+    assert.equal(review.has("4.697831668661-BM"), false);
+
+    // Once the event has started, every failed poll counts again.
+    eventStartById.set("4.697831668661-BM", Date.now() - 1000);
+    await queue.defer(["4.697831668661-BM"]);
+    assert.equal(attempts.get("4.697831668661-BM"), 1);
+  } finally {
+    eventStartById.clear();
+    redis.__testing__.reset();
+  }
+});
+
+test("event start times are read as IST", () => {
+  const { eventStartMs } = queue.__testing__;
+  assert.equal(eventStartMs("2026-09-29 09:30:00.000000"), Date.parse("2026-09-29T04:00:00Z"));
+  assert.equal(eventStartMs("2026-09-29 09:30:00"), Date.parse("2026-09-29T04:00:00Z"));
+  assert.ok(Number.isNaN(eventStartMs(null)));
+  assert.ok(Number.isNaN(eventStartMs("0000-00-00 garbage")));
+});
+
+test("the due-entry load reads each event start", () => {
+  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "../src/services/pendingResultQueue.js"), "utf8");
+  assert.match(source, /m\.sportid,e\.open_date AS opendate\s+FROM t_market m LEFT JOIN t_event e/);
 });
 
 test("only recently active or in-play regular markets are queued, and never line markets", () => {
