@@ -2,6 +2,9 @@ const { integer, boolean } = require("../config/env");
 const logger = require("../utils/logger");
 
 const KEY_PREFIX = "VendorMetrics:minute:";
+// history() reads at most 1440 minutes, so older buckets are never used. Each minute bucket is
+// ~6 KB (~8 MB/day); longer retention filled the 30 MB prod Redis.
+const RETENTION_SECONDS = 86400;
 let pending = new Map();
 let flushTimer;
 let flushPromise;
@@ -72,11 +75,10 @@ async function flush() {
     // Lazy loading avoids the existing redis -> providerApi dependency cycle.
     const { getRedisClient } = require("../config/redis");
     const client = await getRedisClient();
-    const retentionSeconds = integer("PROVIDER_METRICS_RETENTION_DAYS", 14, { min: 1, max: 365 }) * 86400;
     const transaction = client.multi();
     for (const [key, fields] of snapshot) {
       for (const [name, value] of fields) transaction.hIncrBy(key, name, value);
-      transaction.expire(key, retentionSeconds);
+      transaction.expire(key, RETENTION_SECONDS);
     }
     await transaction.exec();
   })()
