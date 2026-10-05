@@ -2701,12 +2701,12 @@ test("raw socket payload logging preserves complete final events even when the e
   const previous = process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
   process.env.PROVIDER_LOG_SOCKET_PAYLOADS = "false";
   try {
-    const payload = [{ eid: 123, mid: "raw-log-test", go: true, res: "85", unknownField: { value: true } }];
+    const payload = [{ eid: 123, mid: "raw-log-test-F2", go: true, res: "85", unknownField: { value: true } }];
     for (const event of ["tick", "market"]) {
       logRawSocketPayload(payload, event);
-      const [record] = getRawSocketPayloads("raw-log-test", 1);
+      const [record] = getRawSocketPayloads("raw-log-test-F2", 1);
       assert.equal(record.event, event);
-      assert.deepEqual(record.payload, payload);
+      assert.deepEqual(record.payload, payload[0]);
     }
   } finally {
     if (previous === undefined) delete process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
@@ -2714,18 +2714,31 @@ test("raw socket payload logging preserves complete final events even when the e
   }
 });
 
-test("raw socket logging skips ordinary updates and preserves final and zero-result packets", () => {
-  const mid = "raw-final-filter-test";
+test("raw socket logging skips ordinary updates and preserves final, recall and zero-result packets", () => {
+  const mid = "raw-final-filter-test-F2";
   for (const fields of [{}, { s: false }, { res: null }, { res: "" }, { res: "  " }, { settings: { ms: 100 } }]) {
     logRawSocketPayload({ eid: 123, mid, ...fields });
   }
   assert.deepEqual(getRawSocketPayloads(mid, 20), []);
-  for (const fields of [{ go: true }, { res: 0 }, { res: "Abandoned" }]) {
+  for (const fields of [{ go: true }, { rt: true }, { res: 0 }, { res: "Abandoned" }]) {
     const payload = { message: { markets: [{ eid: 123, mid, ...fields }] } };
     logRawSocketPayload(payload);
-    assert.deepEqual(getRawSocketPayloads(mid, 1)[0].payload, payload);
+    assert.deepEqual(getRawSocketPayloads(mid, 1)[0].payload, payload.message.markets[0]);
   }
-  assert.equal(getRawSocketPayloads(mid, 20).length, 3);
+  assert.equal(getRawSocketPayloads(mid, 20).length, 4);
+});
+
+test("raw socket logging excludes non-fancy markets from mixed batches", () => {
+  const regular = { eid: 123, mid: "1.raw-regular", go: true, res: "1" };
+  const fancy = { eid: 123, mid: "4.raw-mixed-F2", go: true, res: "85", extra: { intact: true } };
+  logRawSocketPayload({ message: { markets: [regular, fancy] } });
+  assert.deepEqual(getRawSocketPayloads(regular.mid, 20), []);
+  assert.deepEqual(getRawSocketPayloads(fancy.mid, 1)[0].payload, fancy);
+  for (const suffix of ["F3", "OE", "KD", "MT", "BB", "CC"]) {
+    const item = { eid: 123, mid: `4.raw-family-${suffix}`, rt: true };
+    logRawSocketPayload(item);
+    assert.deepEqual(getRawSocketPayloads(item.mid, 1)[0].payload, item);
+  }
 });
 
 test("raw socket logs can be matched by nested market ID", () => {

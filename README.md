@@ -44,13 +44,14 @@ until Redis becomes available.
 Provider HTTP requests and responses are logged with credentials redacted.
 Use `PROVIDER_LOG_PAYLOADS` to enable/disable bodies and
 `PROVIDER_LOG_MAX_CHARS` to cap large response previews.
-Provider Socket.IO packets containing a final market (`go: true`) or a nonempty result
-(`res`, including numeric zero) are logged before transformation. Ordinary price ticks
-and settings-only updates are skipped. This logging does not require environment changes
-and ignores `PROVIDER_LOG_SOCKET_PAYLOADS` and `PROVIDER_LOG_TO_FILE`. Each `provider.socket.raw`
-record includes the socket event name and the original payload, including unknown fields
-and array wrappers, without the HTTP response preview truncation. These records are also
-available through `GET /api/logs/socket?marketId=<marketId>&limit=20`.
+Raw socket logging records only fancy markets with IDs ending in `-F2`, `-F3`, `-OE`,
+`-KD`, `-MT`, `-BB`, or `-CC` that carry `go: true`, `rt: true`, or a nonempty `res`
+(including numeric zero). Ordinary updates and non-fancy markets are skipped, including
+unrelated entries in mixed packets. Each `provider.socket.raw` record includes the socket
+event name and the complete matching market object with all original fields, without
+HTTP preview truncation. No environment changes are required; this logging ignores
+`PROVIDER_LOG_SOCKET_PAYLOADS` and `PROVIDER_LOG_TO_FILE`. Records are also available through
+`GET /api/logs/socket?marketId=<marketId>&limit=20`.
 Per-market provider, queue, Redis, and frontend-emit timings are logged when
 `PROVIDER_LOG_SOCKET_TIMINGS=true`.
 Pretty-printed daily files are written to `logs/provider/provider-http-YYYY-MM-DD.log`.
