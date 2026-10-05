@@ -2697,11 +2697,11 @@ test("socket classifier separates score envelopes from nested odds ticks", () =>
   });
 });
 
-test("raw socket payload logging preserves complete events even when the env flag is false", () => {
+test("raw socket payload logging preserves complete final events even when the env flag is false", () => {
   const previous = process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
   process.env.PROVIDER_LOG_SOCKET_PAYLOADS = "false";
   try {
-    const payload = [{ eid: 123, mid: "raw-log-test", settings: { ms: 100 }, unknownField: { value: true } }];
+    const payload = [{ eid: 123, mid: "raw-log-test", go: true, res: "85", unknownField: { value: true } }];
     for (const event of ["tick", "market"]) {
       logRawSocketPayload(payload, event);
       const [record] = getRawSocketPayloads("raw-log-test", 1);
@@ -2712,6 +2712,20 @@ test("raw socket payload logging preserves complete events even when the env fla
     if (previous === undefined) delete process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
     else process.env.PROVIDER_LOG_SOCKET_PAYLOADS = previous;
   }
+});
+
+test("raw socket logging skips ordinary updates and preserves final and zero-result packets", () => {
+  const mid = "raw-final-filter-test";
+  for (const fields of [{}, { s: false }, { res: null }, { res: "" }, { res: "  " }, { settings: { ms: 100 } }]) {
+    logRawSocketPayload({ eid: 123, mid, ...fields });
+  }
+  assert.deepEqual(getRawSocketPayloads(mid, 20), []);
+  for (const fields of [{ go: true }, { res: 0 }, { res: "Abandoned" }]) {
+    const payload = { message: { markets: [{ eid: 123, mid, ...fields }] } };
+    logRawSocketPayload(payload);
+    assert.deepEqual(getRawSocketPayloads(mid, 1)[0].payload, payload);
+  }
+  assert.equal(getRawSocketPayloads(mid, 20).length, 3);
 });
 
 test("raw socket logs can be matched by nested market ID", () => {

@@ -244,6 +244,10 @@ function logShape(classification, value) {
 }
 
 function logRawSocketPayload(data, event = "tick") {
+  const hasFinalOrResult = collectOddsTicks(data).some(
+    (item) => item.go === true || (item.res != null && String(item.res).trim() !== ""),
+  );
+  if (!hasFinalOrResult) return;
   rawSocketActivity.unshift({ timestamp: new Date().toISOString(), event, payload: data });
   rawSocketActivity.splice(500);
   writeProviderLog("provider.socket.raw", { event, payload: data });
