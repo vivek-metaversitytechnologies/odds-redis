@@ -42,7 +42,8 @@ function getLogger() {
 }
 
 function writeProviderLog(type, details) {
-  if (enabled()) getLogger().info("provider-http", { type, details });
+  // Keep complete socket payloads available without requiring logging env changes.
+  if (type === "provider.socket.raw" || enabled()) getLogger().info("provider-http", { type, details });
 }
 
 async function closeProviderLog() {

@@ -243,11 +243,10 @@ function logShape(classification, value) {
   writeProviderLog("provider.socket.shape", { classification, ...shape });
 }
 
-function logRawSocketPayload(data) {
-  if (String(process.env.PROVIDER_LOG_SOCKET_PAYLOADS || "false").toLowerCase() !== "true") return;
-  rawSocketActivity.unshift({ timestamp: new Date().toISOString(), payload: data });
+function logRawSocketPayload(data, event = "tick") {
+  rawSocketActivity.unshift({ timestamp: new Date().toISOString(), event, payload: data });
   rawSocketActivity.splice(500);
-  writeProviderLog("provider.socket.raw", { payload: data });
+  writeProviderLog("provider.socket.raw", { event, payload: data });
 }
 
 function payloadContainsMarket(value, marketId, visited = new Set()) {
@@ -475,6 +474,7 @@ function connectSocket() {
   });
   socket.on("tick", (data) => {
     const receivedAtMs = Date.now();
+    logRawSocketPayload(data, "tick");
     const messages = Array.isArray(data) ? data : [data];
     state.socketMessageCount += messages.length;
     const oddsTicks = collectOddsTicks(data);
@@ -483,7 +483,6 @@ function connectSocket() {
       ingestedBytes: estimateIngestedBytes(data, messages.length),
     });
     const scores = messages.flatMap(collectScores);
-    if (scores.length || oddsTicks.length) logRawSocketPayload(data);
     if (scores.length) {
       state.scoreUpdateCount += scores.length;
       logShape("score", messages[0]);
@@ -518,6 +517,7 @@ function connectSocket() {
     }
   });
   socket.on("market", (data) => {
+    logRawSocketPayload(data, "market");
     for (const item of Array.isArray(data) ? data : [data]) {
       writeMarketLimitsLog(item);
       const cacheDelete = deleteMarketBetPause(item).catch((error) =>

@@ -54,6 +54,7 @@ const {
   collectScores,
   messageShape,
   logRawSocketPayload,
+  getRawSocketPayloads,
   payloadContainsMarket,
   isResultTick,
 } = require("../src/services/websocketService");
@@ -2696,12 +2697,21 @@ test("socket classifier separates score envelopes from nested odds ticks", () =>
   });
 });
 
-test("raw socket payload logger can be disabled", () => {
+test("raw socket payload logging preserves complete events even when the env flag is false", () => {
   const previous = process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
   process.env.PROVIDER_LOG_SOCKET_PAYLOADS = "false";
-  assert.doesNotThrow(() => logRawSocketPayload({ eid: 123, mid: "1.2" }));
-  if (previous === undefined) delete process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
-  else process.env.PROVIDER_LOG_SOCKET_PAYLOADS = previous;
+  try {
+    const payload = [{ eid: 123, mid: "raw-log-test", settings: { ms: 100 }, unknownField: { value: true } }];
+    for (const event of ["tick", "market"]) {
+      logRawSocketPayload(payload, event);
+      const [record] = getRawSocketPayloads("raw-log-test", 1);
+      assert.equal(record.event, event);
+      assert.deepEqual(record.payload, payload);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.PROVIDER_LOG_SOCKET_PAYLOADS;
+    else process.env.PROVIDER_LOG_SOCKET_PAYLOADS = previous;
+  }
 });
 
 test("raw socket logs can be matched by nested market ID", () => {
