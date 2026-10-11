@@ -284,7 +284,7 @@ async function retireSocketMarkets(connection, rows, regular, closedRows) {
     const batch = ordered.slice(offset, offset + SOCKET_RETIRE_BATCH_SIZE);
     // Queue results before opening the transaction; Redis latency must not
     // extend the lifetime of market row locks.
-    if (regular) await pendingResults.enqueue(batch.map((row) => row.marketid));
+    if (regular) await pendingResults.enqueue(batch.map((row) => row.marketid), { revive: true });
     const placeholders = batch.map(() => "?").join(",");
     const sql = regular
       ? `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()

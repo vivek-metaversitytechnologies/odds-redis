@@ -23,14 +23,21 @@ function makeFakeRedis() {
     isOpen: true,
     async eval(_script, { keys, arguments: args }) {
       if (keys[1] === FIRST_QUEUED_KEY && keys[2] === REVIEW_KEY) {
-        // enqueue
-        const now = args[0];
-        for (const id of args.slice(1)) {
-          if (review.has(id)) continue;
-          if (!firstQueued.has(id)) firstQueued.set(id, now);
-          if (!scores.has(id)) scores.set(id, Number(now));
+        // enqueue: keys = [key, firstQueuedAt, review, attempts]; args = [now, revive, ...ids]
+        const [now, revive] = args;
+        let revived = 0;
+        for (const id of args.slice(2)) {
+          if (revive === "1" && review.delete(id)) {
+            attempts.delete(id);
+            firstQueued.set(id, now);
+            scores.set(id, Number(now));
+            revived += 1;
+          } else if (!review.has(id)) {
+            if (!firstQueued.has(id)) firstQueued.set(id, now);
+            if (!scores.has(id)) scores.set(id, Number(now));
+          }
         }
-        return 1;
+        return revived;
       }
       // moveExpired: keys = [key, attempts, firstQueuedAt, review]; args = [max, now, ...ids]
       const maxAttempts = Number(args[0]);
@@ -51,8 +58,8 @@ function makeFakeRedis() {
         scores.set(value, score);
       }
     },
-    async hmGet(_key, ids) {
-      return ids.map((id) => firstQueued.get(id) ?? null);
+    async hmGet(k, ids) {
+      return ids.map((id) => (k === REVIEW_KEY ? review : firstQueued).get(id) ?? null);
     },
     multi() {
       const ops = [];
@@ -68,7 +75,13 @@ function makeFakeRedis() {
         },
         zRem(_key, ids) { ops.push(() => ids.forEach((id) => scores.delete(id))); return tx; },
         hDel(k, ids) { ops.push(() => ids.forEach((id) => (k === FIRST_QUEUED_KEY ? firstQueued : attempts).delete(id))); return tx; },
-        hSet(k, id, value) { ops.push(() => { if (k === REVIEW_KEY) review.set(id, value); }); return tx; },
+        hSet(k, id, value) {
+          ops.push(() => {
+            if (k === REVIEW_KEY) review.set(id, value);
+            else { attempts.set(id, Number(value)); return 0; }
+          });
+          return tx;
+        },
         async exec() { return ops.map((op) => op()); },
       };
       return tx;
@@ -133,6 +146,47 @@ test("polls before the event start do not spend the 12-hour budget", async () =>
     eventStartById.clear();
     redis.__testing__.reset();
   }
+});
+
+test("a rescheduled event voids attempts counted against its earlier start", async () => {
+  const { eventStartById } = queue.__testing__;
+  const { fake, scores, attempts, review } = makeFakeRedis();
+  redis.__testing__.setRedisClient(fake);
+  try {
+    // Event 36151023 went live on its original date, then was moved four days later.
+    await queue.enqueue(["4.273870138312-BM"]);
+    eventStartById.set("4.273870138312-BM", Date.now() - 1000);
+    for (let attempt = 1; attempt <= 600; attempt += 1) await queue.defer(["4.273870138312-BM"]);
+    assert.equal(attempts.get("4.273870138312-BM"), 600);
+
+    eventStartById.set("4.273870138312-BM", Date.now() + 4 * 24 * 60 * 60 * 1000);
+    await queue.defer(["4.273870138312-BM"]);
+    assert.equal(attempts.get("4.273870138312-BM"), 0);
+    assert.ok(scores.has("4.273870138312-BM"));
+    assert.equal(review.has("4.273870138312-BM"), false);
+  } finally {
+    eventStartById.clear();
+    redis.__testing__.reset();
+  }
+});
+
+test("a retired market that was already in review is queued again with a fresh budget", async () => {
+  const { fake, scores, attempts, firstQueued, review } = makeFakeRedis();
+  redis.__testing__.setRedisClient(fake);
+  try {
+    await queue.enqueue(["4.273870138312-BM"]);
+    for (let attempt = 1; attempt <= queue.MAX_ATTEMPTS; attempt += 1) await queue.defer(["4.273870138312-BM"]);
+    assert.equal(review.has("4.273870138312-BM"), true);
+
+    // The rescheduled match is played and the market is retired again.
+    assert.equal(await queue.enqueue(["4.273870138312-BM"], { revive: true }), 1);
+    assert.equal(review.has("4.273870138312-BM"), false);
+    assert.ok(scores.has("4.273870138312-BM"));
+    assert.equal(attempts.has("4.273870138312-BM"), false);
+    assert.ok(firstQueued.has("4.273870138312-BM"));
+    const excluded = await queue.excludeReviewed([{ marketid: "4.273870138312-BM" }]);
+    assert.equal(excluded.length, 1);
+  } finally { redis.__testing__.reset(); }
 });
 
 test("event start times are read as IST", () => {

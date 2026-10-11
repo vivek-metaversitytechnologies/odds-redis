@@ -178,7 +178,7 @@ async function retireCompletedEvents(events) {
           for (let offset = 0; offset < rows.length; offset += 100) {
             const batch = rows.slice(offset, offset + 100);
             // Redis work must not extend an open database transaction.
-            if (table === "t_market") await pendingResults.enqueue(batch.map((row) => row.marketid));
+            if (table === "t_market") await pendingResults.enqueue(batch.map((row) => row.marketid), { revive: true });
             await retryDeadlock(async () => {
               await connection.beginTransaction();
               try {

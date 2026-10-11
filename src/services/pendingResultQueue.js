@@ -47,19 +47,33 @@ async function client() {
   return value;
 }
 
-async function enqueue(ids) {
+// `revive` is for retirement paths only: a market the vendor listed again after it went to review
+// (a rescheduled event keeps its market ids) can still get a result, so it is queued afresh. The
+// recovery scan must not revive, or review entries would be re-polled on every pass.
+async function enqueue(ids, { revive = false } = {}) {
   const members = [...new Set(ids.map(String))];
-  if (!members.length) return;
+  if (!members.length) return 0;
   const c = await client();
   const now = Date.now();
-  await c.eval(`
-    for i=2,#ARGV do
-      if redis.call('HEXISTS',KEYS[3],ARGV[i]) == 0 then
+  const revived = await c.eval(`
+    local revived = 0
+    for i=3,#ARGV do
+      if ARGV[2] == '1' and redis.call('HDEL',KEYS[3],ARGV[i]) == 1 then
+        redis.call('HDEL',KEYS[4],ARGV[i])
+        redis.call('HSET',KEYS[2],ARGV[i],ARGV[1])
+        redis.call('ZADD',KEYS[1],ARGV[1],ARGV[i])
+        revived = revived + 1
+      elseif redis.call('HEXISTS',KEYS[3],ARGV[i]) == 0 then
         redis.call('HSETNX',KEYS[2],ARGV[i],ARGV[1])
         redis.call('ZADD',KEYS[1],'NX',ARGV[1],ARGV[i])
       end
     end
-    return 1`, { keys: [key, `${key}:firstQueuedAt`, reviewKey], arguments: [String(now), ...members] });
+    return revived`, {
+    keys: [key, `${key}:firstQueuedAt`, reviewKey, `${key}:attempts`],
+    arguments: [String(now), revive ? "1" : "0", ...members],
+  });
+  if (Number(revived)) logger.info("[PendingResults] revived reviewed markets", { revived: Number(revived) });
+  return Number(revived) || 0;
 }
 
 async function moveExpired(ids) {
@@ -240,13 +254,19 @@ async function defer(ids) {
   if (!ids.length) return;
   const c = await client();
   const now = Date.now();
+  const preStart = ids.map((id) => now < (eventStartById.get(String(id)) ?? 0));
   const tx = c.multi();
-  for (const id of ids) tx.hIncrBy(`${key}:attempts`, id, now < (eventStartById.get(String(id)) ?? 0) ? 0 : 1);
+  // Before the start nothing counts, including attempts spent against an earlier start time
+  // that a reschedule has since moved later.
+  ids.forEach((id, index) => (preStart[index]
+    ? tx.hSet(`${key}:attempts`, id, "0")
+    : tx.hIncrBy(`${key}:attempts`, id, 1)));
   // Existing queue entries acquire an age on their first retry after upgrade.
   for (const id of ids) tx.hSetNX(`${key}:firstQueuedAt`, id, String(now));
-  const attempts = await tx.exec();
-  const exhausted = ids.filter((_id, index) => Number(attempts[index]) >= MAX_ATTEMPTS);
-  const retry = ids.filter((_id, index) => Number(attempts[index]) < MAX_ATTEMPTS);
+  const replies = await tx.exec();
+  const attempts = ids.map((_id, index) => (preStart[index] ? 0 : Number(replies[index])));
+  const exhausted = ids.filter((_id, index) => attempts[index] >= MAX_ATTEMPTS);
+  const retry = ids.filter((_id, index) => attempts[index] < MAX_ATTEMPTS);
   if (exhausted.length) {
     const firstQueued = await c.hmGet(`${key}:firstQueuedAt`, exhausted);
     const move = c.multi().zRem(key, exhausted).hDel(`${key}:attempts`, exhausted).hDel(`${key}:firstQueuedAt`, exhausted);

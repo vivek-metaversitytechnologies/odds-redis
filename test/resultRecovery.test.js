@@ -9,7 +9,7 @@ test("recovery rescans old checkpoints and enqueues SQL-normalized inactive BIT 
   t.mock.method(redis, "getRedisClient", async () => ({
     isOpen: true,
     get: async () => JSON.stringify({ cursor: 9999999, nextRecoveryAt: Date.now() + 3600000 }),
-    eval: async (_script, options) => enqueued.push(...options.arguments.slice(1)),
+    eval: async (_script, options) => enqueued.push(...options.arguments.slice(2)),
     set: async (_key, value) => { checkpoint = JSON.parse(value); },
     hScan: async () => ({ cursor: "0", entries: [] }),
   }));

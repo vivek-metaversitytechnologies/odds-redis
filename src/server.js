@@ -133,7 +133,19 @@ async function startServer() {
 }
 
 if (require.main === module) {
-  startServer().catch(async (error) => {
+  let running;
+  // An uncaught error still ends the process and PM2 restarts it (seen: an assertion inside Node's
+  // bundled HTTP client when the provider closed a TLS connection mid-response). Record it with
+  // its stack and close sockets and logs first, bounded so a hung close cannot delay the restart.
+  process.once("uncaughtException", (error, origin) => {
+    logger.error("Uncaught exception; process exiting", { origin, error: error?.message, stack: error?.stack });
+    const exit = () => process.exit(1);
+    setTimeout(exit, 10000).unref();
+    Promise.resolve(running?.shutdown("uncaughtException")).catch(() => {}).finally(exit);
+  });
+  startServer().then((value) => {
+    running = value;
+  }).catch(async (error) => {
     logger.error("Startup failed", { error: error.message });
     await Promise.allSettled([
       closeRedis(),
