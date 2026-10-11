@@ -1,6 +1,7 @@
 const logger = require("../utils/logger");
 const { boolean, integer } = require("../config/env");
 const { setBounded } = require("../utils/boundedMap");
+const { audit } = require("../utils/eventAudit");
 
 const observations = new Map();
 const confirmedEvents = new Set();
@@ -45,6 +46,7 @@ function observe({ eventId, source, terminal, evidence = null }) {
   setBounded(observations, key, { count, evidence, observedAt: new Date().toISOString() }, 10000);
   if (confirmed) confirmedEvents.add(id);
   const execute = confirmed && !dryRun();
+  audit("terminal.observed", id, { source, count, required, confirmed, execute, dryRun: dryRun(), evidence });
   logger[confirmed ? "warn" : "info"]("[EventLifecycle] terminal observation", {
     eventId: id,
     source,

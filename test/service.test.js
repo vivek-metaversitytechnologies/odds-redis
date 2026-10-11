@@ -2503,6 +2503,25 @@ test("Match Odds and Bookmaker game-over ticks are event-terminal signals", () =
   assert.equal(isEventTerminalMarketName("BOOKMAKER"), true);
   assert.equal(isEventTerminalMarketName("Over/Under 2.5 Goals"), false);
   assert.equal(isEventTerminalMarketName("15 Over Run LF"), false);
+  // Secondary bookmakers and the toss settle long before the match ends.
+  assert.equal(isEventTerminalMarketName("Bookmaker2"), false);
+  assert.equal(isEventTerminalMarketName("Bookmaker 2"), false);
+  assert.equal(isEventTerminalMarketName("TOSS"), false);
+});
+
+test("suspended primaries keep a Test alive while Bookmaker2 is game-over", () => {
+  // Event 36140257 at stumps: Match Odds and Bookmaker suspended, Bookmaker2 settled.
+  const markets = [
+    { eventId: 40, marketId: "1.40", marketName: "Match Odds", marketType: "match-odd", isActive: false, gameOver: false },
+    { eventId: 40, marketId: "4.40-BM", marketName: "Bookmaker", marketType: "bookmaker", isActive: false, gameOver: false },
+    { eventId: 40, marketId: "1.40-BM2", marketName: "Bookmaker2", marketType: "bookmaker", isActive: false, gameOver: true },
+    { eventId: 40, marketId: "4.41-BM", marketName: "TOSS", marketType: "bookmaker", isActive: false, gameOver: true },
+  ];
+  assert.deepEqual(primaryMarketLifecycle(markets), [{ eventId: 40, active: false, terminalMarketId: null }]);
+  assert.deepEqual(terminalPrimaryMarketIds(markets), []);
+  // Once every primary reaches game-over the event is terminal.
+  const finished = markets.map((market) => ({ ...market, gameOver: true }));
+  assert.deepEqual(terminalPrimaryMarketIds(finished), ["1.40"]);
 });
 
 test("authoritative discovery closes an event only when no primary market remains active", () => {
@@ -2672,6 +2691,9 @@ test("socket game-over cleans up immediately while corrected vendor state can re
   assert.match(eventSource, /isactive=VALUES\(isactive\),status=VALUES\(status\)/);
   assert.match(eventSource, /restoreMarketEligibility/);
   assert.match(eventSource, /terminalPrimaryEventIds/);
+  // A suspended primary market (isactive=0, status=1) must keep the event alive.
+  assert.match(eventSource, /AND SUM\(CASE WHEN status=\? THEN 1 ELSE 0 END\)=0/);
+  assert.match(eventSource, /\$\{PRIMARY_MARKET_SQL\}/);
   assert.match(eventSource, /lifecycle\.isConfirmed\(event\.eventId\)/);
   assert.match(eventSource, /redis\.writeDiscoveryEvents/);
   assert.match(discoverySource, /redisStore\.getDiscoveryEvents/);

@@ -8,6 +8,7 @@ const { integer } = require("./env");
 const { setBounded } = require("../utils/boundedMap");
 const { providerLimits, persistLimits } = require("../utils/marketLimits");
 const marketTrace = require("../utils/marketTrace");
+const { audit } = require("../utils/eventAudit");
 const closedFancies = require("../services/closedFancyTracker");
 
 let client;
@@ -1985,7 +1986,7 @@ async function removeMarket(eventId, marketId) {
   return removedIds.size > 0;
 }
 
-async function removeEvent(eventId) {
+async function removeEvent(eventId, reason = "unspecified") {
   const redis = await getRedisClient();
   if (!redis?.isOpen) return false;
   const eventKey = String(eventId);
@@ -2002,9 +2003,12 @@ async function removeEvent(eventId) {
     const event = publicEventMetadata.get(eventKey);
     const transaction = redis.multi().del(keys);
     if (event) transaction.hDel(activeMatchKey(event.sportId), eventKey);
-    await transaction.exec();
+    const replies = await transaction.exec();
     publicEventMetadata.delete(eventKey);
     eventPayloadCache.delete(eventKey);
+    if ((replies || []).some((reply) => Number(reply) > 0)) {
+      audit("redis.removed", eventKey, { reason, sportId: event?.sportId ?? null });
+    }
     return true;
   });
 }

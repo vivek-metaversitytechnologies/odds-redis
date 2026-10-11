@@ -11,6 +11,11 @@ const { utcToIstSql } = require("../utils/dateTime");
 const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
 const { retryDeadlock } = require("../utils/dbRetry");
+const { PRIMARY_MARKET_SQL, isPrimaryMarket } = require("../utils/primaryMarket");
+const { integer } = require("../config/env");
+const { audit } = require("../utils/eventAudit");
+
+const CARRY_OVER_CONCURRENCY = 4;
 
 let running = false;
 const state = {
@@ -124,6 +129,9 @@ async function restoreActiveEventMarkets(events) {
   return marketIds.length;
 }
 
+// Every primary market must have been terminally retired (status=0 is written only by
+// result settlement, socket game-over and event retirement). Discovery deactivates a
+// suspended market with status=1, so a Test suspended at stumps is not a finished event.
 async function terminalPrimaryEventIds(events) {
   const eventIds = [...new Set((events || []).map((event) => Number(event.eventId)).filter(Number.isInteger))];
   if (!eventIds.length) return new Set();
@@ -132,7 +140,7 @@ async function terminalPrimaryEventIds(events) {
     `SELECT eventid
        FROM t_market
      WHERE eventid IN (${placeholders})
-        AND (LOWER(marketname)='match odds' OR LOWER(marketname) LIKE '%bookmaker%')
+        AND ${PRIMARY_MARKET_SQL}
         AND NOT EXISTS (
           SELECT 1 FROM t_market active_market
            WHERE active_market.eventid=t_market.eventid AND active_market.isactive=?
@@ -143,10 +151,83 @@ async function terminalPrimaryEventIds(events) {
         )
       GROUP BY eventid
      HAVING SUM(CASE WHEN isactive=? THEN 1 ELSE 0 END)=0
-        AND SUM(CASE WHEN isactive=? AND status=? THEN 1 ELSE 0 END)>0`,
-    [...eventIds, true, true, true, false, false],
+        AND SUM(CASE WHEN status=? THEN 1 ELSE 0 END)=0`,
+    [...eventIds, true, true, true, true],
   );
   return new Set(rows.map((row) => Number(row.eventid)).filter(Number.isInteger));
+}
+
+function vendorRows(response) {
+  return Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+}
+
+// The vendor's today=1 feed drops a multi-day match (a Test between days of play) while it is
+// still running. Without carry-over its metadata, Redis payload and market discovery would all
+// lapse until it is relisted. A recent event that is missing from the feed but still has a
+// primary market never terminally retired (status=1) is kept while the vendor reports an
+// unfinished primary market for it. This also reopens an event that was closed only because its
+// primary markets were suspended.
+async function carriedOverEvents(feedEvents, sportIds) {
+  if (!sportIds.length) return [];
+  const maxDays = integer("EVENT_CARRY_OVER_MAX_DAYS", 6, { min: 1, max: 30 });
+  const maxEvents = integer("EVENT_CARRY_OVER_MAX_EVENTS", 25, { min: 1, max: 200 });
+  const listedIds = [...new Set((feedEvents || []).map((event) => Number(event.eventId)))];
+  const [rows] = await getSourcePool().query(
+    `SELECT e.eventid,e.eventname,e.sportid,e.seriesid,e.open_date
+       FROM t_event e
+      WHERE e.sportid IN (${sportIds.map(() => "?").join(",")})
+        AND e.open_date >= DATE_SUB(NOW(), INTERVAL ? DAY)
+        ${listedIds.length ? `AND e.eventid NOT IN (${listedIds.map(() => "?").join(",")})` : ""}
+        AND EXISTS (
+          SELECT 1 FROM t_market m
+           WHERE m.eventid=e.eventid AND m.status=? AND ${PRIMARY_MARKET_SQL}
+        )
+      ORDER BY e.open_date DESC
+      LIMIT ?`,
+    [...sportIds, maxDays, ...listedIds, true, maxEvents],
+  );
+  const candidates = rows
+    .map((row) => ({
+      eventId: Number(row.eventid),
+      eventName: String(row.eventname || "").trim(),
+      sportId: Number(row.sportid),
+      seriesId: Number(row.seriesid),
+      openDate: String(row.open_date || "").slice(0, 19) || null,
+      inPlay: false,
+      gameOver: false,
+    }))
+    .filter((event) => Number.isInteger(event.eventId) && event.eventName && Number.isInteger(event.seriesId));
+  const kept = [];
+  for (let offset = 0; offset < candidates.length; offset += CARRY_OVER_CONCURRENCY) {
+    const batch = candidates.slice(offset, offset + CARRY_OVER_CONCURRENCY);
+    const responses = await Promise.allSettled(
+      batch.map((event) => provider.markets({ eids: [event.eventId] }, { source: "event-carry-over" })),
+    );
+    batch.forEach((event, index) => {
+      const response = responses[index];
+      // A failed lookup is not evidence that the match finished; keep it until the next pass.
+      if (response.status !== "fulfilled") {
+        kept.push(event);
+        audit("carry.kept", event.eventId, { reason: "vendor-unavailable", error: response.reason?.message });
+        return;
+      }
+      const unfinished = vendorRows(response.value)
+        .filter((market) => isPrimaryMarket({
+          marketId: market?.id,
+          marketName: market?.name,
+          marketType: market?.type,
+        }))
+        .filter((market) => market?.gameOver !== true)
+        .map((market) => String(market.id));
+      if (unfinished.length) {
+        kept.push(event);
+        audit("carry.kept", event.eventId, { reason: "unfinished-primary", marketIds: unfinished });
+      } else {
+        audit("carry.dropped", event.eventId, { reason: "no-unfinished-primary" });
+      }
+    });
+  }
+  return kept;
 }
 
 async function retireCompletedEvents(events) {
@@ -217,7 +298,7 @@ async function retireCompletedEvents(events) {
   }
   await Promise.allSettled(
     eventIds.map(async (eventId) => {
-      await redis.removeEvent(eventId);
+      await redis.removeEvent(eventId, "event-retired");
       frontendSocket.publishEventRemoved(eventId, "completed");
     }),
   );
@@ -251,7 +332,9 @@ async function syncEvents() {
             : 0),
       0,
     );
-    const events = eventRows(responses);
+    const listedEvents = eventRows(responses);
+    const carried = await carriedOverEvents(listedEvents, successfulSportIds);
+    const events = [...listedEvents, ...carried];
     // Market lifecycle is more specific than the event feed. Some completed
     // matches remain inPlay=true at event level after their only primary market
     // has emitted gameOver. Preserve that terminal state until discovery sees a
@@ -275,6 +358,15 @@ async function syncEvents() {
         ? { ...event, gameOver: true, inPlay: false }
         : { ...event, gameOver: false },
     );
+    // Closing an event the vendor still reports as running is the risky decision; record why.
+    for (const event of events) {
+      if (event.gameOver || !(terminalEventIds.has(event.eventId) || lifecycle.isConfirmed(event.eventId))) continue;
+      audit("terminal.override", event.eventId, {
+        reason: terminalEventIds.has(event.eventId) ? "primary-markets-retired" : "lifecycle-confirmed",
+        vendorInPlay: event.inPlay,
+        dryRun: terminalDryRun,
+      });
+    }
     // Populate the public read cache before MySQL writes. Database lock or storage
     // pressure must not prevent fresh provider events from reaching public APIs.
     // Current vendor lifecycle state is authoritative. Completed rows never enter
@@ -298,7 +390,8 @@ async function syncEvents() {
     const result = {
       skipped: false,
       received,
-      supported: events.length,
+      supported: listedEvents.length,
+      carriedOver: carried.length,
       sportIds,
       ...persisted,
       cached,
@@ -340,6 +433,7 @@ module.exports = {
   eventRows,
   eventInsertValues,
   terminalPrimaryEventIds,
+  carriedOverEvents,
   restoreActiveEventMarkets,
   upsertEvents,
   retireCompletedEvents,

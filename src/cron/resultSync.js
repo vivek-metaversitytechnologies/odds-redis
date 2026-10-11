@@ -11,6 +11,8 @@ const { eventWindowSql } = require("../utils/eventWindow");
 const { retryDeadlock } = require("../utils/dbRetry");
 const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
+const { isPrimaryMarketName } = require("../utils/primaryMarket");
+const { audit } = require("../utils/eventAudit");
 
 let running = false;
 // Live fancies now settle from the socket or the closed-fancy chaser within seconds, so the large
@@ -99,8 +101,7 @@ function rejectedResultDetail(market, result, isFancy) {
 }
 
 function isEventTerminalMarketName(name) {
-  const normalized = String(name || "").trim().toLowerCase();
-  return normalized === "match odds" || normalized.includes("bookmaker");
+  return isPrimaryMarketName(name);
 }
 
 function interleaveResultCandidates(markets = [], fancies = []) {
@@ -443,6 +444,12 @@ async function handleSocketGameOver(marketItems) {
            WHERE id=? AND (isactive=1 OR status=1 OR in_play=1)`,
           [false, false, false, event.id]);
         terminalEvents.push(event);
+        audit("retired", eventId, {
+          source: "socket-primary-game-over",
+          marketIds: [...markets, ...fancies]
+            .filter((market) => Number(market.eventid) === eventId)
+            .map((market) => `${market.marketid}:${market.marketname}`),
+        });
       }
       // Historical inactive rows need no rewrite. The complete Redis event
       // snapshot is removed after the event's terminal state is committed.
@@ -583,7 +590,7 @@ async function publishSocketRetirement(closedRows, terminalEvents) {
   }
   const removals = await Promise.allSettled(
     [...marketIdsByEvent].map(([eventId, idsForEvent]) =>
-      terminalEventIds.has(eventId) ? redis.removeEvent(eventId).then(() => new Set(idsForEvent)) : redis.removeMarkets(eventId, idsForEvent),
+      terminalEventIds.has(eventId) ? redis.removeEvent(eventId, "primary-market-game-over").then(() => new Set(idsForEvent)) : redis.removeMarkets(eventId, idsForEvent),
     ),
   );
   const removed = removals.reduce(

@@ -81,7 +81,7 @@ async function reconcileRedisEvents() {
     const cleanupDryRun = lifecycle.dryRun();
     const results = cleanupDryRun
       ? []
-      : await Promise.allSettled(stale.map((eventId) => redisStore.removeEvent(eventId)));
+      : await Promise.allSettled(stale.map((eventId) => redisStore.removeEvent(eventId, "not-in-event-metadata")));
     const removedEventIds = cleanupDryRun
       ? []
       : stale.filter((_, index) => results[index].status === "fulfilled");

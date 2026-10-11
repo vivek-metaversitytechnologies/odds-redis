@@ -22,6 +22,7 @@ const { setBounded } = require("../utils/boundedMap");
 const { retryDeadlock } = require("../utils/dbRetry");
 const { handleSocketGameOver } = require("./resultSync");
 const lifecycle = require("../services/eventLifecyclePolicy");
+const { isPrimaryMarket } = require("../utils/primaryMarket");
 const {
   FANCY_MARKET_TYPES,
   REGULAR_MARKET_TYPES,
@@ -438,21 +439,20 @@ function storedInFancyTable(market) {
 function primaryMarketLifecycle(markets) {
   const byEvent = new Map();
   for (const market of markets || []) {
-    const name = String(market?.marketName || "").trim().toLowerCase();
-    const eventTerminalPrimary =
-      market?.marketType === "match-odd" ||
-      (market?.marketType === "bookmaker" && name.includes("bookmaker"));
-    if (!eventTerminalPrimary) continue;
+    if (!isPrimaryMarket(market)) continue;
     if (!byEvent.has(market.eventId)) byEvent.set(market.eventId, []);
     byEvent.get(market.eventId).push(market);
   }
   return [...byEvent.entries()].map(([eventId, primaryMarkets]) => {
     const hasActivePrimary = primaryMarkets.some((market) => market.isActive && !market.gameOver);
+    // A suspended primary (isActive=false without gameOver, e.g. a Test at stumps) is still
+    // running; the event is terminal only once every primary market has reached game-over.
+    const unfinished = primaryMarkets.some((market) => !market.gameOver);
     const terminal = primaryMarkets.find((market) => market.gameOver);
     return {
       eventId: Number(eventId),
       active: hasActivePrimary,
-      terminalMarketId: hasActivePrimary ? null : terminal?.marketId || null,
+      terminalMarketId: unfinished ? null : terminal?.marketId || null,
     };
   });
 }
@@ -1116,7 +1116,11 @@ async function syncMarketDiscovery(events, lane = "active") {
         lifecycle.clearConfirmed(primaryState.eventId, "active-primary-market");
         continue;
       }
-      if (!primaryState.terminalMarketId) continue;
+      if (!primaryState.terminalMarketId) {
+        // Suspended but unfinished primaries cancel any pending terminal evidence.
+        lifecycle.observe({ eventId: primaryState.eventId, source: "market-discovery", terminal: false });
+        continue;
+      }
       const decision = lifecycle.observe({
         eventId: primaryState.eventId,
         source: "market-discovery",
