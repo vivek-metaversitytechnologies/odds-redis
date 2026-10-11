@@ -40,4 +40,8 @@ module.exports = Object.freeze({
     expression: process.env.RESULT_SYNC_CRON || "0 * * * * *",
     runOnStart: booleanEnv("RUN_RESULT_SYNC_ON_START"),
   }),
+  // Daily, 03:30 UTC (09:00 IST): outside the evening cricket and night football peaks.
+  reviewRecheck: Object.freeze({
+    expression: process.env.REVIEW_RECHECK_CRON || "0 30 3 * * *",
+  }),
 });

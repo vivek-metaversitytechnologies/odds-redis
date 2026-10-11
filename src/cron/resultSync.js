@@ -1040,11 +1040,12 @@ function startResultSync() {
   scheduled.start();
   const { expression } = cronConfig.result;
   const task = cron.schedule(expression, () => scheduled.request());
+  const reviewTask = cron.schedule(cronConfig.reviewRecheck.expression, () => void recheckReviewed().catch(() => {}));
   const timer = setInterval(() => void syncHeadroomResults(), 150);
   timer.unref?.();
   const stop = task.stop.bind(task);
-  task.stop = () => { headroomStopped = true; scheduled.stop(); clearInterval(timer); return stop(); };
-  logger.info("[ResultSync] scheduled", { expression });
+  task.stop = () => { headroomStopped = true; scheduled.stop(); clearInterval(timer); reviewTask.stop(); return stop(); };
+  logger.info("[ResultSync] scheduled", { expression, reviewRecheck: cronConfig.reviewRecheck.expression });
   return task;
 }
 
@@ -1108,6 +1109,25 @@ async function syncHeadroomResults() {
   }
 }
 
+const REVIEW_KEY = "Pending-Regular-Results:review";
+const REVIEW_LOOKUP_BATCH_SIZE = 500;
+
+// Settles reviewed markets the vendor now has a result for. Callers hold `running`.
+async function settleReviewed(ids, source) {
+  const markets = [];
+  for (let offset = 0; offset < ids.length; offset += REVIEW_LOOKUP_BATCH_SIZE) {
+    const batch = ids.slice(offset, offset + REVIEW_LOOKUP_BATCH_SIZE);
+    const [rows] = await getSourcePool().query(
+      `SELECT marketid,marketname,eventid,matchname,sportid FROM t_market WHERE marketid IN (${batch.map(() => "?").join(",")})`, batch,
+    );
+    markets.push(...rows);
+  }
+  const response = await provider.results({ mids: ids }, { source });
+  const applied = await applyResults(responseRows(response), { markets, fancies: [] });
+  if (applied.settled.length) await (await redis.getRedisClient()).hDel(REVIEW_KEY, applied.settled);
+  return { applied, markets };
+}
+
 async function reconcileReviewed(ids) {
   if (!Array.isArray(ids) || !ids.length || ids.length > 20 || ids.some((id) => typeof id !== "string" || !redis.validMarketIdentifier(id))) {
     throw Object.assign(new Error("Select between 1 and 20 valid market IDs"), { status: 400 });
@@ -1117,20 +1137,56 @@ async function reconcileReviewed(ids) {
   try {
     const c = await redis.getRedisClient();
     const unique = [...new Set(ids)];
-    const reviewed = await c.hmGet("Pending-Regular-Results:review", unique);
+    const reviewed = await c.hmGet(REVIEW_KEY, unique);
     if (reviewed.some((value) => value == null)) throw Object.assign(new Error("One or more markets are no longer in review"), { status: 409 });
-    const [markets] = await getSourcePool().query(
-      `SELECT marketid,marketname,eventid,matchname,sportid FROM t_market WHERE marketid IN (${unique.map(() => "?").join(",")})`, unique,
-    );
-    const response = await provider.results({ mids: unique });
-    const applied = await applyResults(responseRows(response), { markets, fancies: [] });
-    if (applied.settled.length) await c.hDel("Pending-Regular-Results:review", applied.settled);
+    const { applied } = await settleReviewed(unique, "review-reconcile");
     return { requested: unique.length, settled: applied.settled, remaining: unique.filter((id) => !applied.settled.includes(id)), rejected: applied.rejectedResultDetails, persistenceFailures: applied.persistenceFailures };
+  } finally { running = false; scheduled.drain(); }
+}
+
+// Review is a slow lane, not a dead end: once a day every reviewed market is asked for again
+// (~2k ids is a handful of requests), so a result published after the 12-hour budget still settles.
+// Entries whose market was settled elsewhere or deleted are dropped.
+async function recheckReviewed() {
+  if (running) {
+    logger.warn("[ResultSync] review recheck skipped; result sync is running");
+    return { skipped: true };
+  }
+  running = true;
+  try {
+    const ids = await pendingResults.reviewIds();
+    if (!ids.length) return { skipped: false, reviewed: 0, settled: 0, dropped: 0 };
+    const unsettled = new Set();
+    const exceptional = await hasExceptionalTable(getSourcePool());
+    for (let offset = 0; offset < ids.length; offset += REVIEW_LOOKUP_BATCH_SIZE) {
+      const batch = ids.slice(offset, offset + REVIEW_LOOKUP_BATCH_SIZE);
+      const [rows] = await getSourcePool().query(
+        `SELECT m.marketid FROM t_market m WHERE m.marketid IN (${batch.map(() => "?").join(",")})
+           AND NOT EXISTS (SELECT 1 FROM t_matchresult r WHERE r.marketid=m.marketid)
+           ${exceptional ? "AND NOT EXISTS (SELECT 1 FROM t_matchabondendtie x WHERE x.marketid=m.marketid)" : ""}`,
+        batch,
+      );
+      rows.forEach((row) => unsettled.add(String(row.marketid)));
+    }
+    const dropped = ids.filter((id) => !unsettled.has(id));
+    if (dropped.length) await (await redis.getRedisClient()).hDel(REVIEW_KEY, dropped);
+    const pending = ids.filter((id) => unsettled.has(id));
+    const { applied } = pending.length
+      ? await settleReviewed(pending, "review-recheck")
+      : { applied: { settled: [], persistenceFailures: 0 } };
+    const output = { skipped: false, reviewed: ids.length, settled: applied.settled.length,
+      settledMarketIds: applied.settled, dropped: dropped.length, persistenceFailures: applied.persistenceFailures };
+    logger.info("[ResultSync] review recheck completed", output);
+    return output;
+  } catch (error) {
+    logger.error("[ResultSync] review recheck failed", { error: error.message });
+    throw error;
   } finally { running = false; scheduled.drain(); }
 }
 
 module.exports = {
   reconcileReviewed,
+  recheckReviewed,
   responseRows,
   fancyResultValue,
   rejectedResultReason,

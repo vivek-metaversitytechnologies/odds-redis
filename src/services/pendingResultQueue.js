@@ -134,6 +134,18 @@ async function listReview(cursor = "0") {
     entries: page.entries.map((entry) => JSON.parse(entry.value)) };
 }
 
+async function reviewIds() {
+  const c = await client();
+  const ids = [];
+  let cursor = "0";
+  do {
+    const page = await c.hScan(reviewKey, cursor, { COUNT: 1000 });
+    cursor = String(page.cursor);
+    ids.push(...page.entries.map((entry) => entry.field));
+  } while (cursor !== "0");
+  return [...new Set(ids)];
+}
+
 async function excludeReviewed(rows) {
   if (!rows.length) return rows;
   const c = await client();
@@ -279,7 +291,7 @@ async function defer(ids) {
 }
 
 module.exports = {
-  enqueue, load, remove, defer, retryDelay, moveExpired, listReview, excludeReviewed, recoveryStatus, pruneReview,
+  enqueue, load, remove, defer, retryDelay, moveExpired, listReview, reviewIds, excludeReviewed, recoveryStatus, pruneReview,
   ELIGIBLE_HOURS, MAX_ATTEMPTS,
   __testing__: { recover, eventStartMs, eventStartById },
 };
