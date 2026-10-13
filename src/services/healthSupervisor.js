@@ -2,6 +2,7 @@ const v8 = require("node:v8");
 const resourceMonitor = require("./resourceMonitor");
 const redis = require("../config/redis");
 const { getSourcePool } = require("../config/sourceDb");
+const mirrorDb = require("../config/mirrorDb");
 const websocket = require("./websocketService");
 const { providerLimiter, getProviderRateLimitStatus } = require("./providerApi");
 const { getCompetitionSyncStatus } = require("../cron/competitionSync");
@@ -78,7 +79,29 @@ async function infrastructureChecks() {
   } catch (error) {
     checks.database = check("critical", "Database unavailable", { error: error.message });
   }
+  if (mirrorDb.mirrorEnabled()) checks.mirrorDatabase = await mirrorCheck(timeoutMs);
   return checks;
+}
+
+// The mirror only follows the source database, so it is never critical: a mirror outage
+// queues writes in the outbox and must not trigger recovery of the writer.
+async function mirrorCheck(timeoutMs) {
+  try {
+    const started = Date.now();
+    await boundedTimeout(mirrorDb.getMirrorPool().query("SELECT 1"), timeoutMs, "Mirror database health check");
+    const latencyMs = Date.now() - started;
+    const status = await boundedTimeout(mirrorDb.getMirrorStatus(), timeoutMs, "Mirror outbox health check");
+    const lagMs = status.oldestQueuedAt ? Date.now() - Date.parse(status.oldestQueuedAt) : 0;
+    const lagWarningMs = integer("MIRROR_LAG_WARNING_MS", 60000, { min: 5000 });
+    const details = { latencyMs, lagMs, ...status };
+    if (lagMs > lagWarningMs) return check("degraded", "Mirror database is behind the source", details);
+    if (status.deadLetters > 0 || status.dropped > 0 || status.lost > 0 || status.refused > 0) {
+      return check("degraded", "Mirror database missed writes", details);
+    }
+    return check("healthy", "Mirror database in sync", details);
+  } catch (error) {
+    return check("degraded", "Mirror database unavailable; writes are queued", { error: error.message });
+  }
 }
 
 function runtimeChecks(now) {

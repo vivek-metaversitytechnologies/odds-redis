@@ -1,6 +1,7 @@
 const cron = require("node-cron");
 const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
+const { queryWithMirror } = require("../config/mirrorDb");
 const { supportedSportIds } = require("./competitionSync");
 const logger = require("../utils/logger");
 const redis = require("../config/redis");
@@ -263,10 +264,15 @@ async function retireCompletedEvents(events) {
             await retryDeadlock(async () => {
               await connection.beginTransaction();
               try {
-                await connection.query(
-                  `UPDATE ${table} SET ${table === "t_matchfancy" ? "" : "isactive=false,"}${assignments},updatedon=NOW()
-                 WHERE id IN (${batch.map(() => "?").join(",")}) AND isactive=? ORDER BY id`,
+                const set = `${table === "t_matchfancy" ? "" : "isactive=false,"}${assignments},updatedon=NOW()`;
+                const placeholders = batch.map(() => "?").join(",");
+                await queryWithMirror(
+                  connection,
+                  `UPDATE ${table} SET ${set}
+                 WHERE id IN (${placeholders}) AND isactive=? ORDER BY id`,
                   [...batch.map((row) => row.id), true],
+                  `UPDATE ${table} SET ${set} WHERE ${column} IN (${placeholders}) AND isactive=?`,
+                  [...batch.map((row) => row.marketid), true],
                 );
                 await connection.commit();
               } catch (error) {

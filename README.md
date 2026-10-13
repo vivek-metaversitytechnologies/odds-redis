@@ -298,6 +298,38 @@ npm run db:migrate:lock
 npm run db:migrate:lock -- --force
 ```
 
+### Mirror database
+
+The writer (`odds-redis`) can keep a second database of the same schema in step with the source
+database. The public API reads Redis only and is unaffected.
+
+- The source database stays authoritative: every read, decision and Redis/provider side effect
+  comes from it. The mirror only follows.
+- Each write committed on the source is formatted to SQL and appended to a Redis list
+  (`Mirror-Outbox-Rs:<database>`); a single worker applies the entries to the mirror in commit order,
+  one transaction per source transaction. A slow or unavailable mirror never delays or fails a
+  source write: its entries wait in the outbox and are applied when it returns.
+- Statements are mirrored as written, so they must address rows by natural key (`marketid`,
+  `fancyid`, `eventid`, `seriesid`). A statement that filters on the source's auto-increment `id` is
+  refused and logged; supply its natural-key form with `queryWithMirror` (`src/config/mirrorDb.js`).
+- An entry the mirror rejects for its data (duplicate key, value too long, …) moves to
+  `<outbox>:dead`. Any other error (connection, lock, missing table) is retried in place.
+- The `mirrorDatabase` health check reports lag, backlog, dead letters and dropped entries. It is
+  never critical and never triggers recovery.
+
+Set up an empty mirror once, then enable it:
+
+```bash
+# MIRROR_DB_HOST/PORT/USERNAME/PASSWORD/DATABASE set in .env
+npm run db:bootstrap-mirror -- --dry-run   # review the DDL
+npm run db:bootstrap-mirror                # add --innodb to create MyISAM tables as InnoDB
+# then MIRROR_DB_ENABLED=true and restart odds-redis
+```
+
+The bootstrap creates the tables from the source's `SHOW CREATE TABLE` and copies the migration
+ledger; it copies no rows. The mirror holds data written after it is enabled. Later migrations
+must be applied to both databases: `npm run db:migrate` and `npm run db:migrate -- --mirror`.
+
 ## Deployed server
 
 The backend currently runs on port `5673` at:

@@ -18,13 +18,15 @@ function checksum(contents) {
   return crypto.createHash("sha256").update(contents).digest("hex");
 }
 
-function databaseConfig() {
+// `prefix` selects the source database (SOURCE_DB_*) or the mirror database (MIRROR_DB_*).
+function databaseConfig(prefix = "SOURCE_DB") {
+  const env = (name) => process.env[`${prefix}_${name}`];
   const config = {
-    host: process.env.SOURCE_DB_HOST,
-    port: Number(process.env.SOURCE_DB_PORT || 3306),
-    user: process.env.SOURCE_DB_USERNAME || process.env.SOURCE_DB_USER,
-    password: process.env.SOURCE_DB_PASSWORD,
-    database: process.env.SOURCE_DB_DATABASE || process.env.SOURCE_DB_NAME,
+    host: env("HOST"),
+    port: Number(env("PORT") || 3306),
+    user: env("USERNAME") || env("USER"),
+    password: env("PASSWORD"),
+    database: env("DATABASE") || env("NAME"),
     multipleStatements: true,
   };
   const missing = Object.entries(config)
@@ -34,8 +36,8 @@ function databaseConfig() {
   return config;
 }
 
-async function migrate() {
-  const connection = await mysql.createConnection(databaseConfig());
+async function migrate({ prefix = "SOURCE_DB" } = {}) {
+  const connection = await mysql.createConnection(databaseConfig(prefix));
   let locked = false;
   try {
     const [[lock]] = await connection.query("SELECT GET_LOCK(?, 30) AS acquired", [
@@ -78,7 +80,8 @@ async function migrate() {
 }
 
 if (require.main === module) {
-  migrate().catch((error) => {
+  // `--mirror` applies the same migrations to the mirror database.
+  migrate({ prefix: process.argv.includes("--mirror") ? "MIRROR_DB" : "SOURCE_DB" }).catch((error) => {
     process.stderr.write(`Migration failed: ${error.message}\n`);
     process.exitCode = 1;
   });

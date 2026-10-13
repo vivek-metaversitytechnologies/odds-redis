@@ -1,6 +1,7 @@
 const cron = require("node-cron");
 const provider = require("../services/providerApi");
 const { getSourcePool } = require("../config/sourceDb");
+const { queryWithMirror } = require("../config/mirrorDb");
 const redis = require("../config/redis");
 const subscriptions = require("../services/marketSubscriptionService");
 const frontendSocket = require("../services/frontendSocketService");
@@ -265,11 +266,12 @@ async function loadCandidates({ backlog = true } = {}) {
 
 const SOCKET_RETIRE_BATCH_SIZE = 100;
 
-async function commitSocketRetirement(connection, sql, params) {
+// `mirror` is the natural-key form of the statement: source ids do not exist on the mirror.
+async function commitSocketRetirement(connection, sql, params, mirror) {
   await retryDeadlock(async () => {
     await connection.beginTransaction();
     try {
-      await connection.query(sql, params);
+      await queryWithMirror(connection, sql, params, mirror.sql, mirror.params);
       await connection.commit();
     } catch (error) {
       await connection.rollback();
@@ -292,10 +294,15 @@ async function retireSocketMarkets(connection, rows, regular, closedRows) {
          WHERE id IN (${placeholders}) AND (isactive=1 OR status=1 OR issubscribed=1) ORDER BY id`
       : `UPDATE t_matchfancy SET isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
          WHERE id IN (${placeholders}) AND (isshow=1 OR is_show=1 OR issubscribed=1) ORDER BY id`;
+    const mirrorSql = regular
+      ? `UPDATE t_market SET isactive=?,status=?,issubscribed=?,updatedon=NOW()
+         WHERE marketid IN (${placeholders}) AND (isactive=1 OR status=1 OR issubscribed=1)`
+      : `UPDATE t_matchfancy SET isshow=?,is_show=?,issubscribed=?,updatedon=NOW()
+         WHERE fancyid IN (${placeholders}) AND (isshow=1 OR is_show=1 OR issubscribed=1)`;
     await commitSocketRetirement(connection, sql, [
       ...(regular ? [false, false, false] : [false, false, false]),
       ...batch.map((row) => row.id),
-    ]);
+    ], { sql: mirrorSql, params: [false, false, false, ...batch.map((row) => row.marketid)] });
     // Retain committed progress for Redis/provider cleanup if a later batch fails.
     closedRows.push(...batch);
   }
@@ -442,7 +449,12 @@ async function handleSocketGameOver(marketItems) {
         await commitSocketRetirement(connection,
           `UPDATE t_event SET isactive=?,status=?,in_play=?,updatedon=NOW()
            WHERE id=? AND (isactive=1 OR status=1 OR in_play=1)`,
-          [false, false, false, event.id]);
+          [false, false, false, event.id],
+          {
+            sql: `UPDATE t_event SET isactive=?,status=?,in_play=?,updatedon=NOW()
+                  WHERE eventid=? AND (isactive=1 OR status=1 OR in_play=1)`,
+            params: [false, false, false, event.eventid],
+          });
         terminalEvents.push(event);
         audit("retired", eventId, {
           source: "socket-primary-game-over",

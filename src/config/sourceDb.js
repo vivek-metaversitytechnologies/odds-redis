@@ -1,11 +1,12 @@
 const mysql = require("mysql2/promise");
 const mysqlTypeCast = require("./mysqlTypeCast");
+const mirrorDb = require("./mirrorDb");
 
 let pool;
 
 function getSourcePool() {
   if (pool) return pool;
-  pool = mysql.createPool({
+  const source = mysql.createPool({
     host: process.env.SOURCE_DB_HOST,
     port: Number(process.env.SOURCE_DB_PORT || 3306),
     user: process.env.SOURCE_DB_USERNAME || process.env.SOURCE_DB_USER,
@@ -18,6 +19,8 @@ function getSourcePool() {
     dateStrings: true,
     typeCast: mysqlTypeCast,
   });
+  // With a mirror configured, committed writes are also queued for the mirror database.
+  pool = mirrorDb.mirrorEnabled() ? mirrorDb.wrapPool(source) : source;
   return pool;
 }
 
@@ -28,6 +31,7 @@ async function checkSourceDbConnection() {
 
 async function closeSourceDb() {
   if (!pool) return;
+  await mirrorDb.flushRecording();
   const current = pool;
   pool = undefined;
   await current.end();

@@ -14,6 +14,7 @@
     "dev": "nodemon src/server.js",
     "db:migrate": "node scripts/migrate.js",
     "db:migrate:lock": "node scripts/migration-lock.js",
+    "db:bootstrap-mirror": "node scripts/bootstrap-mirror-db.js",
     "db:deduplicate": "node scripts/deduplicate-source-tables.js",
     "lint": "eslint src test scripts",
     "format": "prettier --write src test scripts README.md eslint.config.js",

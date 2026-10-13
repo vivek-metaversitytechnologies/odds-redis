@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { createApp } = require("./app");
 const { closeSourceDb } = require("./config/sourceDb");
+const { startMirrorWorker, closeMirror } = require("./config/mirrorDb");
 const { closeRedis } = require("./config/redis");
 const { fetchActiveMarkets, startMarketSync, syncMarketSubscriptions } = require("./cron/marketSync");
 const { startCompetitionSync, syncCompetitions } = require("./cron/competitionSync");
@@ -50,6 +51,7 @@ async function startServer() {
   const redisEventCleanupCronTask = startRedisEventCleanup();
   startLimitsPollPipelines();
   startHealthSupervisor();
+  startMirrorWorker();
   if (cronConfig.competition.runOnStart) {
     syncCompetitions()
       .then(() => {
@@ -115,9 +117,11 @@ async function startServer() {
       // the new socket immediately restores subscriptions. Explicit admin/result/event
       // unsubscribe operations still use the provider unsubscribe API.
       await websocket.stopSocket();
+      // Source writes finish above; their mirror entries must reach the outbox before Redis closes.
+      await closeSourceDb();
+      await closeMirror();
       await closeRedis();
       await closeBetPauseCache();
-      await closeSourceDb();
       await closeProviderLog();
       await require("./services/marketSettingsService").stopRetries();
       await closeMarketLimitsLog();
@@ -150,7 +154,7 @@ if (require.main === module) {
     await Promise.allSettled([
       closeRedis(),
       closeBetPauseCache(),
-      closeSourceDb(),
+      closeSourceDb().then(closeMirror),
       closeProviderLog(),
       closeMarketLimitsLog(),
       logger.close(),
