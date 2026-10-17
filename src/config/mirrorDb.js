@@ -235,6 +235,19 @@ async function queryWithMirror(connection, sql, params, mirrorSql, mirrorParams)
   return result;
 }
 
+// Runs a write on the source only, for source-only tables the mirror schema does not have. A
+// missing mirror table is retried in place, so mirroring such a write would stall the outbox.
+async function querySourceOnly(connection, sql, params) {
+  const state = connection?.[STATE];
+  if (!state) return connection.query(sql, params);
+  state.skipNext = true;
+  try {
+    return await connection.query(sql, params);
+  } finally {
+    state.skipNext = false;
+  }
+}
+
 function deadLetterable(error) {
   return DATA_ERRORS.has(error?.code);
 }
@@ -389,6 +402,7 @@ module.exports = {
   getMirrorPool,
   wrapPool,
   queryWithMirror,
+  querySourceOnly,
   startMirrorWorker,
   drainOutbox,
   getMirrorStatus,

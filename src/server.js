@@ -8,6 +8,7 @@ const { startCompetitionSync, syncCompetitions } = require("./cron/competitionSy
 const { startEventSync, syncEvents } = require("./cron/eventSync");
 const { startMarketDiscoverySync } = require("./cron/marketDiscoverySync");
 const { startResultSync, syncResults, handleSocketGameOver } = require("./cron/resultSync");
+const resultRecall = require("./services/resultRecall");
 const { startCasinoResultChase, stopCasinoResultChase } = require("./cron/casinoResultChaser");
 const { startClosedFancyChase, stopClosedFancyChase } = require("./cron/closedFancyResultChaser");
 const { startRedisEventCleanup } = require("./cron/redisEventCleanup");
@@ -38,6 +39,7 @@ async function startServer() {
   frontendSocket.attachFrontendSocket(server);
   logger.info("HTTP server started", { port: server.address().port });
   websocket.setResultHandler(handleSocketGameOver);
+  websocket.setRecallHandler((ticks) => resultRecall.recordRecalls(ticks, { source: "socket" }));
   // Establish the replacement socket before any optional provider cleanup. Redis remains
   // the durable frontend snapshot and must not be touched during a process restart.
   websocket.connectSocket();
@@ -46,6 +48,7 @@ async function startServer() {
   const eventCronTask = startEventSync();
   const marketDiscoveryCronTask = startMarketDiscoverySync();
   const resultCronTask = startResultSync();
+  resultRecall.startResultRecallRecheck();
   startCasinoResultChase();
   startClosedFancyChase();
   const redisEventCleanupCronTask = startRedisEventCleanup();
@@ -96,6 +99,7 @@ async function startServer() {
       eventCronTask.stop();
       marketDiscoveryCronTask.stop();
       resultCronTask.stop();
+      resultRecall.stopResultRecallRecheck();
       redisEventCleanupCronTask.stop();
       const limitsPollStopped = stopLimitsPollPipelines();
       const casinoChaseStopped = stopCasinoResultChase();

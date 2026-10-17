@@ -14,6 +14,7 @@ const lifecycle = require("../services/eventLifecyclePolicy");
 const pendingResults = require("../services/pendingResultQueue");
 const { isPrimaryMarketName } = require("../utils/primaryMarket");
 const { audit } = require("../utils/eventAudit");
+const resultRecall = require("../services/resultRecall");
 
 let running = false;
 // Live fancies now settle from the socket or the closed-fancy chaser within seconds, so the large
@@ -46,8 +47,17 @@ const state = {
   lastResult: null,
 };
 
+// Every results API response passes through here. A recalled row (`rt`) carries a withdrawn
+// result: it is never settled, and the recall is handed to the rollback recorder.
 function responseRows(response) {
-  const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+  const all = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
+  const recalled = all.filter(resultRecall.isRecalled);
+  if (recalled.length) {
+    resultRecall.recordRecalls(recalled, { source: "results-api" }).catch((error) =>
+      logger.error("[ResultSync] recall recording failed", { error: error.message }),
+    );
+  }
+  const rows = recalled.length ? all.filter((item) => !resultRecall.isRecalled(item)) : all;
   return rows
     .map((item) => ({
       marketId: String(item?.marketId || "").trim(),
@@ -315,7 +325,7 @@ function socketResultRows(items, fancies, include) {
     ? include
     : (fancy) => String(fancy.mtype || "").toLowerCase() === include;
   const ticks = new Map((items || [])
-    .filter((item) => item && typeof item === "object" && item.go === true)
+    .filter((item) => item && typeof item === "object" && item.go === true && item.rt !== true)
     .map((item) => [String(item.mid || "").trim(), item]));
   return (fancies || []).flatMap((fancy) => {
     if (!selected(fancy)) return [];

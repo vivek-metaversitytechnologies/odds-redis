@@ -230,6 +230,19 @@ long-idle markets) run only every `RESULT_BACKLOG_SWEEP_EVERY_RUNS` runs (defaul
 pending and fallback lanes still run every minute. `pipelines.results.lastResult.backlogSweep` shows
 which kind of run it was.
 
+### Result recalls
+
+The vendor marks a withdrawn result with `rt: true` (recall); a new result may follow. A recalled
+market that already has a stored result (checked in `t_fancyresult`, then `t_matchresult`, then
+`t_matchabondendtie`) gets one row in `t_marketid_for_rollback` with `status='OPEN'` and
+`markettype` copied from that result row (`fancytype`, `markettype`, or the abandoned row's
+`marketname`); the settlement backend performs the rollback. While an OPEN row exists for a market
+no second one is added. Recalls are read from socket ticks and from every results API response,
+and recalled rows are never settled. Settled markets are unsubscribed, so every
+`RESULT_RECALL_RECHECK_MS` (default 5 min) the results from the last `RESULT_RECALL_RECHECK_HOURS`
+(default 24 h) are re-asked from the results API. The rollback table exists only on the source
+database and is not mirrored. Status: `/health` → `pipelines.resultRecall`.
+
 ### Pending regular-result queue
 
 Closed regular markets (`t_market`) wait for their result in the Redis queue

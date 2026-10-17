@@ -214,3 +214,19 @@ test("bootstrap DDL drops the source auto-increment counter and can switch MyISA
   );
   assert.match(mirrorDdl(ddl, { innodb: true }), /\) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4$/);
 });
+
+test("source-only writes reach the source but never the outbox", async (t) => {
+  const client = fakeRedis();
+  t.mock.method(redis, "getRedisClient", async () => client);
+  const sourceLog = [];
+  const connection = await mirror.wrapPool(fakeSource(sourceLog)).getConnection();
+
+  await connection.beginTransaction();
+  await mirror.querySourceOnly(connection, "INSERT INTO t_marketid_for_rollback (marketid) VALUES (?)", ["1.1"]);
+  await connection.query("UPDATE t_market SET isactive=? WHERE marketid=?", [false, "1.1"]);
+  await connection.commit();
+  await mirror.querySourceOnly(connection, "INSERT INTO t_marketid_for_rollback (marketid) VALUES (?)", ["1.2"]);
+
+  assert.equal(sourceLog.filter((sql) => String(sql).includes("t_marketid_for_rollback")).length, 2);
+  assert.deepEqual(await outbox(client), [["UPDATE t_market SET isactive=false WHERE marketid='1.1'"]]);
+});

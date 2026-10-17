@@ -21,6 +21,7 @@ let tickPublisher = () => {};
 let scorePublisher = () => {};
 let rawTickPublisher = () => {};
 let resultHandler = async () => {};
+let recallHandler = async () => {};
 const loggedShapes = new Set();
 const rawSocketActivity = [];
 const subscribedMarketIds = new Set();
@@ -337,6 +338,19 @@ async function persist(items, receivedAtMs = Date.now()) {
         error: error.message,
       });
     }
+  }
+  // Read from every received tick, not only those Redis accepted: a recall can arrive for a
+  // market whose snapshot was already removed. Not awaited, so recall lookups never delay odds.
+  const recallTicks = items.filter((item) => item?.mid != null && item.rt === true);
+  if (recallTicks.length) {
+    Promise.resolve()
+      .then(() => recallHandler(recallTicks))
+      .catch((error) => {
+        logger.error("[ProviderWS] result recall handler failed", {
+          marketIds: recallTicks.map((item) => String(item.mid)),
+          error: error.message,
+        });
+      });
   }
 }
 
@@ -673,5 +687,8 @@ module.exports = {
   },
   setResultHandler: (handler) => {
     resultHandler = typeof handler === "function" ? handler : async () => {};
+  },
+  setRecallHandler: (handler) => {
+    recallHandler = typeof handler === "function" ? handler : async () => {};
   },
 };
