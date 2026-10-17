@@ -3,6 +3,8 @@ const provider = require("../controllers/providerController");
 
 const router = express.Router();
 router.get("/metrics", provider.metrics);
+router.get("/explorer", provider.explorerEndpoints);
+router.post("/explorer", provider.explore);
 router.get("/sports", provider.sports);
 router.get("/competitions", provider.competitions);
 router.get("/events", provider.events);

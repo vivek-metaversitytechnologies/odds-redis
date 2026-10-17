@@ -18,7 +18,7 @@
         ><a href="/admin/events/"><span>03</span>Events</a><a href="/admin/markets/"><span>04</span>Markets</a
         ><a href="/admin/subscriptions/"><span>05</span>Subscriptions</a
         ><a href="/admin/results/"><span>06</span>Results</a><a href="/admin/redis/"><span>07</span>Redis</a
-        ><a href="/admin/logs/"><span>08</span>Logs</a>
+        ><a href="/admin/logs/"><span>08</span>Logs</a><a href="/admin/vendor/"><span>09</span>Vendor API</a>
       </nav>
       <div class="sidebar-foot">
         <i id="sideStatus"></i><span id="sideStatusText">Checking services</span>
@@ -96,6 +96,45 @@
             <article>
               <span>Provider HTTP queue</span><strong id="providerQueued">—</strong
               ><small id="providerRunning">Queued / running requests</small>
+            </article>
+          </section>
+        </section>
+        <section id="mirrorCard" class="dashboard-card" hidden>
+          <div class="card-head">
+            <div>
+              <p class="section-label">Second database</p>
+              <h2 id="mirrorName">Mirror database</h2>
+            </div>
+          </div>
+          <section id="mirrorState" class="dashboard-alert waiting">
+            <span class="state-dot"></span>
+            <div>
+              <strong id="mirrorTitle">Checking mirror</strong>
+              <p id="mirrorDetail">Waiting for the first health check.</p>
+            </div>
+          </section>
+          <section class="dashboard-metrics overview-numbers">
+            <article>
+              <span>Backlog</span><strong id="mirrorBacklog">—</strong
+              ><small id="mirrorOldest">Writes waiting for the mirror</small>
+            </article>
+            <article>
+              <span>Lag</span><strong id="mirrorLag">—</strong><small>Age of the oldest waiting write</small>
+            </article>
+            <article>
+              <span>Applied</span><strong id="mirrorApplied">—</strong
+              ><small id="mirrorRecorded">Since the last restart</small>
+            </article>
+            <article>
+              <span>Last applied</span><strong id="mirrorLastApplied">—</strong><small>Mirror worker</small>
+            </article>
+            <article>
+              <span>Dead letters</span><strong id="mirrorDeadLetters">—</strong
+              ><small>Rejected by the mirror</small>
+            </article>
+            <article>
+              <span>Missed</span><strong id="mirrorMissed">—</strong
+              ><small id="mirrorMissedDetail">Dropped / lost / refused</small>
             </article>
           </section>
         </section>

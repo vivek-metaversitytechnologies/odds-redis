@@ -352,6 +352,7 @@ async function request(
         `Provider request failed (${response.status}): ${typeof data === "string" ? data : JSON.stringify(data)}`,
       );
       error.statusCode = response.status;
+      error.body = data;
       if (attempt >= retries || ![429, 500, 502, 503, 504].includes(response.status)) throw error;
       const retryAfter = Number(response.headers.get("retry-after"));
       await new Promise((resolve) =>
@@ -449,6 +450,7 @@ module.exports = {
   providerBudget,
   isVendorRateLimitResponse,
   request,
+  providerUrl,
   closeProviderRequests,
   sports: () => request("/v1/sports"),
   competitions: (query) => request("/v1/competitions", { query }),

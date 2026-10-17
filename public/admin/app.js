@@ -44,6 +44,55 @@ function pipelineErrors(pipelines = {}) {
     return error ? [`${label}: ${error}`] : [];
   });
 }
+function duration(ms) {
+  const seconds = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+function flagged(selector, value) {
+  const node = $(selector);
+  node.textContent = Number(value || 0).toLocaleString();
+  node.style.color = Number(value) > 0 ? "#dc2626" : "";
+}
+// The mirror only follows the source database, so its problems stay on this card as
+// warnings and never change the overall system state.
+function renderMirror(health) {
+  const mirror = health.mirror || {};
+  $("#mirrorCard").hidden = !mirror.enabled;
+  if (!mirror.enabled) return;
+  const check = health.supervisor?.checks?.mirrorDatabase;
+  const missed = (mirror.dropped || 0) + (mirror.lost || 0) + (mirror.refused || 0);
+  const problem = mirror.error || check?.error || mirror.lastError;
+  const state = mirror.error
+    ? "error"
+    : check?.status === "degraded" || missed || mirror.deadLetters
+      ? "warning"
+      : check?.status === "healthy"
+        ? "healthy"
+        : "waiting";
+  $("#mirrorName").textContent = mirror.database ? `Mirror database · ${mirror.database}` : "Mirror database";
+  $("#mirrorState").className = `dashboard-alert ${state}`;
+  $("#mirrorTitle").textContent = mirror.error
+    ? "Mirror status unavailable"
+    : check?.message || "Waiting for the first mirror check";
+  $("#mirrorDetail").textContent = problem
+    ? `${problem}${mirror.lastErrorAt ? ` · ${relative(mirror.lastErrorAt)}` : ""}`
+    : "Every committed write is queued and applied to the mirror in order.";
+  const lagMs = mirror.oldestQueuedAt ? Date.now() - new Date(mirror.oldestQueuedAt).getTime() : 0;
+  $("#mirrorBacklog").textContent = Number(mirror.backlog ?? 0).toLocaleString();
+  $("#mirrorOldest").textContent = mirror.oldestQueuedAt
+    ? `Oldest queued ${relative(mirror.oldestQueuedAt)}`
+    : "Writes waiting for the mirror";
+  $("#mirrorLag").textContent = duration(lagMs);
+  $("#mirrorApplied").textContent = Number(mirror.applied || 0).toLocaleString();
+  $("#mirrorRecorded").textContent = `${Number(mirror.recorded || 0).toLocaleString()} recorded since restart`;
+  $("#mirrorLastApplied").textContent = relative(mirror.lastAppliedAt);
+  flagged("#mirrorDeadLetters", mirror.deadLetters);
+  flagged("#mirrorMissed", missed);
+  $("#mirrorMissedDetail").textContent =
+    `${mirror.dropped || 0} dropped · ${mirror.lost || 0} lost · ${mirror.refused || 0} refused`;
+}
 const vendorSeries = [
   { key: "POST /v1/markets", label: "Markets", color: "#2563eb" },
   { key: "GET /v1/markets/:marketId/runners", label: "Runners", color: "#7c3aed" },
@@ -215,6 +264,7 @@ async function refresh() {
     $("#providerQueued").textContent = providerQueue.QUEUED || 0;
     $("#providerRunning").textContent =
       `${providerQueue.RUNNING || 0} running · ${providerQueue.EXECUTING || 0} executing`;
+    renderMirror(health);
     drawVendorChart(vendorMetrics);
     $("#updatedAt").textContent = `Updated ${new Date().toLocaleTimeString()} · Refreshes every 15 seconds`;
   } catch (error) {

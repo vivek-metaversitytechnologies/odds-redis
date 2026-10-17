@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Odds Admin · Vendor API</title>
+    <link rel="stylesheet" href="/admin/tailwind.css" />
+  </head>
+  <body class="admin-shell">
+    <aside class="sidebar">
+      <a class="sidebar-brand" href="/admin/"
+        ><span>SE</span>
+        <div><strong>Odds Admin</strong><small>Operations</small></div></a
+      >
+      <nav>
+        <a href="/admin/"><span>01</span>Overview</a><a href="/admin/competitions/"><span>02</span>Competitions</a
+        ><a href="/admin/events/"><span>03</span>Events</a><a href="/admin/markets/"><span>04</span>Markets</a
+        ><a href="/admin/subscriptions/"><span>05</span>Subscriptions</a
+        ><a href="/admin/results/"><span>06</span>Results</a><a href="/admin/redis/"><span>07</span>Redis</a
+        ><a href="/admin/logs/"><span>08</span>Logs</a
+        ><a class="active" href="/admin/vendor/"><span>09</span>Vendor API</a>
+      </nav>
+    </aside>
+    <div class="admin-content">
+      <header class="admin-header">
+        <div>
+          <p>Raw provider responses</p>
+          <h1>Vendor API</h1>
+        </div>
+        <div class="header-actions">
+          <label class="admin-key"
+            ><span>Admin key</span><input id="adminKey" type="password" autocomplete="off" placeholder="Optional"
+          /></label>
+        </div>
+      </header>
+      <main class="dashboard-main">
+        <section class="dashboard-card mt-0">
+          <div class="card-head">
+            <div>
+              <p class="section-label">Request</p>
+              <h2>Query a vendor endpoint</h2>
+              <span>Read-only endpoints. Requests use the shared provider rate limit and are not retried.</span>
+            </div>
+          </div>
+          <form id="requestForm" class="explorer-form">
+            <label>Endpoint<select id="endpoint"></select></label>
+            <div id="paramFields" class="explorer-form"></div>
+            <label id="payloadField"><span id="payloadLabel">Query parameters (JSON)</span><textarea id="payload" spellcheck="false"></textarea></label>
+            <p id="preview" class="explorer-url"></p>
+            <div class="explorer-actions">
+              <span>Ctrl/⌘ + Enter to send</span>
+              <button id="send" class="button primary" type="submit">Send request</button>
+            </div>
+          </form>
+        </section>
+        <section id="responseCard" class="dashboard-card detail-drawer" hidden>
+          <header>
+            <div>
+              <p class="section-label">Response</p>
+              <h2 id="responseTitle">Vendor response</h2>
+            </div>
+            <button id="copy" class="button ghost" type="button">Copy JSON</button>
+          </header>
+          <div class="explorer-meta">
+            <span id="responseStatus" class="status-badge"></span><span id="responseMeta"></span>
+          </div>
+          <pre id="responseBody"></pre>
+        </section>
+        <section id="historyCard" class="dashboard-card" hidden>
+          <div class="card-head">
+            <div>
+              <p class="section-label">This session</p>
+              <h2>Recent requests</h2>
+            </div>
+          </div>
+          <ul id="history" class="explorer-history"></ul>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script src="/admin/session.js" defer></script>
+    <script src="/admin/vendor/app.js" defer></script>
+  </body>
+</html>

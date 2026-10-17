@@ -24,6 +24,7 @@ const { getLimitsPollStatus } = require("./services/limitsPollPipeline");
 const marketTraceController = require("./controllers/marketTraceController");
 const { providerLimiter, getProviderRateLimitStatus } = require("./services/providerApi");
 const { getHealthStatus } = require("./services/healthSupervisor");
+const mirrorDb = require("./config/mirrorDb");
 const eventLifecycle = require("./services/eventLifecyclePolicy");
 
 function createApp() {
@@ -82,7 +83,24 @@ function createApp() {
     ["/api/events/subscriptions", "/api/provider", "/api/source", "/api/logs", "/api/redis"],
     adminAuth.requireAdminApi,
   );
+  // Live outbox counters; the supervisor's mirrorDatabase check adds reachability and lag.
+  async function mirrorStatus() {
+    let timeout;
+    try {
+      return await Promise.race([
+        mirrorDb.getMirrorStatus(),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("Mirror status timed out")), 2000);
+        }),
+      ]);
+    } catch (error) {
+      return { enabled: true, error: error.message };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   app.get("/health", async (req, res) => {
+    const mirror = await mirrorStatus();
     try {
       await checkSourceDbConnection();
       const supervisor = getHealthStatus();
@@ -90,6 +108,7 @@ function createApp() {
         status: supervisor.status === "critical" ? "critical" : "ok",
         supervisor,
         sourceDatabase: "connected",
+        mirror,
         redis: redis.getRedisStatus(),
         websocket: websocket.getSocketStatus(),
         pipelines: {
@@ -112,6 +131,7 @@ function createApp() {
         status: "error",
         supervisor,
         sourceDatabase: "disconnected",
+        mirror,
         redis: redis.getRedisStatus(),
         websocket: websocket.getSocketStatus(),
         pipelines: {
