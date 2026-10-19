@@ -656,6 +656,8 @@ async function upsertMarkets(markets) {
         market.inPlay,
         1,
         500,
+        1,
+        500,
         false,
         market.displayMessage,
         false,
@@ -668,7 +670,7 @@ async function upsertMarkets(markets) {
       await connection.query(
         `INSERT INTO t_market
           (marketid,sportid,eventid,marketname,matchname,status,isactive,createdon,updatedon,opendate,
-           minbet,maxbet,betdelay,inplay,minbetrate,maxbetrate,is_redis_updated,display_message,
+           minbet,maxbet,betdelay,inplay,minbetrate,maxbetrate,min_bet_rate,max_bet_rate,is_redis_updated,display_message,
            issuspended,is_rolled_back,maximum_profit,maximumprofit,betlock,seriesid) VALUES ?
          ON DUPLICATE KEY UPDATE
            marketname=IF(VALUES(marketname)=CONCAT('Market ',marketid),marketname,VALUES(marketname)),
