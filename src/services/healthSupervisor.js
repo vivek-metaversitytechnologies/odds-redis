@@ -11,6 +11,7 @@ const { getMarketDiscoveryStatus } = require("../cron/marketDiscoverySync");
 const { getMarketSyncStatus } = require("../cron/marketSync");
 const { getResultSyncStatus } = require("../cron/resultSync");
 const { getRedisEventCleanupStatus } = require("../cron/redisEventCleanup");
+const { getStaleFancyCloseStatus } = require("../cron/staleFancyClose");
 const logger = require("../utils/logger");
 const { integer } = require("../config/env");
 
@@ -162,6 +163,7 @@ function pipelineChecks(now) {
     subscriptions: pipelineCheck("subscriptions", getMarketSyncStatus(), now),
     results: pipelineCheck("results", getResultSyncStatus(), now),
     redisEventCleanup: pipelineCheck("redisEventCleanup", getRedisEventCleanupStatus(), now),
+    staleFancyClose: pipelineCheck("staleFancyClose", getStaleFancyCloseStatus(), now),
   };
 }
 

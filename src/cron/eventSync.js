@@ -94,14 +94,18 @@ async function upsertEvents(events) {
     );
     const existing = new Set(existingRows.map((row) => Number(row.eventid)));
     const values = events.map(eventInsertValues);
+    // updatedon is assigned first, against the old row: a finished event keeps the time it
+    // finished, which staleFancyClose counts from.
     await connection.query(
       `INSERT INTO t_event
         (seriesid,sportid,eventid,eventname,open_date,status,isactive,createdon,updatedon,
          fancypause,betlock,is_redis_updated,in_play,fancylock,bookmaker,fancy,channel_id)
        VALUES ?
-       ON DUPLICATE KEY UPDATE eventname=VALUES(eventname),seriesid=VALUES(seriesid),
+       ON DUPLICATE KEY UPDATE
+         updatedon=IF(isactive=0 AND status=0 AND VALUES(isactive)=0 AND VALUES(status)=0,updatedon,NOW()),
+         eventname=VALUES(eventname),seriesid=VALUES(seriesid),
          sportid=VALUES(sportid),open_date=VALUES(open_date),in_play=VALUES(in_play),
-         isactive=VALUES(isactive),status=VALUES(status),updatedon=NOW()`,
+         isactive=VALUES(isactive),status=VALUES(status)`,
       [values],
     );
     return {

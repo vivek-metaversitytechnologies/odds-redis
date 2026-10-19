@@ -32,6 +32,9 @@ module.exports = Object.freeze({
     expression: process.env.REDIS_EVENT_CLEANUP_CRON || "0 */10 * * * *",
     runOnStart: booleanEnv("RUN_REDIS_EVENT_CLEANUP_ON_START", false),
   }),
+  staleFancyClose: Object.freeze({
+    expression: process.env.STALE_FANCY_CLOSE_CRON || "0 */5 * * * *",
+  }),
   marketSubscription: Object.freeze({
     expression: process.env.MARKET_SYNC_CRON || "*/5 * * * * *",
     runOnStart: booleanEnv("RUN_MARKET_SYNC_ON_START"),
