@@ -13,6 +13,7 @@ const { startCasinoResultChase, stopCasinoResultChase } = require("./cron/casino
 const { startClosedFancyChase, stopClosedFancyChase } = require("./cron/closedFancyResultChaser");
 const { startRedisEventCleanup } = require("./cron/redisEventCleanup");
 const { startStaleFancyClose } = require("./cron/staleFancyClose");
+const { startMirrorFancyReconcile } = require("./cron/mirrorFancyReconcile");
 const { startLimitsPollPipelines, stopLimitsPollPipelines } = require("./services/limitsPollPipeline");
 const websocket = require("./services/websocketService");
 const subscriptions = require("./services/marketSubscriptionService");
@@ -54,6 +55,7 @@ async function startServer() {
   startClosedFancyChase();
   const redisEventCleanupCronTask = startRedisEventCleanup();
   const staleFancyCloseCronTask = startStaleFancyClose();
+  const mirrorFancyReconcileCronTask = startMirrorFancyReconcile();
   startLimitsPollPipelines();
   startHealthSupervisor();
   startMirrorWorker();
@@ -104,6 +106,7 @@ async function startServer() {
       resultRecall.stopResultRecallRecheck();
       redisEventCleanupCronTask.stop();
       staleFancyCloseCronTask.stop();
+      mirrorFancyReconcileCronTask.stop();
       const limitsPollStopped = stopLimitsPollPipelines();
       const casinoChaseStopped = stopCasinoResultChase();
       const closedFancyChaseStopped = stopClosedFancyChase();

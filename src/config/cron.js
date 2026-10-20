@@ -35,6 +35,9 @@ module.exports = Object.freeze({
   staleFancyClose: Object.freeze({
     expression: process.env.STALE_FANCY_CLOSE_CRON || "0 */5 * * * *",
   }),
+  mirrorFancyReconcile: Object.freeze({
+    expression: process.env.MIRROR_FANCY_RECONCILE_CRON || "30 */5 * * * *",
+  }),
   marketSubscription: Object.freeze({
     expression: process.env.MARKET_SYNC_CRON || "*/5 * * * * *",
     runOnStart: booleanEnv("RUN_MARKET_SYNC_ON_START"),

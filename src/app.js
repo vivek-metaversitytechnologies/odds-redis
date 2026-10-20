@@ -22,6 +22,7 @@ const { getClosedFancyChaseStatus } = require("./cron/closedFancyResultChaser");
 const { getResultRecallStatus } = require("./services/resultRecall");
 const { getRedisEventCleanupStatus } = require("./cron/redisEventCleanup");
 const { getStaleFancyCloseStatus } = require("./cron/staleFancyClose");
+const { getMirrorFancyReconcileStatus } = require("./cron/mirrorFancyReconcile");
 const { getLimitsPollStatus } = require("./services/limitsPollPipeline");
 const marketTraceController = require("./controllers/marketTraceController");
 const { providerLimiter, getProviderRateLimitStatus } = require("./services/providerApi");
@@ -124,6 +125,7 @@ function createApp() {
           resultRecall: getResultRecallStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
           staleFancyClose: getStaleFancyCloseStatus(),
+          mirrorFancyReconcile: getMirrorFancyReconcileStatus(),
           limitsPoll: getLimitsPollStatus(),
           eventLifecycle: eventLifecycle.getStatus(),
           providerQueue: { ...providerLimiter.counts(), rateLimit: getProviderRateLimitStatus() },
@@ -149,6 +151,7 @@ function createApp() {
           resultRecall: getResultRecallStatus(),
           redisEventCleanup: getRedisEventCleanupStatus(),
           staleFancyClose: getStaleFancyCloseStatus(),
+          mirrorFancyReconcile: getMirrorFancyReconcileStatus(),
           limitsPoll: getLimitsPollStatus(),
           eventLifecycle: eventLifecycle.getStatus(),
           providerQueue: { ...providerLimiter.counts(), rateLimit: getProviderRateLimitStatus() },
