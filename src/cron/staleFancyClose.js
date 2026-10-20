@@ -6,6 +6,11 @@
 // A multi-day match (a Test between days) stays isactive=1 overnight, so it is never picked.
 // An event closed only because its primary markets were suspended still has a primary market
 // with status=1, and event sync may reopen it; such an event is skipped as well.
+//
+// Both guards stop at the carry-over window: once open_date is older than
+// EVENT_CARRY_OVER_MAX_DAYS, event sync can no longer reopen the event. A primary market whose
+// result never arrived then keeps status=1 forever, and an ended event can keep a stale
+// in_play=1 for weeks, so neither is checked for such an event.
 const cron = require("node-cron");
 const { getSourcePool } = require("../config/sourceDb");
 const logger = require("../utils/logger");
@@ -13,6 +18,7 @@ const cronConfig = require("../config/cron");
 const { integer } = require("../config/env");
 const { retryDeadlock } = require("../utils/dbRetry");
 const { PRIMARY_MARKET_SQL } = require("../utils/primaryMarket");
+const { carryOverMaxDays } = require("../services/eventLifecyclePolicy");
 
 let running = false;
 const state = {
@@ -32,14 +38,29 @@ async function staleEventIds(pool) {
     `SELECT DISTINCT f.eventid
      FROM t_matchfancy f JOIN t_event e ON e.eventid=f.eventid
      WHERE f.isactive=? AND UPPER(f.status)=?
-       AND e.isactive=? AND e.status=? AND COALESCE(e.in_play,0)=0
+       AND e.isactive=? AND e.status=?
        AND e.updatedon <= DATE_SUB(NOW(), INTERVAL ? MINUTE)
-       AND NOT EXISTS (
-         SELECT 1 FROM t_market pm
-          WHERE pm.eventid=e.eventid AND pm.status=? AND ${PRIMARY_MARKET_SQL}
+       AND (
+         e.open_date < DATE_SUB(NOW(), INTERVAL ? DAY)
+         OR (
+           COALESCE(e.in_play,0)=0
+           AND NOT EXISTS (
+             SELECT 1 FROM t_market pm
+              WHERE pm.eventid=e.eventid AND pm.status=? AND ${PRIMARY_MARKET_SQL}
+           )
+         )
        )
      ORDER BY f.eventid LIMIT ?`,
-    [true, "OPEN", false, false, closeAfterMinutes(), true, integer("STALE_FANCY_CLOSE_EVENT_LIMIT", 500, { min: 1 })],
+    [
+      true,
+      "OPEN",
+      false,
+      false,
+      closeAfterMinutes(),
+      carryOverMaxDays(),
+      true,
+      integer("STALE_FANCY_CLOSE_EVENT_LIMIT", 500, { min: 1 }),
+    ],
   );
   return rows.map((row) => Number(row.eventid)).filter(Number.isInteger);
 }

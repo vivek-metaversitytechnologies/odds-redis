@@ -174,7 +174,7 @@ function vendorRows(response) {
 // primary markets were suspended.
 async function carriedOverEvents(feedEvents, sportIds) {
   if (!sportIds.length) return [];
-  const maxDays = integer("EVENT_CARRY_OVER_MAX_DAYS", 6, { min: 1, max: 30 });
+  const maxDays = lifecycle.carryOverMaxDays();
   const maxEvents = integer("EVENT_CARRY_OVER_MAX_EVENTS", 25, { min: 1, max: 200 });
   const listedIds = [...new Set((feedEvents || []).map((event) => Number(event.eventId)))];
   const [rows] = await getSourcePool().query(

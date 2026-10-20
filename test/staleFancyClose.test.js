@@ -19,10 +19,14 @@ test("open fancies of events finished over two hours ago are closed per event", 
   const result = await closeStaleFancies();
 
   const [select, ...updates] = queries;
-  assert.match(select.sql, /e\.isactive=\? AND e\.status=\? AND COALESCE\(e\.in_play,0\)=0/);
-  // An event whose primary market was never retired (multi-day match) is not picked.
-  assert.match(select.sql, /NOT EXISTS \(\s*SELECT 1 FROM t_market pm\s+WHERE pm\.eventid=e\.eventid AND pm\.status=\?/);
-  assert.deepEqual(select.params.slice(0, 6), [true, "OPEN", false, false, 120, true]);
+  assert.match(select.sql, /e\.isactive=\? AND e\.status=\?/);
+  // Within the carry-over window, an event that is in play or whose primary market was never
+  // retired (multi-day match) is not picked; past it, event sync can no longer reopen it.
+  assert.match(
+    select.sql,
+    /e\.open_date < DATE_SUB\(NOW\(\), INTERVAL \? DAY\)\s+OR \(\s*COALESCE\(e\.in_play,0\)=0\s+AND NOT EXISTS \(\s*SELECT 1 FROM t_market pm\s+WHERE pm\.eventid=e\.eventid AND pm\.status=\?/,
+  );
+  assert.deepEqual(select.params.slice(0, 7), [true, "OPEN", false, false, 120, 6, true]);
   assert.equal(updates.length, 2);
   for (const [index, update] of updates.entries()) {
     assert.match(update.sql, /UPDATE t_matchfancy SET isactive=\?,status=\?/);

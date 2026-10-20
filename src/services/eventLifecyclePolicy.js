@@ -18,6 +18,11 @@ function confirmationWindowMs() {
   return integer("EVENT_TERMINAL_CONFIRMATION_WINDOW_MS", 120000, { min: 1000, max: 3600000 });
 }
 
+// How far back (by open_date) event sync may carry over, and so reopen, an event.
+function carryOverMaxDays() {
+  return integer("EVENT_CARRY_OVER_MAX_DAYS", 6, { min: 1, max: 30 });
+}
+
 function observationKey(eventId, source) {
   return `${Number(eventId)}:${String(source || "unknown")}`;
 }
@@ -95,5 +100,6 @@ module.exports = {
   requiredConfirmations,
   dryRun,
   confirmationWindowMs,
+  carryOverMaxDays,
   resetForTests,
 };
