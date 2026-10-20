@@ -235,6 +235,12 @@ async function queryWithMirror(connection, sql, params, mirrorSql, mirrorParams)
   return result;
 }
 
+// Queues a statement for the mirror alone, to restore rows the source already holds but the
+// mirror never received (written before mirroring began, or an outbox entry that was lost).
+function queueForMirror(sql, values) {
+  record([format(sql, values)]);
+}
+
 // Runs a write on the source only, for source-only tables the mirror schema does not have. A
 // missing mirror table is retried in place, so mirroring such a write would stall the outbox.
 async function querySourceOnly(connection, sql, params) {
@@ -402,6 +408,7 @@ module.exports = {
   getMirrorPool,
   wrapPool,
   queryWithMirror,
+  queueForMirror,
   querySourceOnly,
   startMirrorWorker,
   drainOutbox,

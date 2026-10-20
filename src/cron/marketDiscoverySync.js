@@ -2,6 +2,7 @@ const cron = require("node-cron");
 const provider = require("../services/providerApi");
 const { supportsFancyNameRepair, isFallbackFancyName, resolveFancyName, repairFancyNames } = require("../services/fancyNameService");
 const { getSourcePool } = require("../config/sourceDb");
+const mirrorDb = require("../config/mirrorDb");
 const {
   unsubscribeEventMarkets,
   subscribeMarkets,
@@ -41,6 +42,8 @@ let lastBallByBallDataAgeWarningAt = 0;
 const ballByBallActiveSnapshots = new Map();
 const queuedDiscoveryLanes = new Set();
 const runnerMisses = new Map();
+const mirrorRunnersConfirmed = new Map();
+const mirrorRunnerChecks = new Map();
 const initialPriceSeeded = new Map();
 const seedsInFlight = new Set();
 // Active line markets seen by the discovery cycle; the price-refresh loop polls only these.
@@ -811,12 +814,64 @@ async function fetchAndStoreRunners(marketIds) {
       connection.release();
     }
   }
+  const missingIds = new Set(missing.map(String));
+  let mirrorRepairedMarkets = 0;
+  try {
+    mirrorRepairedMarkets = await healMirrorRunners(marketIds.filter((marketId) => !missingIds.has(String(marketId))));
+  } catch (error) {
+    logger.warn("[MarketDiscovery] mirror runner check failed", { error: error.message });
+  }
   return {
     requestedMarkets: missing.length,
     storedRunners: runners.length,
     storedMarketIds: [...new Set(runners.map((runner) => String(runner.marketId)))],
     failedMarkets: responses.filter((result) => result.status === "rejected").length,
+    mirrorRepairedMarkets,
   };
+}
+
+// Runners are only fetched while the source lacks them, so source runners that never reached
+// the mirror (written before mirroring began, or a lost outbox entry) would leave the market
+// runnerless there for good. Such rows are re-queued from the source through the outbox.
+async function healMirrorRunners(marketIds) {
+  if (!mirrorDb.mirrorEnabled()) return 0;
+  const now = Date.now();
+  const candidates = runnerLookupMarketIds(marketIds).filter(
+    (marketId) => !mirrorRunnersConfirmed.has(marketId) && !((mirrorRunnerChecks.get(marketId) || 0) > now),
+  );
+  if (!candidates.length) return 0;
+  const [mirrorRows] = await mirrorDb.getMirrorPool().query(
+    `SELECT DISTINCT marketid FROM t_selectionid WHERE marketid IN (${candidates.map(() => "?").join(",")})`,
+    candidates,
+  );
+  const inMirror = new Set(mirrorRows.map((row) => String(row.marketid)));
+  for (const marketId of inMirror) setBounded(mirrorRunnersConfirmed, marketId, true, DISCOVERY_CACHE_LIMIT);
+  const absent = candidates.filter((marketId) => !inMirror.has(marketId));
+  if (!absent.length) return 0;
+  // Re-checked after a cooldown, by when the queued rows have normally been applied.
+  const cooldownMs = integer("MIRROR_RUNNER_CHECK_COOLDOWN_MS", 600000, { min: 60000 });
+  for (const marketId of absent) setBounded(mirrorRunnerChecks, marketId, now + cooldownMs, DISCOVERY_CACHE_LIMIT);
+  const [rows] = await getSourcePool().query(
+    `SELECT createdon,marketid,runner_name,selectionid,is_redis_updated FROM t_selectionid
+      WHERE marketid IN (${absent.map(() => "?").join(",")}) ORDER BY id ASC`,
+    absent,
+  );
+  if (!rows.length) return 0;
+  for (const batch of chunks(rows)) {
+    mirrorDb.queueForMirror(
+      `INSERT INTO t_selectionid
+         (createdon,marketid,runner_name,selectionid,is_redis_updated) VALUES ?
+       ON DUPLICATE KEY UPDATE runner_name=VALUES(runner_name)`,
+      [batch.map((row) => [row.createdon, row.marketid, row.runner_name, row.selectionid, row.is_redis_updated])],
+    );
+  }
+  const repaired = [...new Set(rows.map((row) => String(row.marketid)))];
+  logger.warn("[MarketDiscovery] queued source runners missing from the mirror", {
+    markets: repaired.length,
+    runners: rows.length,
+    sample: repaired.slice(0, 10),
+  });
+  return repaired.length;
 }
 
 async function regularMarketsWithRunners(markets) {
