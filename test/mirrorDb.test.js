@@ -27,6 +27,9 @@ function fakeRedis() {
     async lIndex(key, index) {
       return list(key)[index] ?? null;
     },
+    async lRange(key, start, stop) {
+      return list(key).slice(start, stop + 1);
+    },
     async lPop(key) {
       return list(key).shift() ?? null;
     },
@@ -162,12 +165,14 @@ test("the worker applies entries in order, dead-letters data errors and keeps en
       staged = [];
     },
     query: async (sql) => {
-      if (failure?.(sql)) {
-        const error = new Error(`failed: ${sql}`);
-        error.code = failure.code;
-        throw error;
+      for (const statement of sql.split(";\n")) {
+        if (failure?.(statement)) {
+          const error = new Error(`failed: ${statement}`);
+          error.code = failure.code;
+          throw error;
+        }
+        staged.push(statement);
       }
-      staged.push(sql);
     },
     commit: async () => {
       applied.push(...staged);
@@ -229,4 +234,38 @@ test("source-only writes reach the source but never the outbox", async (t) => {
 
   assert.equal(sourceLog.filter((sql) => String(sql).includes("t_marketid_for_rollback")).length, 2);
   assert.deepEqual(await outbox(client), [["UPDATE t_market SET isactive=false WHERE marketid='1.1'"]]);
+});
+
+test("the worker applies a backlog in one transaction with few round trips", async (t) => {
+  const client = fakeRedis();
+  t.mock.method(redis, "getRedisClient", async () => client);
+  const queries = [];
+  let transactions = 0;
+  const connection = {
+    beginTransaction: async () => {
+      transactions += 1;
+    },
+    query: async (sql) => {
+      queries.push(sql);
+    },
+    commit: async () => {},
+    rollback: async () => {},
+    release: () => {},
+  };
+  t.mock.method(mysql, "createPool", () => ({ getConnection: async () => connection, end: async () => {} }));
+  const key = mirror.outboxKey();
+  for (let index = 0; index < 50; index += 1) {
+    await client.rPush(key, JSON.stringify({ at: "now", sql: [`S${index}a`, `S${index}b`] }));
+  }
+
+  mirror.startMirrorWorker();
+  t.after(() => mirror.closeMirror());
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(client.lists.get(key).length, 0);
+  assert.equal(transactions, 1);
+  assert.equal(queries.length, 1);
+  assert.deepEqual(
+    queries[0].split(";\n"),
+    Array.from({ length: 50 }, (_, index) => [`S${index}a`, `S${index}b`]).flat(),
+  );
 });

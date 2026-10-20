@@ -33,6 +33,7 @@ const DATA_ERRORS = new Set([
   "ER_CHECK_CONSTRAINT_VIOLATED",
 ]);
 const DEAD_LETTER_LIMIT = 1000;
+const APPLY_QUERY_BYTES = 1024 * 1024;
 
 let pool;
 let recording = Promise.resolve();
@@ -70,6 +71,9 @@ function getMirrorPool() {
     waitForConnections: true,
     connectionLimit: Number(process.env.MIRROR_DB_CONNECTION_LIMIT || 4),
     queueLimit: 0,
+    // Outbox statements are already formatted and escaped; batching them into one query saves
+    // a network round trip per statement to the remote mirror.
+    multipleStatements: true,
     dateStrings: true,
     typeCast: mysqlTypeCast,
   });
@@ -258,12 +262,30 @@ function deadLetterable(error) {
   return DATA_ERRORS.has(error?.code);
 }
 
-async function applyEntry(entry) {
+function statementQueries(statements) {
+  const queries = [];
+  let current = [];
+  let size = 0;
+  for (const statement of statements) {
+    if (current.length && size + statement.length > APPLY_QUERY_BYTES) {
+      queries.push(current.join(";\n"));
+      current = [];
+      size = 0;
+    }
+    current.push(statement);
+    size += statement.length + 2;
+  }
+  if (current.length) queries.push(current.join(";\n"));
+  return queries;
+}
+
+// Entries are applied in one transaction, so a failure leaves none of them on the mirror.
+async function applyEntries(entries) {
   const connection = await getMirrorPool().getConnection();
   try {
     await connection.beginTransaction();
     try {
-      for (const statement of entry.sql) await connection.query(statement);
+      for (const query of statementQueries(entries.flatMap((entry) => entry.sql))) await connection.query(query);
       await connection.commit();
     } catch (error) {
       await connection.rollback().catch(() => {});
@@ -295,12 +317,43 @@ async function drainOutbox() {
   const batch = integer("MIRROR_APPLY_BATCH", 200, { min: 1 });
   let applied = 0;
   while (applied < batch && workerRunning) {
+    const raws = await redis.lRange(key, 0, batch - applied - 1);
+    if (!raws.length) return { applied, more: false };
+    const entries = raws.map((raw) => {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return null;
+      }
+    });
+    if (entries.every(Boolean)) {
+      try {
+        await applyEntries(entries);
+        stats.applied += entries.length;
+        stats.lastAppliedAt = new Date().toISOString();
+        await redis.lTrim(key, entries.length, -1);
+        applied += entries.length;
+        continue;
+      } catch (error) {
+        if (!deadLetterable(error)) throw error;
+      }
+    }
+    // An entry was rejected or unreadable: replay the batch one entry at a time so only that
+    // entry is dead-lettered.
+    applied += await drainOneByOne(redis, key, raws.length);
+  }
+  return { applied, more: true };
+}
+
+async function drainOneByOne(redis, key, count) {
+  let applied = 0;
+  while (applied < count && workerRunning) {
     const raw = await redis.lIndex(key, 0);
-    if (raw == null) return { applied, more: false };
+    if (raw == null) return applied;
     let entry;
     try {
       entry = JSON.parse(raw);
-      await applyEntry(entry);
+      await applyEntries([entry]);
       stats.applied += 1;
       stats.lastAppliedAt = new Date().toISOString();
     } catch (error) {
@@ -322,7 +375,7 @@ async function drainOutbox() {
     await redis.lPop(key);
     applied += 1;
   }
-  return { applied, more: true };
+  return applied;
 }
 
 function startMirrorWorker() {
