@@ -4,6 +4,7 @@ const request = require("supertest");
 const { createPublicApiApp } = require("../src/publicApiApp");
 const { publicApiPort } = require("../src/publicApiServer");
 const redis = require("../src/config/redis");
+const { activeMatchEntryFromCache } = require("../src/services/dashboardService");
 
 test("public API exposes only the split service routes", async () => {
   const app = createPublicApiApp();
@@ -153,6 +154,17 @@ test("live-match API returns only in-play events for each configured sport", asy
   await request(app).get("/betfair_api/live_match/0").expect(400);
   const unknown = await request(app).get("/betfair_api/live_match/99").expect(404);
   assert.equal(unknown.body.message, "Sport is not configured");
+});
+
+test("an active match whose Match Odds closed with a winner is no longer in play", () => {
+  const event = { eventId: 44, eventName: "Settled", sportId: 4, seriesId: 9, openDate: "2026-09-20T06:00:00", inPlay: true, gameOver: false };
+  const snapshot = (status, runnerStatuses) => ({
+    Odds: [{ Name: "Match Odds", marketId: "1.4", status, inplay: true, runners: runnerStatuses.map((s) => ({ status: s })) }],
+    Bookmaker: [],
+  });
+  assert.equal(activeMatchEntryFromCache(event, snapshot("CLOSED", ["WINNER", "LOSER"])).inPlay, false);
+  assert.equal(activeMatchEntryFromCache(event, snapshot("CLOSED", ["CLOSED", "CLOSED"])).inPlay, true);
+  assert.equal(activeMatchEntryFromCache(event, snapshot("OPEN", ["ACTIVE", "ACTIVE"])).inPlay, true);
 });
 
 test("live-match API reports missing Redis data instead of an empty list", async (t) => {

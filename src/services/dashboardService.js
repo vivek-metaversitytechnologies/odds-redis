@@ -138,9 +138,11 @@ function canRemainWithoutMarket(event, now = Date.now()) {
 
 function activeMatchEntryFromCache(event, snapshot, _now = Date.now()) {
   const row = cachedDashboardRow(event, snapshot);
-  const entry = row ? dashboardEntry(row, snapshot) : null;
-  if (entry) return entry;
-  return hasDisplayableMarket(snapshot) ? eventOnlyDashboardEntry(event) : null;
+  const entry = row
+    ? dashboardEntry(row, snapshot)
+    : hasDisplayableMarket(snapshot) ? eventOnlyDashboardEntry(event) : null;
+  // The vendor can keep a settled match flagged in play; it is no longer live for the frontend.
+  return entry && hasSettledMatchOdds(snapshot) ? { ...entry, inPlay: false } : entry;
 }
 
 function activeMatchesFromCache(events, snapshots, maxAgeHours, now = Date.now()) {
