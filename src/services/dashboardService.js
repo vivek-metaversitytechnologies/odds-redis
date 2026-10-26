@@ -236,14 +236,32 @@ async function activeMatchesFromRedis(sportId, timings) {
   return data;
 }
 
-// Live means the vendor reports the event in play and not finished. Rows are exactly the
-// active-match rows, so one frontend row component serves both lists. An in-play event that
-// has no displayable market yet (and so is absent from the active-match projection) is still
-// listed, as an event-only row with zero prices and a null marketId.
-function liveEventsFromMetadata(events, projection) {
+// A Match Odds tick that is CLOSED with a WINNER runner is settled, even while the vendor's event
+// feed still reports the match in play and not game-over (seen on a T20 left inPlay a day after
+// it finished). Both are required, so a CLOSED status alone never hides a running match.
+function hasSettledMatchOdds(snapshot) {
+  const odds = Array.isArray(snapshot?.Odds) ? snapshot.Odds : [];
+  return odds.some(
+    (market) =>
+      String(market?.Name || "").trim().toLowerCase() === "match odds" &&
+      String(market?.status || "").trim().toUpperCase() === "CLOSED" &&
+      (market.runners || []).some((runner) => String(runner?.status || "").toUpperCase() === "WINNER"),
+  );
+}
+
+function isLiveEvent(event) {
+  return event?.inPlay === true && event?.gameOver !== true;
+}
+
+// Live means the vendor reports the event in play and not finished, and its Match Odds is not
+// already settled. Rows are exactly the active-match rows, so one frontend row component serves
+// both lists. An in-play event that has no displayable market yet (and so is absent from the
+// active-match projection) is still listed, as an event-only row with zero prices and a null
+// marketId.
+function liveEventsFromMetadata(events, projection, snapshots = new Map()) {
   const projected = new Map((projection || []).map((entry) => [String(entry.matchId), entry]));
   return (events || [])
-    .filter((event) => event?.inPlay === true && event?.gameOver !== true)
+    .filter((event) => isLiveEvent(event) && !hasSettledMatchOdds(snapshots.get(String(event.eventId))))
     .map((event) => ({
       ...(projected.get(String(event.eventId)) ?? eventOnlyDashboardEntry(event)),
       inPlay: true,
@@ -259,8 +277,11 @@ async function liveMatchesFromRedis(sportIds) {
     Promise.all(sportIds.map((sportId) => redisStore.getActiveMatches(sportId))),
   ]);
   if (metadata.some((events) => events === null)) return null;
+  const snapshots = await redisStore.getEventSnapshots(
+    metadata.flat().filter(isLiveEvent).map((event) => event.eventId),
+  );
   return sportIds.map((sportId, index) => {
-    const events = liveEventsFromMetadata(metadata[index], projections[index]);
+    const events = liveEventsFromMetadata(metadata[index], projections[index], snapshots);
     return { sportId, count: events.length, events };
   });
 }

@@ -49,11 +49,13 @@ test("active-match response exposes its Redis and application timings", async (t
 test("live-match API returns only in-play events for each configured sport", async (t) => {
   const originalGetEvents = redis.getEvents;
   const originalGetActiveMatches = redis.getActiveMatches;
+  const originalGetEventSnapshots = redis.getEventSnapshots;
   const originalCache = process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
   const originalSports = process.env.SPORT_IDS;
   t.after(() => {
     redis.getEvents = originalGetEvents;
     redis.getActiveMatches = originalGetActiveMatches;
+    redis.getEventSnapshots = originalGetEventSnapshots;
     if (originalCache === undefined) delete process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
     else process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS = originalCache;
     if (originalSports === undefined) delete process.env.SPORT_IDS;
@@ -70,9 +72,21 @@ test("live-match API returns only in-play events for each configured sport", asy
       { eventId: 42, eventName: "Later live", sportId: 4, seriesId: null, openDate: "2026-09-20T09:00:00.000Z", inPlay: true, gameOver: false },
       { eventId: 41, eventName: "Earlier live", sportId: 4, seriesId: 9, openDate: "2026-09-20T08:00:00.000Z", inPlay: true, gameOver: false },
       { eventId: 43, eventName: "Finished", sportId: 4, seriesId: 9, openDate: "2026-09-20T07:00:00.000Z", inPlay: true, gameOver: true },
+      { eventId: 44, eventName: "Settled", sportId: 4, seriesId: 9, openDate: "2026-09-20T06:00:00.000Z", inPlay: true, gameOver: false },
     ],
   };
   redis.getEvents = async (sportId) => metadata[sportId] ?? null;
+  const matchOdds = (status, runnerStatuses) => ({
+    Odds: [{ Name: "Match Odds", marketId: "1.4", status, runners: runnerStatuses.map((s) => ({ status: s })) }],
+  });
+  // The vendor still reports 44 in play, but its Match Odds closed with a winner. 41's Match Odds
+  // is CLOSED without a winner yet, which is not enough to drop a live event.
+  const snapshots = new Map([
+    ["44", matchOdds("CLOSED", ["WINNER", "LOSER"])],
+    ["41", matchOdds("CLOSED", ["CLOSED", "CLOSED"])],
+  ]);
+  redis.getEventSnapshots = async (eventIds) =>
+    new Map(eventIds.map(String).filter((id) => snapshots.has(id)).map((id) => [id, snapshots.get(id)]));
   // Event 11 has a displayable market, so the active-match projection holds its full row.
   const projectedRow = {
     matchName: "Alpha v Beta",
@@ -103,7 +117,7 @@ test("live-match API returns only in-play events for each configured sport", asy
       [1, 1, [11]],
       [4, 2, [41, 42]],
     ],
-    "in-play only, finished events dropped, oldest kickoff first",
+    "in-play only, finished and settled events dropped, oldest kickoff first",
   );
   // A live event with a market is exactly its active-match row (in play by definition).
   assert.deepEqual(all.body.data[0].events[0], { ...projectedRow, inPlay: true });
@@ -144,16 +158,19 @@ test("live-match API returns only in-play events for each configured sport", asy
 test("live-match API reports missing Redis data instead of an empty list", async (t) => {
   const originalGetEvents = redis.getEvents;
   const originalGetActiveMatches = redis.getActiveMatches;
+  const originalGetEventSnapshots = redis.getEventSnapshots;
   const originalCache = process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
   t.after(() => {
     redis.getEvents = originalGetEvents;
     redis.getActiveMatches = originalGetActiveMatches;
+    redis.getEventSnapshots = originalGetEventSnapshots;
     if (originalCache === undefined) delete process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS;
     else process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS = originalCache;
   });
   process.env.PUBLIC_API_ACTIVE_MATCH_CACHE_MS = "0";
   redis.getEvents = async (sportId) => (Number(sportId) === 2 ? null : []);
   redis.getActiveMatches = async () => null;
+  redis.getEventSnapshots = async () => new Map();
   const response = await request(createPublicApiApp()).get("/betfair_api/live_match").expect(503);
   assert.equal(response.body.status, false);
   assert.deepEqual(response.body.data, []);
