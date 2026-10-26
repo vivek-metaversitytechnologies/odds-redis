@@ -1,6 +1,7 @@
 const { getSourcePool } = require("../config/sourceDb");
 const redisStore = require("../config/redis");
 const { integer } = require("../config/env");
+const { isSettledMatchOdds } = require("../utils/primaryMarket");
 
 function firstPrice(runner, side) {
   const prices = runner?.ex?.[side];
@@ -238,17 +239,10 @@ async function activeMatchesFromRedis(sportId, timings) {
   return data;
 }
 
-// A Match Odds tick that is CLOSED with a WINNER runner is settled, even while the vendor's event
-// feed still reports the match in play and not game-over (seen on a T20 left inPlay a day after
-// it finished). Both are required, so a CLOSED status alone never hides a running match.
+// The vendor's event feed can keep a settled match in play and not game-over (seen on a T20 left
+// inPlay a day after it finished); its settled Match Odds says otherwise.
 function hasSettledMatchOdds(snapshot) {
-  const odds = Array.isArray(snapshot?.Odds) ? snapshot.Odds : [];
-  return odds.some(
-    (market) =>
-      String(market?.Name || "").trim().toLowerCase() === "match odds" &&
-      String(market?.status || "").trim().toUpperCase() === "CLOSED" &&
-      (market.runners || []).some((runner) => String(runner?.status || "").toUpperCase() === "WINNER"),
-  );
+  return (Array.isArray(snapshot?.Odds) ? snapshot.Odds : []).some(isSettledMatchOdds);
 }
 
 function isLiveEvent(event) {

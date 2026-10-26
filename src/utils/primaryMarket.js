@@ -14,8 +14,18 @@ function isPrimaryMarket(market) {
   return isPrimaryMarketName(market?.marketName);
 }
 
+// A Match Odds payload entry that is CLOSED with a WINNER runner is settled. Both are required,
+// so a CLOSED status alone never marks a running match finished.
+function isSettledMatchOdds(entry) {
+  return (
+    String(entry?.Name || "").trim().toLowerCase() === "match odds" &&
+    String(entry?.status || "").trim().toUpperCase() === "CLOSED" &&
+    (entry.runners || []).some((runner) => String(runner?.status || "").toUpperCase() === "WINNER")
+  );
+}
+
 // SQL equivalent of isPrimaryMarketName for t_market.marketname.
 const PRIMARY_MARKET_SQL =
   "(LOWER(marketname)='match odds' OR (LOWER(marketname) LIKE '%bookmaker%' AND LOWER(marketname) NOT REGEXP 'bookmaker[[:space:]]*[0-9]+$'))";
 
-module.exports = { isPrimaryMarketName, isPrimaryMarket, PRIMARY_MARKET_SQL };
+module.exports = { isPrimaryMarketName, isPrimaryMarket, isSettledMatchOdds, PRIMARY_MARKET_SQL };

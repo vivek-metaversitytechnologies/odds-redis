@@ -10,6 +10,7 @@ const { providerLimits, persistLimits } = require("../utils/marketLimits");
 const marketTrace = require("../utils/marketTrace");
 const { audit } = require("../utils/eventAudit");
 const closedFancies = require("../services/closedFancyTracker");
+const { isSettledMatchOdds } = require("../utils/primaryMarket");
 
 let client;
 let connecting;
@@ -1697,6 +1698,11 @@ async function writeEventTicks(items) {
       if (["Odds", "LineMarket"].includes(group)) preserveRunnerNames(entries, previousEntries);
       if (group === "LineMarket") preserveLineLiquidity(entries, previousEntries);
       if (group === "LineMarket" && !hasLineStatus(item)) preserveLineStatus(entries, previousEntries);
+      // A settled Match Odds stays settled until a tick states a status again: the vendor's
+      // resubscribe snapshot carries none and would otherwise reopen it with ACTIVE runners.
+      if (group === "Odds" && !hasLineStatus(item) && previousEntries.some(isSettledMatchOdds)) {
+        preserveLineStatus(entries, previousEntries);
+      }
       const removeFromPayload = shouldRemoveFromPayload(group, item, market);
       const blockedBallByBall = group === "BallByBall" && terminalBallByBallIds.has(marketId) && !removeFromPayload;
       const blockedLineMarket = group === "LineMarket" && (
