@@ -17,6 +17,15 @@ const { integer } = require("../config/env");
 const { audit } = require("../utils/eventAudit");
 
 const CARRY_OVER_CONCURRENCY = 4;
+// Width of t_event.tv. A longer value is dropped rather than truncated (a cut iframe is broken
+// HTML) and must not fail the batch upsert under strict SQL mode.
+const TV_MAX_LENGTH = 512;
+
+// The vendor's `tv` is the raw score/TV iframe HTML, stored as sent.
+function eventTv(value) {
+  const tv = typeof value === "string" ? value.trim() : "";
+  return tv && tv.length <= TV_MAX_LENGTH ? tv : null;
+}
 
 let running = false;
 const state = {
@@ -42,6 +51,7 @@ function eventRows(responses) {
       openDate: utcToIstSql(item?.startTime),
       inPlay: Boolean(item?.inPlay),
       gameOver: Boolean(item?.gameOver),
+      tv: eventTv(item?.tv),
     }))
     .filter(
       (item) =>
@@ -80,6 +90,7 @@ function eventInsertValues(event) {
     true,
     true,
     "1",
+    event.tv ?? null,
   ];
 }
 
@@ -95,17 +106,18 @@ async function upsertEvents(events) {
     const existing = new Set(existingRows.map((row) => Number(row.eventid)));
     const values = events.map(eventInsertValues);
     // updatedon is assigned first, against the old row: a finished event keeps the time it
-    // finished, which staleFancyClose counts from.
+    // finished, which staleFancyClose counts from. Carried-over events and feeds without a tv
+    // keep the stored tv.
     await connection.query(
       `INSERT INTO t_event
         (seriesid,sportid,eventid,eventname,open_date,status,isactive,createdon,updatedon,
-         fancypause,betlock,is_redis_updated,in_play,fancylock,bookmaker,fancy,channel_id)
+         fancypause,betlock,is_redis_updated,in_play,fancylock,bookmaker,fancy,channel_id,tv)
        VALUES ?
        ON DUPLICATE KEY UPDATE
          updatedon=IF(isactive=0 AND status=0 AND VALUES(isactive)=0 AND VALUES(status)=0,updatedon,NOW()),
          eventname=VALUES(eventname),seriesid=VALUES(seriesid),
          sportid=VALUES(sportid),open_date=VALUES(open_date),in_play=VALUES(in_play),
-         isactive=VALUES(isactive),status=VALUES(status)`,
+         isactive=VALUES(isactive),status=VALUES(status),tv=COALESCE(VALUES(tv),tv)`,
       [values],
     );
     return {
@@ -440,6 +452,7 @@ function getEventSyncStatus() {
 }
 
 module.exports = {
+  eventTv,
   eventRows,
   eventInsertValues,
   terminalPrimaryEventIds,
