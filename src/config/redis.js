@@ -1101,7 +1101,7 @@ async function reconcileFancyDefinitions(markets) {
             marketTrace.trace("definition", { ...definitionTrace, action: "added" }, { group });
           } else if (active && index >= 0 && payload[group][index]?.gstatus === "WAITING") {
             const definition = fancyDefinitionEntry(market);
-            if (JSON.stringify(payload[group][index]) !== JSON.stringify(definition)) {
+            if (JSON.stringify(withoutTickTimes([payload[group][index]])[0]) !== JSON.stringify(definition)) {
               payload[group][index] = definition;
               changed = true;
             }
@@ -1555,14 +1555,30 @@ async function writeMarketSettings(item) {
   });
 }
 
-function writeTicks(items) {
+// Frontend-visible timing of the tick that last changed a market: `providerTs` is the vendor's
+// tick time, `receivedAt` when this service received it. Neither counts as a market change.
+const TICK_TIME_FIELDS = ["providerTs", "receivedAt"];
+
+function withoutTickTimes(entries) {
+  return entries.map((entry) => {
+    const copy = { ...entry };
+    for (const field of TICK_TIME_FIELDS) delete copy[field];
+    return copy;
+  });
+}
+
+function isoTime(ms) {
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+function writeTicks(items, { receivedAtMs = Date.now() } = {}) {
   const first = (items || []).find((item) => item && typeof item === "object" && item.eid && item.mid);
   if (!first) return Promise.resolve({ payload: false, accepted: [], rejected: [] });
   // Include metadata reads in the lock so a tick cannot restore old bet limits.
-  return withEventLock(String(first.eid), () => writeEventTicks(items));
+  return withEventLock(String(first.eid), () => writeEventTicks(items, receivedAtMs));
 }
 
-async function writeEventTicks(items) {
+async function writeEventTicks(items, receivedAtMs = Date.now()) {
   const candidates = (items || []).filter((item) => item && typeof item === "object" && item.eid && item.mid);
   if (!candidates.length) return { payload: false, accepted: [], rejected: candidates };
   const redis = await getRedisClient();
@@ -1750,9 +1766,12 @@ async function writeEventTicks(items) {
       const marketChanged =
         movedFromOtherGroup ||
         previousEntries.length !== newEntries.length ||
-        JSON.stringify(previousEntries) !== JSON.stringify(newEntries);
+        JSON.stringify(withoutTickTimes(previousEntries)) !== JSON.stringify(newEntries);
       if (!marketChanged) continue;
       changed = true;
+      const providerTs = isoTime(providerTimeMs(item.t));
+      const receivedAt = isoTime(receivedAtMs);
+      for (const entry of newEntries) Object.assign(entry, { providerTs, receivedAt });
       // A market can change grouping as discovery metadata improves; keep exactly one copy.
       for (const payloadGroupName of PAYLOAD_GROUPS) {
         payload[payloadGroupName] = payload[payloadGroupName].filter(

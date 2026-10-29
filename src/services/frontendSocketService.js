@@ -76,12 +76,12 @@ function attachFrontendSocket(server) {
       if (validMarketId(normalized)) void client.leave(`admin:market:${normalized}`);
     });
   });
-  providerSocket.setTickPublisher((eventId, payload) => {
+  providerSocket.setTickPublisher((eventId, payload, receivedAtMs) => {
     if (eventId != null)
       io.to(`event:${eventId}`).emit("tick", {
         eventId: String(eventId),
         data: redis.frontendEventPayload(payload),
-        receivedAt: new Date().toISOString(),
+        receivedAt: new Date(receivedAtMs || Date.now()).toISOString(),
       });
   });
   providerSocket.setScorePublisher((eventId, payload, receivedAtMs) => {

@@ -279,7 +279,7 @@ async function persist(items, receivedAtMs = Date.now()) {
   const resultTicks = new Map();
   const writeStartedAt = Date.now();
   try {
-    const result = await redisStore.writeTicks(items);
+    const result = await redisStore.writeTicks(items, { receivedAtMs });
     const accepted = result.accepted || [];
     if (result.changed) state.persistedTickCount += accepted.length;
     else state.unchangedTickCount += accepted.length;
@@ -307,7 +307,7 @@ async function persist(items, receivedAtMs = Date.now()) {
       if (result.changed) {
         const eventId = String(accepted[0].eid);
         const emitStartedAt = Date.now();
-        tickPublisher(eventId, result.payload);
+        tickPublisher(eventId, result.payload, receivedAtMs);
         recordTraffic({
           forwardedEvents: 1,
           forwardedBytes: byteSize(result.payload),
