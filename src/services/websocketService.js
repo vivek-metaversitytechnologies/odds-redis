@@ -31,6 +31,19 @@ const marketSubscribedAt = new Map();
 const silenceHandledAt = new Map();
 let silenceTimer;
 let silenceSweep;
+const lateTickWarnedAt = new Map();
+const LATE_TICK_WARN_INTERVAL_MS = 60000;
+
+// Counts every late-tick suspension; warns at most once a minute per market.
+function noteLateSuspensions(eventId, suspended, now = Date.now()) {
+  if (!suspended?.length) return;
+  state.lateTickSuspensions += suspended.length;
+  for (const { marketId, group, lateMs } of suspended) {
+    if (now - (lateTickWarnedAt.get(marketId) ?? 0) < LATE_TICK_WARN_INTERVAL_MS) continue;
+    setBounded(lateTickWarnedAt, marketId, now, 50000);
+    logger.warn("[ProviderWS] late tick suspended market", { eventId, marketId, group, lateMs });
+  }
+}
 const scoreHashes = new Map();
 const pendingScores = new Map();
 let scoreFlushTimer;
@@ -54,6 +67,10 @@ const state = {
   persistedTickCount: 0,
   unchangedTickCount: 0,
   failedTickCount: 0,
+  // Markets suspended by the late-tick and silent-market rules (see redisStore).
+  lateTickSuspensions: 0,
+  silentMarketSuspensions: 0,
+  lastSilentSuspensionAt: null,
   lastTickAt: null,
   lastTickSummary: null,
 };
@@ -286,6 +303,7 @@ async function persist(items, receivedAtMs = Date.now()) {
   try {
     const result = await redisStore.writeTicks(items, { receivedAtMs });
     const accepted = result.accepted || [];
+    noteLateSuspensions(String(items[0]?.eid ?? ""), result.lateSuspended);
     if (result.changed) state.persistedTickCount += accepted.length;
     else state.unchangedTickCount += accepted.length;
     state.failedTickCount += (result.rejected || []).length;
@@ -633,7 +651,16 @@ function sweepSilentMarkets(now = Date.now()) {
     .suspendSilentMarkets([...silent.keys()])
     .then(({ updates, checked }) => {
       for (const id of checked) silenceHandledAt.set(id, silent.get(id));
-      for (const update of updates) tickPublisher(update.eventId, update.payload);
+      for (const update of updates) {
+        tickPublisher(update.eventId, update.payload);
+        state.silentMarketSuspensions += update.marketIds.length;
+        state.lastSilentSuspensionAt = new Date(now).toISOString();
+        logger.info("[ProviderWS] silent markets suspended", {
+          eventId: update.eventId,
+          marketIds: update.marketIds,
+          silentForMs: update.marketIds.map((id) => now - silent.get(id)),
+        });
+      }
       return updates;
     })
     .catch((error) => {

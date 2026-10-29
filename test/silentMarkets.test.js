@@ -117,8 +117,10 @@ test("an in-play Odds market silent past 10s is suspended once and pushed to fro
 
   assert.deepEqual(await websocket.sweepSilentMarkets(now + 5000), []);
 
+  const before = websocket.getSocketStatus().silentMarketSuspensions;
   const updates = await websocket.sweepSilentMarkets(now + 11000);
   assert.deepEqual(updates.map((update) => [update.eventId, update.marketIds]), [[String(LIVE), [ODDS]]]);
+  assert.equal(websocket.getSocketStatus().silentMarketSuspensions, before + 1);
   assert.equal(published.length, 1);
   const live = await snapshot(LIVE);
   const market = live.Odds.find((entry) => entry.marketId === ODDS);

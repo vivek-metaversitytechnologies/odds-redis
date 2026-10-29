@@ -112,8 +112,11 @@ const find = (result, group, mid) => result.payload?.[group]?.filter((item) => (
 
 test("a tick delivered more than 10s late suspends its market until an on-time tick", async (t) => {
   setup(t);
-  const late = find(await lateTick(odds(), 10001), "Odds", MID)[0];
+  const result = await lateTick(odds(), 10001);
+  const late = find(result, "Odds", MID)[0];
   assert.equal(late.status, "SUSPENDED");
+  // Reported so the socket service can count and log it.
+  assert.deepEqual(result.lateSuspended, [{ marketId: MID, group: "Odds", lateMs: 10001 }]);
   assert.deepEqual(late.runners.map((r) => r.status), ["SUSPENDED", "SUSPENDED"]);
   // Exactly 10s is still on time.
   assert.equal(find(await lateTick(odds(), 10000), "Odds", MID)[0].status, "OPEN");

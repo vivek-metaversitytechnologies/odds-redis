@@ -1804,6 +1804,7 @@ async function writeEventTicks(items, receivedAtMs = Date.now()) {
       .filter(({ item, market }) => payloadGroup(item, market) === "Odds")
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
+  const lateSuspended = [];
   const { payload, changed, serialized } = await (async () => {
     const payload = await loadEventPayload(redis, eventId, key);
     let changed = false;
@@ -1828,9 +1829,11 @@ async function writeEventTicks(items, receivedAtMs = Date.now()) {
         preserveLineStatus(entries, previousEntries);
       }
       if (isLateTick(item, receivedAtMs) && suspendLateTick(item, entries)) {
+        const lateMs = receivedAtMs - providerTimeMs(item.t);
+        lateSuspended.push({ marketId, group, lateMs });
         marketTrace.traceThrottled(
           "tick.late",
-          { eventId, marketId, group, providerTs: item.t ?? null, lateMs: receivedAtMs - providerTimeMs(item.t) },
+          { eventId, marketId, group, providerTs: item.t ?? null, lateMs },
           "late",
           traceHint(group, market),
         );
@@ -1908,6 +1911,7 @@ async function writeEventTicks(items, receivedAtMs = Date.now()) {
     rejected,
     changed,
     persistedBytes: changed ? Buffer.byteLength(serialized) : 0,
+    lateSuspended,
   };
 }
 
