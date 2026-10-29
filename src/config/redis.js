@@ -22,6 +22,7 @@ const runnerNameLoads = new Map();
 const eventPayloadCache = new Map();
 const publicEventMetadata = new Map();
 const tickActivity = new Map();
+const lastTickAt = new Map();
 const eventLocks = new Map();
 const eventMetadataLocks = new Map();
 const CACHE_LIMIT = integer("REDIS_MEMORY_CACHE_LIMIT", 50000, { min: 1000 });
@@ -1571,6 +1572,127 @@ function isoTime(ms) {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
+// A tick received more than TICK_LATE_SUSPEND_MS after the vendor's tick time carries stale
+// prices, so its market is shown SUSPENDED until an on-time tick reopens it. 0 disables.
+function isLateTick(item, receivedAtMs) {
+  const limitMs = integer("TICK_LATE_SUSPEND_MS", 10000, { min: 0 });
+  const providerMs = providerTimeMs(item.t);
+  return limitMs > 0 && providerMs != null && receivedAtMs - providerMs > limitMs;
+}
+
+// Marks one market's payload entries SUSPENDED; returns whether anything changed. A finished
+// (CLOSED, such as a settled Match Odds) or not-yet-priced (WAITING) market keeps its state.
+function suspendEntries(entries) {
+  const state = (entry) => String(entry.gstatus ?? entry.status ?? "").toUpperCase();
+  if (!entries.length || entries.some((entry) => ["CLOSED", "WAITING"].includes(state(entry)))) return false;
+  let changed = false;
+  for (const entry of entries) {
+    if ("gstatus" in entry) {
+      if (entry.gstatus !== "SUSPENDED") changed = true;
+      entry.gstatus = "SUSPENDED";
+      continue;
+    }
+    if (entry.status !== "SUSPENDED") changed = true;
+    entry.status = "SUSPENDED";
+    for (const runner of entry.runners || []) {
+      if (runner.status !== "SUSPENDED") changed = true;
+      runner.status = "SUSPENDED";
+    }
+  }
+  return changed;
+}
+
+function suspendLateTick(item, entries) {
+  return !booleanOr(item.go, false) && suspendEntries(entries);
+}
+
+async function loadEventPayload(redis, eventId, key) {
+  const cached = eventPayloadCache.get(eventId);
+  if (cached) return cached;
+  const current = await redis.get(key);
+  if (current) {
+    try {
+      const parsed = JSON.parse(current);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return normalizeEventPayload(parsed);
+    } catch {
+      /* Replace malformed legacy data with a valid event payload. */
+    }
+  }
+  return emptyEventPayload();
+}
+
+// Writes the event payload and its active-match projection together.
+async function persistEventPayload(redis, eventId, key, payload) {
+  const serialized = JSON.stringify(payload);
+  const event = publicEventMetadata.get(eventId);
+  const transaction = redis.multi().set(key, serialized, { EX: EVENT_TTL_SECONDS });
+  if (event) {
+    const entry = activeMatchProjection(event, payload);
+    if (entry) transaction.hSet(activeMatchKey(event.sportId), eventId, JSON.stringify(entry));
+    else transaction.hDel(activeMatchKey(event.sportId), eventId);
+    transaction.expire(activeMatchKey(event.sportId), ACTIVE_MATCH_TTL_SECONDS);
+  }
+  await transaction.exec();
+  return serialized;
+}
+
+function silenceSuspendGroups() {
+  return new Set(
+    String(process.env.TICK_SILENCE_SUSPEND_GROUPS ?? "Odds,Bookmaker")
+      .split(",")
+      .map((group) => group.trim())
+      .filter((group) => PAYLOAD_GROUPS.includes(group)),
+  );
+}
+
+// Suspends the given markets (already silent past TICK_SILENCE_SUSPEND_MS) in in-play events,
+// one write per event. Returns the changed payloads for publishing and the markets checked.
+// Pre-match markets can legitimately go quiet, so they are left alone (and not reported as
+// checked, so they are looked at again once in play). The next tick reopens a suspended market.
+async function suspendSilentMarkets(marketIds) {
+  const none = { updates: [], checked: [] };
+  const groups = silenceSuspendGroups();
+  if (!groups.size || !marketIds?.length) return none;
+  const redis = await getRedisClient();
+  if (!redis?.isOpen) return none;
+  const markets = await findMarkets(marketIds);
+  const byEvent = new Map();
+  for (const [marketId, market] of markets) {
+    const eventId = String(market?.eventid ?? "");
+    if (!eventId || publicEventMetadata.get(eventId)?.inPlay !== true) continue;
+    if (!byEvent.has(eventId)) byEvent.set(eventId, new Set());
+    byEvent.get(eventId).add(marketId);
+  }
+  const prefix = process.env.REDIS_TICK_KEY_PREFIX || "Data-Rs:";
+  const updates = [];
+  for (const [eventId, ids] of byEvent) {
+    const update = await withEventLock(eventId, async () => {
+      const key = `${prefix}${eventId}`;
+      const payload = await loadEventPayload(redis, eventId, key);
+      const suspended = [];
+      for (const group of groups) {
+        for (const marketId of ids) {
+          const entries = payload[group].filter((entry) => entryMarketId(entry) === marketId);
+          if (suspendEntries(entries)) suspended.push({ marketId, group });
+        }
+      }
+      if (!suspended.length) return null;
+      await persistEventPayload(redis, eventId, key, payload);
+      setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
+      for (const { marketId, group } of suspended) {
+        marketTrace.trace("tick.silent", { eventId, marketId, group, lastTickAt: isoTime(lastTickAt.get(marketId)) }, { group });
+      }
+      return { eventId, payload, marketIds: suspended.map(({ marketId }) => marketId) };
+    });
+    if (update) updates.push(update);
+  }
+  return { updates, checked: [...byEvent.values()].flatMap((ids) => [...ids]) };
+}
+
+function getLastTickMs(marketId) {
+  return lastTickAt.get(String(marketId)) ?? null;
+}
+
 function writeTicks(items, { receivedAtMs = Date.now() } = {}) {
   const first = (items || []).find((item) => item && typeof item === "object" && item.eid && item.mid);
   if (!first) return Promise.resolve({ payload: false, accepted: [], rejected: [] });
@@ -1683,21 +1805,7 @@ async function writeEventTicks(items, receivedAtMs = Date.now()) {
       .map(({ item }) => loadRunnerNames(item.mid)),
   );
   const { payload, changed, serialized } = await (async () => {
-    let payload = eventPayloadCache.get(eventId);
-    if (!payload) {
-      payload = emptyEventPayload();
-      const current = await redis.get(key);
-      if (current) {
-        try {
-          const parsed = JSON.parse(current);
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-            payload = normalizeEventPayload(parsed);
-          }
-        } catch {
-          /* Replace malformed legacy data with a valid event payload. */
-        }
-      }
-    }
+    const payload = await loadEventPayload(redis, eventId, key);
     let changed = false;
     for (const { item, market } of acceptedRows) {
       const { group, entries } = transformedTick(item, market);
@@ -1718,6 +1826,14 @@ async function writeEventTicks(items, receivedAtMs = Date.now()) {
       // resubscribe snapshot carries none and would otherwise reopen it with ACTIVE runners.
       if (group === "Odds" && !hasLineStatus(item) && previousEntries.some(isSettledMatchOdds)) {
         preserveLineStatus(entries, previousEntries);
+      }
+      if (isLateTick(item, receivedAtMs) && suspendLateTick(item, entries)) {
+        marketTrace.traceThrottled(
+          "tick.late",
+          { eventId, marketId, group, providerTs: item.t ?? null, lateMs: receivedAtMs - providerTimeMs(item.t) },
+          "late",
+          traceHint(group, market),
+        );
       }
       const removeFromPayload = shouldRemoveFromPayload(group, item, market);
       const blockedBallByBall = group === "BallByBall" && terminalBallByBallIds.has(marketId) && !removeFromPayload;
@@ -1781,18 +1897,7 @@ async function writeEventTicks(items, receivedAtMs = Date.now()) {
       if (newEntries.length) payload[group].push(...newEntries);
     }
     moveTiedMatchLast(payload);
-    const serialized = changed ? JSON.stringify(payload) : null;
-    if (changed) {
-      const event = publicEventMetadata.get(eventId);
-      const transaction = redis.multi().set(key, serialized, { EX: EVENT_TTL_SECONDS });
-      if (event) {
-        const entry = activeMatchProjection(event, payload);
-        if (entry) transaction.hSet(activeMatchKey(event.sportId), eventId, JSON.stringify(entry));
-        else transaction.hDel(activeMatchKey(event.sportId), eventId);
-        transaction.expire(activeMatchKey(event.sportId), ACTIVE_MATCH_TTL_SECONDS);
-      }
-      await transaction.exec();
-    }
+    const serialized = changed ? await persistEventPayload(redis, eventId, key, payload) : null;
     setBounded(eventPayloadCache, eventId, payload, CACHE_LIMIT);
     return { payload, changed, serialized };
   })();
@@ -1816,6 +1921,7 @@ function invalidateMarkets(marketIds) {
 }
 
 function recordTickActivity(key, eventId, marketId) {
+  setBounded(lastTickAt, String(marketId), Date.now(), CACHE_LIMIT);
   const previous = tickActivity.get(key);
   setBounded(
     tickActivity,
@@ -1905,6 +2011,7 @@ function clearTickActivity(marketIds) {
   for (const [key, activity] of tickActivity) {
     if (ids.has(activity.marketId)) tickActivity.delete(key);
   }
+  for (const id of ids) lastTickAt.delete(id);
 }
 
 async function getEventSnapshot(eventId) {
@@ -2060,6 +2167,8 @@ module.exports = {
   getRedisReadClient,
   writeTick,
   writeTicks,
+  suspendSilentMarkets,
+  getLastTickMs,
   writeMarketSettings,
   writeScore,
   getScore,
@@ -2115,6 +2224,9 @@ module.exports = {
     primeMarketCache(entries) {
       for (const [id, market] of entries) marketCache.set(String(id), market);
     },
+    primeEventMetadata(events) {
+      for (const event of events) publicEventMetadata.set(String(event.eventId), event);
+    },
     reset() {
       client = undefined;
       readClient = undefined;
@@ -2123,6 +2235,9 @@ module.exports = {
       runnerNameLoads.clear();
       eventPayloadCache.clear();
       eventLocks.clear();
+      publicEventMetadata.clear();
+      tickActivity.clear();
+      lastTickAt.clear();
     },
 
   },

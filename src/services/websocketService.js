@@ -26,6 +26,11 @@ const loggedShapes = new Set();
 const rawSocketActivity = [];
 const subscribedMarketIds = new Set();
 const marketSubscribedAt = new Map();
+// Per market, the last-tick time whose silence was already handled, so a dead market is looked
+// at once per silence rather than on every sweep.
+const silenceHandledAt = new Map();
+let silenceTimer;
+let silenceSweep;
 const scoreHashes = new Map();
 const pendingScores = new Map();
 let scoreFlushTimer;
@@ -451,6 +456,7 @@ function trackedApplyMarketSettings(item) {
 
 function connectSocket() {
   state.connectionRequested = true;
+  startSilenceSweep();
   if (socket) {
     if (!socket.connected && !socket.active) socket.connect();
     return socket;
@@ -602,11 +608,51 @@ function unsubscribeMarkets(ids) {
         .filter(redisStore.validMarketIdentifier),
     ),
   ].filter((id) => subscribedMarketIds.delete(id));
-  removed.forEach((id) => marketSubscribedAt.delete(id));
+  removed.forEach((id) => {
+    marketSubscribedAt.delete(id);
+    silenceHandledAt.delete(id);
+  });
   redisStore.clearTickActivity(removed);
   if (!removed.length) return [];
   if (socket?.connected) socket.emit("unsubscribe", removed);
   return removed;
+}
+
+// A subscribed market with no tick for TICK_SILENCE_SUSPEND_MS (counted from its subscription
+// when it has not ticked since) is suspended and pushed to frontends. 0 disables.
+function sweepSilentMarkets(now = Date.now()) {
+  const limitMs = integer("TICK_SILENCE_SUSPEND_MS", 10000, { min: 0 });
+  if (!limitMs || silenceSweep) return silenceSweep ?? Promise.resolve([]);
+  const silent = new Map();
+  for (const id of subscribedMarketIds) {
+    const lastMs = Math.max(redisStore.getLastTickMs(id) ?? 0, marketSubscribedAt.get(id) ?? 0);
+    if (now - lastMs > limitMs && silenceHandledAt.get(id) !== lastMs) silent.set(id, lastMs);
+  }
+  if (!silent.size) return Promise.resolve([]);
+  silenceSweep = redisStore
+    .suspendSilentMarkets([...silent.keys()])
+    .then(({ updates, checked }) => {
+      for (const id of checked) silenceHandledAt.set(id, silent.get(id));
+      for (const update of updates) tickPublisher(update.eventId, update.payload);
+      return updates;
+    })
+    .catch((error) => {
+      logger.error("[ProviderWS] silent-market suspension failed", { markets: silent.size, error: error.message });
+      return [];
+    })
+    .finally(() => {
+      silenceSweep = undefined;
+    });
+  return silenceSweep;
+}
+
+function startSilenceSweep() {
+  if (silenceTimer) return;
+  silenceTimer = setInterval(
+    () => void sweepSilentMarkets(),
+    integer("TICK_SILENCE_SWEEP_MS", 2000, { min: 500 }),
+  );
+  silenceTimer.unref?.();
 }
 
 function reconnectSocket() {
@@ -619,6 +665,9 @@ function reconnectSocket() {
 
 async function stopSocket() {
   state.connectionRequested = false;
+  if (silenceTimer) clearInterval(silenceTimer);
+  silenceTimer = undefined;
+  if (silenceSweep) await silenceSweep;
   if (socket) {
     socket.disconnect();
     socket = undefined;
@@ -664,6 +713,7 @@ module.exports = {
   stopSocket,
   getSocketStatus,
   reconnectSocket,
+  sweepSilentMarkets,
   applyMarketSettings: trackedApplyMarketSettings,
   getSubscribedMarketIds: () => [...subscribedMarketIds],
   getMarketSubscribedAt: (marketId) => marketSubscribedAt.get(String(marketId)) || null,
