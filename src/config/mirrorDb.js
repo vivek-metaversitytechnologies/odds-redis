@@ -130,7 +130,30 @@ async function pushEntry(entry) {
     await redis.lTrim(key, -max, -1);
     stats.dropped += length - max;
     logger.error("[Mirror] outbox full; oldest entries dropped", { dropped: length - max, max });
+    return;
   }
+  await capOutboxBytes(redis, key, length);
+}
+
+// The outbox shares Redis with the live odds data. Unbounded during a mirror outage, it filled
+// the instance, Redis evicted the odds keys and refused every write. Kept under a byte budget,
+// an outage costs the mirror its oldest writes instead.
+async function capOutboxBytes(redis, key, length) {
+  const maxBytes = integer("MIRROR_OUTBOX_MAX_BYTES", 5 * 1024 * 1024, { min: 0 });
+  if (!maxBytes) return;
+  let bytes;
+  try {
+    // Estimated from a sample of elements, so this stays cheap on a long list.
+    bytes = await redis.memoryUsage(key);
+  } catch {
+    return;
+  }
+  if (!bytes || bytes <= maxBytes) return;
+  const dropped = length - Math.floor((length * maxBytes) / bytes);
+  if (dropped <= 0) return;
+  await redis.lTrim(key, dropped, -1);
+  stats.dropped += dropped;
+  logger.error("[Mirror] outbox over its byte budget; oldest entries dropped", { dropped, bytes, maxBytes });
 }
 
 function capture(state, sql, values) {

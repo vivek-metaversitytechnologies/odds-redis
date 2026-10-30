@@ -36,6 +36,9 @@ function fakeRedis() {
     async lLen(key) {
       return list(key).length;
     },
+    async memoryUsage(key) {
+      return lists.has(key) ? list(key).reduce((bytes, raw) => bytes + raw.length, 0) : null;
+    },
     async get(key) {
       return strings.get(key) ?? null;
     },
@@ -268,4 +271,26 @@ test("the worker applies a backlog in one transaction with few round trips", asy
     queries[0].split(";\n"),
     Array.from({ length: 50 }, (_, index) => [`S${index}a`, `S${index}b`]).flat(),
   );
+});
+
+test("the outbox drops its oldest entries once it grows past its byte budget", async (t) => {
+  const client = fakeRedis();
+  t.mock.method(redis, "getRedisClient", async () => client);
+  process.env.MIRROR_OUTBOX_MAX_BYTES = "1000";
+  t.after(() => delete process.env.MIRROR_OUTBOX_MAX_BYTES);
+  const pool = mirror.wrapPool(fakeSource([]));
+  const write = (index) => pool.query("UPDATE t_market SET marketname=? WHERE marketid=?", ["x".repeat(150), `1.${index}`]);
+  for (let index = 1; index <= 10; index += 1) await write(index);
+  await mirror.flushRecording();
+
+  const raws = [...client.lists.get(mirror.outboxKey())];
+  assert.ok(raws.reduce((bytes, raw) => bytes + raw.length, 0) <= 1000);
+  // The newest writes are the ones kept.
+  assert.match(JSON.parse(raws.at(-1)).sql[0], /marketid='1\.10'/);
+  assert.ok(raws.length < 10 && raws.length > 0);
+
+  process.env.MIRROR_OUTBOX_MAX_BYTES = "0";
+  await write(11);
+  await write(12);
+  assert.equal((await outbox(client)).length, raws.length + 2, "0 disables the byte cap");
 });
