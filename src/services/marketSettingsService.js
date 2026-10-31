@@ -13,6 +13,13 @@ const fetched = new Map();
 const inFlight = new Set();
 const roomUpdated = new Map();
 const pendingRetries = new Set();
+// The provider omits settled and withdrawn markets from settings responses for good. Retried
+// every few seconds forever, they became a steady stream of wasted requests, so a market
+// omitted repeatedly is set aside for a while, as the limits poll does.
+const omissions = new Map();
+const omittedUntil = new Map();
+const OMIT_LIMIT = 3;
+const OMITTED_BACKOFF_MS = 10 * 60 * 1000;
 let retryTimer;
 let retryPromise;
 let retryApply;
@@ -60,6 +67,34 @@ function retryDelayMs() {
   return integer("MARKET_SETTINGS_RETRY_MS", 5000, { min: 100, max: 300000 });
 }
 
+function noteOmitted(id) {
+  const count = (omissions.get(id) || 0) + 1;
+  if (count < OMIT_LIMIT) {
+    setBounded(omissions, id, count, TRACK_LIMIT);
+    pendingRetries.add(id);
+    return;
+  }
+  omissions.delete(id);
+  pendingRetries.delete(id);
+  setBounded(omittedUntil, id, Date.now() + OMITTED_BACKOFF_MS, TRACK_LIMIT);
+}
+
+function settled(id) {
+  omissions.delete(id);
+  omittedUntil.delete(id);
+  pendingRetries.delete(id);
+}
+
+// Unsubscribed markets need no settings; their retries stop with the subscription.
+function forgetMarkets(ids) {
+  for (const value of ids || []) {
+    const id = String(value);
+    omissions.delete(id);
+    omittedUntil.delete(id);
+    pendingRetries.delete(id);
+  }
+}
+
 function scheduleRetry(apply) {
   if (retriesStopped || retryTimer || retryPromise || !pendingRetries.size) return;
   retryApply = apply || retryApply;
@@ -83,6 +118,7 @@ function queueRefresh(ids, apply) {
     if (!redisStore.validMarketIdentifier(id)) continue;
     fetched.delete(id);
     roomUpdated.delete(id);
+    omittedUntil.delete(id);
     pendingRetries.add(id);
   }
   scheduleRetry(apply);
@@ -91,7 +127,9 @@ function queueRefresh(ids, apply) {
 async function loadInitialSettings(ids, apply, { force = false } = {}) {
   const wanted = [
     ...new Set((ids || []).map((id) => String(id).trim()).filter(redisStore.validMarketIdentifier)),
-  ].filter((id) => (force || !fetched.has(id)) && !inFlight.has(id));
+  ].filter(
+    (id) => (force || !fetched.has(id)) && !inFlight.has(id) && !(omittedUntil.get(id) > Date.now()),
+  );
   if (!wanted.length) return { requested: 0, applied: 0, failed: 0 };
   wanted.forEach((id) => inFlight.add(id));
   let applied = 0;
@@ -121,7 +159,7 @@ async function loadInitialSettings(ids, apply, { force = false } = {}) {
         if (roomUpdated.has(item.mid)) {
           completed.add(item.mid);
           setBounded(fetched, item.mid, true, TRACK_LIMIT);
-          pendingRetries.delete(item.mid);
+          settled(item.mid);
           continue;
         }
         try {
@@ -130,7 +168,7 @@ async function loadInitialSettings(ids, apply, { force = false } = {}) {
           applied += 1;
           completed.add(item.mid);
           setBounded(fetched, item.mid, true, TRACK_LIMIT);
-          pendingRetries.delete(item.mid);
+          settled(item.mid);
           if (recovering) writeMarketLimitsOutcome("RECOVERED", item);
         } catch (error) {
           failed += 1;
@@ -144,7 +182,7 @@ async function loadInitialSettings(ids, apply, { force = false } = {}) {
       for (const id of batch) {
         if (completed.has(id) || responded.has(id)) continue;
         failed += 1;
-        pendingRetries.add(id);
+        noteOmitted(id);
         logger.warn("[MarketSettings] provider response omitted usable settings", { marketId: id });
       }
     } catch (error) {
@@ -185,6 +223,7 @@ module.exports = {
   SETTINGS_MAX_IDS_PER_REQUEST,
   loadInitialSettings,
   noteRoomUpdate,
+  forgetMarkets,
   queueRefresh,
   refreshSettings,
   responseItems,
@@ -201,6 +240,8 @@ module.exports = {
       inFlight.clear();
       roomUpdated.clear();
       pendingRetries.clear();
+      omissions.clear();
+      omittedUntil.clear();
     },
     pendingRetries,
   },

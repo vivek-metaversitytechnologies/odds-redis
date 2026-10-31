@@ -631,6 +631,7 @@ function unsubscribeMarkets(ids) {
     silenceHandledAt.delete(id);
   });
   redisStore.clearTickActivity(removed);
+  marketSettings.forgetMarkets(removed);
   if (!removed.length) return [];
   if (socket?.connected) socket.emit("unsubscribe", removed);
   return removed;

@@ -154,3 +154,46 @@ test("the real provider response shape (flat items under data) is applied with i
   assert.equal(applied[0].mid, "4.206215583029-F2");
   assert.deepEqual(providerLimits(applied[0].settings), { providerMaxBet: 25000 });
 });
+
+test("a market the provider keeps omitting is set aside instead of retried forever", async (t) => {
+  const fetch = t.mock.method(provider, "marketSettings", async () => []);
+  const apply = async () => {};
+  const { pendingRetries } = marketSettings.__testing__;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await marketSettings.loadInitialSettings(["4.gone-F2"], apply, { force: true });
+    assert.ok(pendingRetries.has("4.gone-F2"), `still retried after omission ${attempt}`);
+  }
+  await marketSettings.loadInitialSettings(["4.gone-F2"], apply, { force: true });
+  assert.equal(pendingRetries.has("4.gone-F2"), false);
+
+  // Set aside: neither a retry nor a reconnect refresh asks for it again.
+  assert.equal((await marketSettings.loadInitialSettings(["4.gone-F2"], apply, { force: true })).requested, 0);
+  assert.equal((await marketSettings.refreshSettings(["4.gone-F2"], apply)).requested, 0);
+  assert.equal(fetch.mock.callCount(), 3);
+});
+
+test("a market omitted once and then answered starts its omission count afresh", async (t) => {
+  let answer = false;
+  t.mock.method(provider, "marketSettings", async (mids) =>
+    answer ? mids.map((mid) => ({ eid: 5, mid, settings: { ms: 1, mas: 2 } })) : [],
+  );
+  const apply = async () => {};
+  const { pendingRetries } = marketSettings.__testing__;
+  await marketSettings.loadInitialSettings(["1.flaky"], apply, { force: true });
+  await marketSettings.loadInitialSettings(["1.flaky"], apply, { force: true });
+  answer = true;
+  await marketSettings.loadInitialSettings(["1.flaky"], apply, { force: true });
+  answer = false;
+  await marketSettings.loadInitialSettings(["1.flaky"], apply, { force: true });
+  await marketSettings.loadInitialSettings(["1.flaky"], apply, { force: true });
+  assert.ok(pendingRetries.has("1.flaky"));
+});
+
+test("unsubscribed markets stop being retried", async (t) => {
+  t.mock.method(provider, "marketSettings", async () => []);
+  await marketSettings.loadInitialSettings(["1.left"], async () => {});
+  assert.ok(marketSettings.__testing__.pendingRetries.has("1.left"));
+  marketSettings.forgetMarkets(["1.left"]);
+  assert.equal(marketSettings.__testing__.pendingRetries.has("1.left"), false);
+});

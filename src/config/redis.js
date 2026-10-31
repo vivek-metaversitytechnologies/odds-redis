@@ -19,6 +19,9 @@ let readConnecting;
 const marketCache = new Map();
 const runnerNameCache = new Map();
 const runnerNameLoads = new Map();
+// Markets whose runner names neither the database nor the provider had, with when to ask again.
+const runnerNameMisses = new Map();
+const RUNNER_NAME_MISS_MS = 60000;
 const eventPayloadCache = new Map();
 const publicEventMetadata = new Map();
 const tickActivity = new Map();
@@ -1419,6 +1422,10 @@ async function loadRunnerNames(marketId) {
   const normalized = String(marketId);
   if (runnerNameCache.has(normalized)) return runnerNameCache.get(normalized);
   if (runnerNameLoads.has(normalized)) return runnerNameLoads.get(normalized);
+  if (runnerNameMisses.get(normalized) > Date.now()) return new Map();
+  // Every Odds tick asks for its market's names, so a miss is remembered for a while instead of
+  // costing a database query and a provider request per tick.
+  const noteMiss = () => setBounded(runnerNameMisses, normalized, Date.now() + RUNNER_NAME_MISS_MS, CACHE_LIMIT);
   const loading = getSourcePool()
     .query(
       `SELECT selectionid,runner_name FROM t_selectionid
@@ -1435,7 +1442,7 @@ async function loadRunnerNames(marketId) {
       });
       return new Map();
     })
-    .then((storedNames) => storedNames.size ? storedNames : provider.runners(normalized).then((response) => {
+    .then((storedNames) => storedNames.size ? storedNames : provider.runners(normalized, { source: "runner-names" }).then((response) => {
       const rows = Array.isArray(response?.data) ? response.data : Array.isArray(response) ? response : [];
       return new Map(
         rows
@@ -1447,13 +1454,19 @@ async function loadRunnerNames(marketId) {
       );
     }))
     .then((names) => {
-      // Do not cache an empty response: the provider may expose prices before its
-      // runner metadata endpoint is ready. A later tick must be allowed to retry.
-      if (names.size) setBounded(runnerNameCache, normalized, names, CACHE_LIMIT);
+      // An empty response is not cached as the names: the provider may expose prices before
+      // its runner metadata endpoint is ready, so a tick after the miss window retries.
+      if (names.size) {
+        setBounded(runnerNameCache, normalized, names, CACHE_LIMIT);
+        runnerNameMisses.delete(normalized);
+      } else {
+        noteMiss();
+      }
       return names;
     })
     .catch((error) => {
       logger.warn("[Redis] runner metadata lookup failed", { marketId: normalized, error: error.message });
+      noteMiss();
       return new Map();
     })
     .finally(() => runnerNameLoads.delete(normalized));
@@ -2237,6 +2250,7 @@ module.exports = {
       marketCache.clear();
       runnerNameCache.clear();
       runnerNameLoads.clear();
+      runnerNameMisses.clear();
       eventPayloadCache.clear();
       eventLocks.clear();
       publicEventMetadata.clear();
