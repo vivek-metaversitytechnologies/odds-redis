@@ -2,6 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const mysql = require("mysql2/promise");
+const { boolean } = require("../src/config/env");
 
 require("dotenv").config({ quiet: true });
 
@@ -28,6 +29,7 @@ function databaseConfig(prefix = "SOURCE_DB") {
     password: env("PASSWORD"),
     database: env("DATABASE") || env("NAME"),
     multipleStatements: true,
+    ...(boolean(`${prefix}_SSL`, false) ? { ssl: { rejectUnauthorized: true } } : {}),
   };
   const missing = Object.entries(config)
     .filter(([key, value]) => !["password", "multipleStatements"].includes(key) && !value)

@@ -76,6 +76,8 @@ function getMirrorPool() {
     multipleStatements: true,
     dateStrings: true,
     typeCast: mysqlTypeCast,
+    // A mirror reached over the internet (e.g. Azure Database for MySQL) should be encrypted.
+    ...(boolean("MIRROR_DB_SSL", false) ? { ssl: { rejectUnauthorized: true } } : {}),
   });
   return pool;
 }
