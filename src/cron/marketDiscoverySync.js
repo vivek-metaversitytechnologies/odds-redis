@@ -531,6 +531,7 @@ async function upsertFancies(fancies) {
               fancy.maxBet,
             ];
           });
+          // As for t_market: remarks are only replaced by another message, never cleared by a null.
           await connection.query(
             `INSERT INTO t_matchfancy
               (fancyid,name,oddstype,status,maxliabilityper_market,betdelay,minbet,maxbet,eventid,
@@ -539,11 +540,11 @@ async function upsertFancies(fancies) {
              ON DUPLICATE KEY UPDATE
                updatedon=IF(
                  NOT (status <=> VALUES(status)) OR NOT (isplay <=> VALUES(isplay)) OR
-                 NOT (remarks <=> VALUES(remarks)),
+                 NOT (remarks <=> COALESCE(VALUES(remarks),remarks)),
                  NOW(),updatedon
                ),
                name=IF(VALUES(mtype)='ball-by-ball' AND VALUES(name) REGEXP '^[0-9]+([.][0-9]+)? ',VALUES(name),name),
-               status=VALUES(status),isplay=VALUES(isplay),remarks=VALUES(remarks)`,
+               status=VALUES(status),isplay=VALUES(isplay),remarks=COALESCE(VALUES(remarks),remarks)`,
             [values],
           );
           await connection.commit();
@@ -670,6 +671,7 @@ async function upsertMarkets(markets) {
         false,
         market.seriesId,
       ]);
+      // A stored display message is only replaced by another message, never cleared by a null.
       await connection.query(
         `INSERT INTO t_market
           (marketid,sportid,eventid,marketname,matchname,status,isactive,createdon,updatedon,opendate,
@@ -681,7 +683,7 @@ async function upsertMarkets(markets) {
            opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
            seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
            status=VALUES(status),isactive=VALUES(isactive),betdelay=VALUES(betdelay),
-           display_message=VALUES(display_message),updatedon=NOW()`,
+           display_message=COALESCE(VALUES(display_message),display_message),updatedon=NOW()`,
         [values],
       );
     }
