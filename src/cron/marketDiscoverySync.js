@@ -371,7 +371,9 @@ function marketRows(response, eventsById) {
         isActive: item?.isActive !== false,
         status: vendorMarketStatus(item),
         providerTimestamp: item?.updatedAt ?? item?.t ?? null,
-        betDelay: marketType === "line-market" ? 5 : bookmaker || fancy ? 0 : 3,
+        // Default for a new market only: Bookmaker and Bookmaker2 take no delay, everything else 2s.
+        // Rediscovery never rewrites it, so an admin's change sticks.
+        betDelay: bookmaker ? 0 : 2,
         minBet: 100,
         maxBet: fancy ? 100000 : bookmaker ? 25000 : 10000,
         ballLine: marketType === "ball-by-ball" && ballLine ? Number(ballLine) : null,
@@ -682,7 +684,7 @@ async function upsertMarkets(markets) {
            matchname=VALUES(matchname),
            opendate=VALUES(opendate),sportid=VALUES(sportid),eventid=VALUES(eventid),
            seriesid=VALUES(seriesid),inplay=IF(inplay=1,1,VALUES(inplay)),
-           status=VALUES(status),isactive=VALUES(isactive),betdelay=VALUES(betdelay),
+           status=VALUES(status),isactive=VALUES(isactive),
            display_message=COALESCE(VALUES(display_message),display_message),updatedon=NOW()`,
         [values],
       );

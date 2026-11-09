@@ -1298,7 +1298,7 @@ test("market discovery maps active unfinished markets with Java betting defaults
     rows.filter((row) => row.isActive).map((row) => [row.marketName, row.maxBet, row.betDelay]),
     [
       ["Bookmaker", 25000, 0],
-      ["Match Odds", 10000, 3],
+      ["Match Odds", 10000, 2],
     ],
   );
   assert.equal(rows.find((row) => row.marketName === "Closed")?.isActive, false);
@@ -1385,7 +1385,7 @@ test("explicitly inactive line markets remain in discovery for deactivation", ()
   assert.equal(rows.length, 1);
   assert.equal(rows[0].isActive, false);
   assert.equal(rows[0].marketType, "line-market");
-  assert.equal(rows[0].betDelay, 5);
+  assert.equal(rows[0].betDelay, 2);
 });
 
 test("inactive line markets are selected for immediate reconciliation", () => {
@@ -1429,7 +1429,7 @@ test("fancy discovery uses Java-compatible betting limits", () => {
   );
   assert.equal(row.minBet, 100);
   assert.equal(row.maxBet, 100000);
-  assert.equal(row.betDelay, 0);
+  assert.equal(row.betDelay, 2);
 });
 
 test("market discovery keeps vendor status independent from active and game-over flags", () => {
@@ -1484,6 +1484,15 @@ test("fancy rediscovery updates only vendor-owned mutable columns", () => {
   assert.match(duplicateClause, /VALUES\(name\),name\)/);
   assert.match(duplicateClause, /updatedon=IF\(/);
   assert.doesNotMatch(duplicateClause, /updatedon=NOW\(\)/);
+});
+
+test("market rediscovery keeps the stored bet delay", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../src/cron/marketDiscoverySync.js"), "utf8");
+  const duplicateClause = source.match(
+    /INSERT INTO t_market\b[\s\S]*?ON DUPLICATE KEY UPDATE([\s\S]*?)`,\n\s*\[values\]/,
+  )?.[1];
+  assert.ok(duplicateClause);
+  assert.doesNotMatch(duplicateClause, /betdelay/);
 });
 
 test("generic fancy names are identified", () => {
