@@ -29,7 +29,7 @@ const NATURAL_KEYS = {
   t_matchabondendtie: ["marketid"],
 };
 // Unique keys the service's ON DUPLICATE KEY upserts need on the mirror.
-const REQUIRED_UNIQUE = { t_selectionid: ["selectionid", "marketid"] };
+const REQUIRED_UNIQUE = { t_selectionid: ["selectionid", "marketid"], t_series: ["seriesid", "sportid"] };
 
 const quote = (name) => `\`${name}\``;
 
