@@ -23,4 +23,15 @@ function csvIntegers(name, fallback = []) {
   return [...new Set(values)];
 }
 
-module.exports = { integer, boolean, csvIntegers };
+// mysql2 TLS options for `${prefix}_SSL`. Providers such as DigitalOcean sign the server
+// certificate with their own CA; `${prefix}_SSL_CA` names that CA file so the certificate is
+// still verified.
+function mysqlSsl(prefix) {
+  if (!boolean(`${prefix}_SSL`, false)) return {};
+  const caPath = process.env[`${prefix}_SSL_CA`];
+  return {
+    ssl: { rejectUnauthorized: true, ...(caPath ? { ca: require("node:fs").readFileSync(caPath, "utf8") } : {}) },
+  };
+}
+
+module.exports = { integer, boolean, csvIntegers, mysqlSsl };

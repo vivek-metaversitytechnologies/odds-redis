@@ -7,7 +7,7 @@ const crypto = require("node:crypto");
 const mysql = require("mysql2/promise");
 const { format } = require("mysql2");
 const mysqlTypeCast = require("./mysqlTypeCast");
-const { integer, boolean } = require("./env");
+const { integer, boolean, mysqlSsl } = require("./env");
 const logger = require("../utils/logger");
 
 const STATE = Symbol("mirrorState");
@@ -77,7 +77,7 @@ function getMirrorPool() {
     dateStrings: true,
     typeCast: mysqlTypeCast,
     // A mirror reached over the internet (e.g. Azure Database for MySQL) should be encrypted.
-    ...(boolean("MIRROR_DB_SSL", false) ? { ssl: { rejectUnauthorized: true } } : {}),
+    ...mysqlSsl("MIRROR_DB"),
   });
   return pool;
 }
